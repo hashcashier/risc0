@@ -92,6 +92,7 @@ where
                 StepMode::Parallel,
                 total_cycles as u32,
                 &raw_trace,
+                preflight.byte_reads(),
                 &ctrl,
                 &data,
                 &global,

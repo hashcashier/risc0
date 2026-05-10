@@ -43,9 +43,16 @@ _start:
     .option pop
     la sp, _stack_top
 
+    call zkvm_init_heap;
     call main;
 "#,
 );
+
+#[cfg(target_os = "zkvm")]
+#[no_mangle]
+pub unsafe extern "C" fn zkvm_init_heap() {
+    risc0_zkvm_platform::heap::init();
+}
 
 const ERR_FREED: &[u8] = b"error: sha256_state has not been initialized or has already been freed";
 

@@ -1,0 +1,10 @@
+{
+  "browserName": "chrome",
+  "goog:chromeOptions": {
+    "args": [
+      "enable-unsafe-webgpu",
+      "enable-features=Vulkan",
+      "use-angle=vulkan"
+    ]
+  }
+}

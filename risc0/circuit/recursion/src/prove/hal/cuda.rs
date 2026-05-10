@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::rc::Rc;
+use std::{collections::BTreeMap, rc::Rc};
 
 use anyhow::{bail, Result};
 use risc0_circuit_recursion_sys::{
@@ -64,6 +64,7 @@ impl<CH: CudaHash> CircuitWitnessGenerator<CudaHal<CH>> for CudaCircuitHal<CH> {
         mode: StepMode,
         total_cycles: u32,
         preflight: &RawPreflightTrace,
+        _byte_reads: &BTreeMap<usize, Vec<u32>>,
         ctrl: &CudaBuffer<BabyBearElem>,
         data: &CudaBuffer<BabyBearElem>,
         global: &CudaBuffer<BabyBearElem>,

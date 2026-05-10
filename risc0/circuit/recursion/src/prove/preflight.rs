@@ -112,6 +112,10 @@ impl Preflight {
         self.input.pop_front().unwrap()
     }
 
+    pub(crate) fn byte_reads(&self) -> &BTreeMap<usize, Vec<u32>> {
+        &self.byte_reads
+    }
+
     fn read_iop_header(&mut self, count: Fp, k_flip: Fp) {
         let count = count.as_u32() as usize;
         let k_flip = k_flip.as_u32();

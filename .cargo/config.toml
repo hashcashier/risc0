@@ -6,3 +6,13 @@ xtask-groth16 = "run --package xtask --no-default-features -F setup-groth16 -- s
 
 [build]
 rustflags = ["-Dclippy::all", "-Dwarnings"]
+
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "--cfg",
+  'getrandom_backend="wasm_js"',
+  "--cfg",
+  "web_sys_unstable_apis",
+  "-C",
+  "debuginfo=0",
+]

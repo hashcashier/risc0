@@ -163,6 +163,13 @@ impl<'a, T: Default + Clone> SyncSlice<'a, T> {
 
 impl<T: Default + Clone> CpuBuffer<T> {
     fn new(name: &'static str, size: usize) -> Self {
+        let elem_size = std::mem::size_of::<T>().max(1);
+        let max_len = isize::MAX as usize / elem_size;
+        assert!(
+            size <= max_len,
+            "CpuBuffer::new({name}) capacity overflow: len={size}, elem_size={elem_size}, type={}",
+            std::any::type_name::<T>()
+        );
         let buf = vec![T::default(); size];
         CpuBuffer {
             name,

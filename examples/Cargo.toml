@@ -4,6 +4,7 @@ members = [
   "bevy",
   "bls12_381",
   "bn254",
+  "browser-prove",
   "browser-verify",
   "c-guest/host",
   "c-guest/platform",

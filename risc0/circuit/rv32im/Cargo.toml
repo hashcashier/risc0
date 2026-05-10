@@ -101,4 +101,5 @@ std = [
   "risc0-zkp/std",
   "serde/std",
 ]
+webgpu = ["prove", "risc0-zkp/webgpu"]
 witgen_debug = []

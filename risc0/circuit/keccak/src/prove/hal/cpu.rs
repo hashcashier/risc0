@@ -215,3 +215,64 @@ pub fn keccak_prover() -> Result<Box<dyn KeccakProver>> {
     let circuit_hal = Rc::new(CpuCircuitHal);
     Ok(Box::new(KeccakProverImpl { hal, circuit_hal }))
 }
+
+#[cfg(test)]
+mod tests {
+    use risc0_core::field::baby_bear::BabyBear;
+    use risc0_zkp::{
+        core::hash::sha::Sha256HashSuite,
+        field::baby_bear::{BabyBearElem, BabyBearExtElem},
+        hal::{
+            cpu::{CpuBuffer, CpuHal},
+            AccumPreflight, CircuitHal,
+        },
+    };
+
+    use crate::zirgen::CircuitImpl;
+
+    use super::*;
+
+    struct PortableCircuitHal;
+
+    impl CircuitHal<CpuHal<BabyBear>> for PortableCircuitHal {
+        fn accumulate(
+            &self,
+            _preflight: &AccumPreflight,
+            _ctrl: &CpuBuffer<BabyBearElem>,
+            _io: &CpuBuffer<BabyBearElem>,
+            _data: &CpuBuffer<BabyBearElem>,
+            _mix: &CpuBuffer<BabyBearElem>,
+            _accum: &CpuBuffer<BabyBearElem>,
+            _steps: usize,
+        ) {
+            unimplemented!()
+        }
+
+        fn eval_check(
+            &self,
+            check: &CpuBuffer<BabyBearElem>,
+            groups: &[&CpuBuffer<BabyBearElem>],
+            globals: &[&CpuBuffer<BabyBearElem>],
+            poly_mix: BabyBearExtElem,
+            po2: usize,
+            steps: usize,
+        ) {
+            risc0_zkp::hal::portable::eval_check::<CpuHal<BabyBear>, CircuitImpl>(
+                &CircuitImpl,
+                check,
+                groups,
+                globals,
+                poly_mix,
+                po2,
+                steps,
+            );
+        }
+    }
+
+    #[test]
+    fn portable_eval_check_matches_cpu() {
+        const PO2: usize = 4;
+        let hal = CpuHal::new(Sha256HashSuite::new_suite());
+        crate::prove::testutil::eval_check(&hal, CpuCircuitHal, &hal, PortableCircuitHal, PO2);
+    }
+}

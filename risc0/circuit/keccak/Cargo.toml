@@ -63,3 +63,4 @@ prove = [
   "std",
 ]
 std = ["risc0-zkp/std", "risc0-binfmt/std"]
+webgpu = ["prove", "risc0-circuit-recursion/webgpu", "risc0-zkp/webgpu"]

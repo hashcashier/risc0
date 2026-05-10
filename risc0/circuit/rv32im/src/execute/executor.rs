@@ -12,12 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::{cell::RefCell, collections::BTreeSet, fmt::Debug, io::Read, rc::Rc};
+
+#[cfg(not(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown")))]
 use std::{
-    cell::RefCell,
-    collections::BTreeSet,
-    fmt::Debug,
-    io::Read,
-    rc::Rc,
     sync::mpsc::{sync_channel, SyncSender},
     thread::{self, ScopedJoinHandle},
 };
@@ -131,8 +129,58 @@ struct CreateSegmentRequest {
 }
 
 /// Maximum number of segments we can queue up before we block execution
+#[cfg(not(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown")))]
 const MAX_OUTSTANDING_SEGMENTS: usize = 5;
 
+fn create_segment(
+    existing_image: &mut MemoryImage,
+    req: CreateSegmentRequest,
+    callback: &mut impl FnMut(Segment) -> Result<()>,
+) -> Result<bool> {
+    let pre_digest = existing_image.image_id();
+    let partial_image = compute_partial_image(existing_image, req.page_indexes);
+
+    for (idx, page) in req.partial_image.pages {
+        existing_image.set_page(idx, page);
+    }
+    existing_image.update_digests();
+    let post_digest = existing_image.image_id();
+
+    let segment = Segment {
+        partial_image,
+        claim: Rv32imV2Claim {
+            pre_state: pre_digest,
+            post_state: post_digest,
+            input: req.input_digest,
+            output: req.output_digest,
+            terminate_state: req.terminate_state,
+            shutdown_cycle: None,
+        },
+        read_record: req.read_record,
+        write_record: req.write_record,
+        suspend_cycle: req.user_cycles,
+        paging_cycles: req.pager_cycles,
+        po2: req.po2,
+        index: req.index,
+        segment_threshold: req.segment_threshold,
+        povw_nonce: req.povw_nonce,
+    };
+
+    if let Some(dump_path) = req.dump_path {
+        tracing::error!("{segment:?}");
+
+        let bytes = segment.encode()?;
+        tracing::error!("serialized {} bytes", bytes.len());
+
+        std::fs::write(dump_path, bytes)?;
+        return Ok(false);
+    }
+
+    callback(segment)?;
+    Ok(true)
+}
+
+#[cfg(not(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown")))]
 fn create_segments(
     initial_image: MemoryImage,
     recv: std::sync::mpsc::Receiver<CreateSegmentRequest>,
@@ -142,46 +190,9 @@ fn create_segments(
     let initial_digest = existing_image.image_id();
 
     while let Ok(req) = recv.recv() {
-        let pre_digest = existing_image.image_id();
-        let partial_image = compute_partial_image(&mut existing_image, req.page_indexes);
-
-        for (idx, page) in req.partial_image.pages {
-            existing_image.set_page(idx, page);
-        }
-        existing_image.update_digests();
-        let post_digest = existing_image.image_id();
-
-        let segment = Segment {
-            partial_image,
-            claim: Rv32imV2Claim {
-                pre_state: pre_digest,
-                post_state: post_digest,
-                input: req.input_digest,
-                output: req.output_digest,
-                terminate_state: req.terminate_state,
-                shutdown_cycle: None,
-            },
-            read_record: req.read_record,
-            write_record: req.write_record,
-            suspend_cycle: req.user_cycles,
-            paging_cycles: req.pager_cycles,
-            po2: req.po2,
-            index: req.index,
-            segment_threshold: req.segment_threshold,
-            povw_nonce: req.povw_nonce,
-        };
-
-        if let Some(dump_path) = req.dump_path {
-            tracing::error!("{segment:?}");
-
-            let bytes = segment.encode()?;
-            tracing::error!("serialized {} bytes", bytes.len());
-
-            std::fs::write(dump_path, bytes)?;
+        if !create_segment(&mut existing_image, req, &mut callback)? {
             break;
         }
-
-        callback(segment)?;
     }
     Ok((initial_digest, existing_image.image_id(), existing_image))
 }
@@ -225,6 +236,192 @@ impl<'a, 'b, S: Syscall> Executor<'a, 'b, S> {
         let segment_limit: u32 = 1 << segment_po2;
         assert!(max_insn_cycles < segment_limit as usize);
         let segment_threshold = segment_limit - max_insn_cycles as u32;
+
+        #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+        {
+            return self.run_serial(
+                segment_po2,
+                segment_limit,
+                segment_threshold,
+                max_cycles,
+                callback,
+            );
+        }
+
+        #[cfg(not(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown")))]
+        {
+            let mut segment_counter = 0u32;
+
+            self.reset();
+
+            let mut emu = Emulator::new();
+            Risc0Machine::resume(self)?;
+
+            let (commit_sender, commit_recv) = sync_channel(MAX_OUTSTANDING_SEGMENTS - 1);
+
+            let initial_image = self.initial_image.clone();
+            let (initial_digest, post_digest, post_image) = thread::scope(|scope| {
+                let segment_callback_thread =
+                    scope.spawn(move || create_segments(initial_image, commit_recv, callback));
+
+                while self.terminate_state.is_none() {
+                    match max_cycles {
+                        CycleLimit::Hard(max_cycles) => {
+                            if self.cycles.user >= max_cycles {
+                                bail!(
+                                    "Session limit exceeded: {} >= {max_cycles}",
+                                    self.cycles.user
+                                );
+                            }
+                        }
+                        CycleLimit::Soft(max_cycles) => {
+                            if self.cycles.user >= max_cycles {
+                                break;
+                            }
+                        }
+                        CycleLimit::None => {}
+                    }
+
+                    if self.segment_cycles() > segment_threshold {
+                        tracing::debug!(
+                        "split(phys: {} + pager: {} + reserved: {RESERVED_CYCLES}) = {} >= {segment_threshold}",
+                        self.user_cycles,
+                        self.pager.cycles,
+                        self.segment_cycles()
+                    );
+
+                        assert!(
+                            self.segment_cycles() < segment_limit,
+                            "segment limit ({segment_limit}) too small for instruction at pc: {:?}",
+                            self.pc
+                        );
+                        Risc0Machine::suspend(self)?;
+
+                        let partial_image = self.pager.commit();
+
+                        let req = CreateSegmentRequest {
+                            partial_image,
+                            page_indexes: self.pager.page_indexes(),
+                            input_digest: self.input_digest,
+                            output_digest: self.output_digest,
+                            read_record: std::mem::take(&mut self.read_record),
+                            write_record: std::mem::take(&mut self.write_record),
+                            user_cycles: self.user_cycles,
+                            pager_cycles: self.pager.cycles,
+                            terminate_state: self.terminate_state,
+                            segment_threshold,
+                            po2: segment_po2 as u32,
+                            index: segment_counter as u64,
+                            dump_path: None,
+                            povw_nonce: self.povw_nonce(segment_counter),
+                        };
+                        if commit_sender.send(req).is_err() {
+                            return Err(segment_callback_thread.join().unwrap().unwrap_err());
+                        }
+
+                        // NOTE: There is no reasonable scenario where a session will have more than 4B
+                        // segments, but its possible.
+                        segment_counter = segment_counter
+                            .checked_add(1)
+                            .context("segment_counter overflow")?;
+                        let total_cycles = 1 << segment_po2;
+                        let pager_cycles = self.pager.cycles as u64;
+                        let user_cycles = self.user_cycles as u64;
+                        self.cycles.total += total_cycles;
+                        self.cycles.paging += pager_cycles;
+                        self.cycles.reserved += total_cycles - pager_cycles - user_cycles;
+                        self.user_cycles = 0;
+                        self.pager.reset();
+
+                        Risc0Machine::resume(self)?;
+                    }
+
+                    let result = Risc0Machine::step(&mut emu, self);
+
+                    if let Err(err) = result {
+                        self.dump();
+                        let result = self.dump_segment(
+                            commit_sender,
+                            segment_callback_thread,
+                            segment_po2,
+                            segment_threshold,
+                            segment_counter,
+                        );
+                        return Err(if let Err(inner) = result {
+                            err.context(inner)
+                        } else {
+                            err
+                        });
+                    }
+                }
+
+                Risc0Machine::suspend(self)?;
+
+                let final_cycles = self.segment_cycles().next_power_of_two();
+                let final_po2 = log2_ceil(final_cycles as usize);
+                let partial_image = self.pager.commit();
+                let req = CreateSegmentRequest {
+                    partial_image,
+                    page_indexes: self.pager.page_indexes(),
+                    input_digest: self.input_digest,
+                    output_digest: self.output_digest,
+                    read_record: std::mem::take(&mut self.read_record),
+                    write_record: std::mem::take(&mut self.write_record),
+                    user_cycles: self.user_cycles,
+                    pager_cycles: self.pager.cycles,
+                    terminate_state: self.terminate_state,
+                    segment_threshold: 0, // meaningless for final segment
+                    po2: final_po2 as u32,
+                    index: segment_counter as u64,
+                    dump_path: None,
+                    povw_nonce: self.povw_nonce(segment_counter),
+                };
+                if commit_sender.send(req).is_err() {
+                    return Err(segment_callback_thread.join().unwrap().unwrap_err());
+                }
+
+                let final_cycles = final_cycles as u64;
+                let user_cycles = self.user_cycles as u64;
+                let pager_cycles = self.pager.cycles as u64;
+                self.cycles.total += final_cycles;
+                self.cycles.paging += pager_cycles;
+                self.cycles.reserved += final_cycles - pager_cycles - user_cycles;
+
+                drop(commit_sender);
+
+                segment_callback_thread.join().unwrap()
+            })?;
+
+            let session_claim = Rv32imV2Claim {
+                pre_state: initial_digest,
+                post_state: post_digest,
+                input: self.input_digest,
+                output: self.output_digest,
+                terminate_state: self.terminate_state,
+                shutdown_cycle: None,
+            };
+
+            Ok(ExecutorResult {
+                segments: segment_counter as u64 + 1,
+                post_image,
+                user_cycles: self.cycles.user,
+                total_cycles: self.cycles.total,
+                paging_cycles: self.cycles.paging,
+                reserved_cycles: self.cycles.reserved,
+                claim: session_claim,
+            })
+        }
+    }
+
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    fn run_serial(
+        &mut self,
+        segment_po2: usize,
+        segment_limit: u32,
+        segment_threshold: u32,
+        max_cycles: CycleLimit,
+        mut callback: impl FnMut(Segment) -> Result<()> + Send,
+    ) -> Result<ExecutorResult> {
         let mut segment_counter = 0u32;
 
         self.reset();
@@ -232,140 +429,119 @@ impl<'a, 'b, S: Syscall> Executor<'a, 'b, S> {
         let mut emu = Emulator::new();
         Risc0Machine::resume(self)?;
 
-        let (commit_sender, commit_recv) = sync_channel(MAX_OUTSTANDING_SEGMENTS - 1);
+        let mut existing_image = self.initial_image.clone();
+        let initial_digest = existing_image.image_id();
 
-        let initial_image = self.initial_image.clone();
-        let (initial_digest, post_digest, post_image) = thread::scope(|scope| {
-            let segment_callback_thread =
-                scope.spawn(move || create_segments(initial_image, commit_recv, callback));
-
-            while self.terminate_state.is_none() {
-                match max_cycles {
-                    CycleLimit::Hard(max_cycles) => {
-                        if self.cycles.user >= max_cycles {
-                            bail!(
-                                "Session limit exceeded: {} >= {max_cycles}",
-                                self.cycles.user
-                            );
-                        }
+        while self.terminate_state.is_none() {
+            match max_cycles {
+                CycleLimit::Hard(max_cycles) => {
+                    if self.cycles.user >= max_cycles {
+                        bail!(
+                            "Session limit exceeded: {} >= {max_cycles}",
+                            self.cycles.user
+                        );
                     }
-                    CycleLimit::Soft(max_cycles) => {
-                        if self.cycles.user >= max_cycles {
-                            break;
-                        }
+                }
+                CycleLimit::Soft(max_cycles) => {
+                    if self.cycles.user >= max_cycles {
+                        break;
                     }
-                    CycleLimit::None => {}
                 }
-
-                if self.segment_cycles() > segment_threshold {
-                    tracing::debug!(
-                        "split(phys: {} + pager: {} + reserved: {RESERVED_CYCLES}) = {} >= {segment_threshold}",
-                        self.user_cycles,
-                        self.pager.cycles,
-                        self.segment_cycles()
-                    );
-
-                    assert!(
-                        self.segment_cycles() < segment_limit,
-                        "segment limit ({segment_limit}) too small for instruction at pc: {:?}",
-                        self.pc
-                    );
-                    Risc0Machine::suspend(self)?;
-
-                    let partial_image = self.pager.commit();
-
-                    let req = CreateSegmentRequest {
-                        partial_image,
-                        page_indexes: self.pager.page_indexes(),
-                        input_digest: self.input_digest,
-                        output_digest: self.output_digest,
-                        read_record: std::mem::take(&mut self.read_record),
-                        write_record: std::mem::take(&mut self.write_record),
-                        user_cycles: self.user_cycles,
-                        pager_cycles: self.pager.cycles,
-                        terminate_state: self.terminate_state,
-                        segment_threshold,
-                        po2: segment_po2 as u32,
-                        index: segment_counter as u64,
-                        dump_path: None,
-                        povw_nonce: self.povw_nonce(segment_counter),
-                    };
-                    if commit_sender.send(req).is_err() {
-                        return Err(segment_callback_thread.join().unwrap().unwrap_err());
-                    }
-
-                    // NOTE: There is no reasonable scenario where a session will have more than 4B
-                    // segments, but its possible.
-                    segment_counter = segment_counter
-                        .checked_add(1)
-                        .context("segment_counter overflow")?;
-                    let total_cycles = 1 << segment_po2;
-                    let pager_cycles = self.pager.cycles as u64;
-                    let user_cycles = self.user_cycles as u64;
-                    self.cycles.total += total_cycles;
-                    self.cycles.paging += pager_cycles;
-                    self.cycles.reserved += total_cycles - pager_cycles - user_cycles;
-                    self.user_cycles = 0;
-                    self.pager.reset();
-
-                    Risc0Machine::resume(self)?;
-                }
-
-                let result = Risc0Machine::step(&mut emu, self);
-
-                if let Err(err) = result {
-                    self.dump();
-                    let result = self.dump_segment(
-                        commit_sender,
-                        segment_callback_thread,
-                        segment_po2,
-                        segment_threshold,
-                        segment_counter,
-                    );
-                    return Err(if let Err(inner) = result {
-                        err.context(inner)
-                    } else {
-                        err
-                    });
-                }
+                CycleLimit::None => {}
             }
 
-            Risc0Machine::suspend(self)?;
+            if self.segment_cycles() > segment_threshold {
+                tracing::debug!(
+                    "split(phys: {} + pager: {} + reserved: {RESERVED_CYCLES}) = {} >= {segment_threshold}",
+                    self.user_cycles,
+                    self.pager.cycles,
+                    self.segment_cycles()
+                );
 
-            let final_cycles = self.segment_cycles().next_power_of_two();
-            let final_po2 = log2_ceil(final_cycles as usize);
-            let partial_image = self.pager.commit();
-            let req = CreateSegmentRequest {
-                partial_image,
-                page_indexes: self.pager.page_indexes(),
-                input_digest: self.input_digest,
-                output_digest: self.output_digest,
-                read_record: std::mem::take(&mut self.read_record),
-                write_record: std::mem::take(&mut self.write_record),
-                user_cycles: self.user_cycles,
-                pager_cycles: self.pager.cycles,
-                terminate_state: self.terminate_state,
-                segment_threshold: 0, // meaningless for final segment
-                po2: final_po2 as u32,
-                index: segment_counter as u64,
-                dump_path: None,
-                povw_nonce: self.povw_nonce(segment_counter),
-            };
-            if commit_sender.send(req).is_err() {
-                return Err(segment_callback_thread.join().unwrap().unwrap_err());
+                assert!(
+                    self.segment_cycles() < segment_limit,
+                    "segment limit ({segment_limit}) too small for instruction at pc: {:?}",
+                    self.pc
+                );
+                Risc0Machine::suspend(self)?;
+
+                let partial_image = self.pager.commit();
+
+                let req = CreateSegmentRequest {
+                    partial_image,
+                    page_indexes: self.pager.page_indexes(),
+                    input_digest: self.input_digest,
+                    output_digest: self.output_digest,
+                    read_record: std::mem::take(&mut self.read_record),
+                    write_record: std::mem::take(&mut self.write_record),
+                    user_cycles: self.user_cycles,
+                    pager_cycles: self.pager.cycles,
+                    terminate_state: self.terminate_state,
+                    segment_threshold,
+                    po2: segment_po2 as u32,
+                    index: segment_counter as u64,
+                    dump_path: None,
+                    povw_nonce: self.povw_nonce(segment_counter),
+                };
+                create_segment(&mut existing_image, req, &mut callback)?;
+
+                // NOTE: There is no reasonable scenario where a session will have more than 4B
+                // segments, but its possible.
+                segment_counter = segment_counter
+                    .checked_add(1)
+                    .context("segment_counter overflow")?;
+                let total_cycles = 1 << segment_po2;
+                let pager_cycles = self.pager.cycles as u64;
+                let user_cycles = self.user_cycles as u64;
+                self.cycles.total += total_cycles;
+                self.cycles.paging += pager_cycles;
+                self.cycles.reserved += total_cycles - pager_cycles - user_cycles;
+                self.user_cycles = 0;
+                self.pager.reset();
+
+                Risc0Machine::resume(self)?;
             }
 
-            let final_cycles = final_cycles as u64;
-            let user_cycles = self.user_cycles as u64;
-            let pager_cycles = self.pager.cycles as u64;
-            self.cycles.total += final_cycles;
-            self.cycles.paging += pager_cycles;
-            self.cycles.reserved += final_cycles - pager_cycles - user_cycles;
+            let result = Risc0Machine::step(&mut emu, self);
 
-            drop(commit_sender);
+            if let Err(err) = result {
+                self.dump();
+                return Err(err);
+            }
+        }
 
-            segment_callback_thread.join().unwrap()
-        })?;
+        Risc0Machine::suspend(self)?;
+
+        let final_cycles = self.segment_cycles().next_power_of_two();
+        let final_po2 = log2_ceil(final_cycles as usize);
+        let partial_image = self.pager.commit();
+        let req = CreateSegmentRequest {
+            partial_image,
+            page_indexes: self.pager.page_indexes(),
+            input_digest: self.input_digest,
+            output_digest: self.output_digest,
+            read_record: std::mem::take(&mut self.read_record),
+            write_record: std::mem::take(&mut self.write_record),
+            user_cycles: self.user_cycles,
+            pager_cycles: self.pager.cycles,
+            terminate_state: self.terminate_state,
+            segment_threshold: 0, // meaningless for final segment
+            po2: final_po2 as u32,
+            index: segment_counter as u64,
+            dump_path: None,
+            povw_nonce: self.povw_nonce(segment_counter),
+        };
+        create_segment(&mut existing_image, req, &mut callback)?;
+
+        let final_cycles = final_cycles as u64;
+        let user_cycles = self.user_cycles as u64;
+        let pager_cycles = self.pager.cycles as u64;
+        self.cycles.total += final_cycles;
+        self.cycles.paging += pager_cycles;
+        self.cycles.reserved += final_cycles - pager_cycles - user_cycles;
+
+        let post_digest = existing_image.image_id();
+        let post_image = existing_image;
 
         let session_claim = Rv32imV2Claim {
             pre_state: initial_digest,
@@ -398,6 +574,7 @@ impl<'a, 'b, S: Syscall> Executor<'a, 'b, S> {
         }
     }
 
+    #[cfg(not(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown")))]
     fn dump_segment<RetT>(
         &mut self,
         commit_sender: SyncSender<CreateSegmentRequest>,

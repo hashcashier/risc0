@@ -17,9 +17,14 @@ mod hal;
 mod tests;
 mod witgen;
 
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+use std::{cell::RefCell, rc::Rc};
+
 use anyhow::Result;
 use cfg_if::cfg_if;
 use risc0_core::scope;
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+use risc0_zkp::hal::webgpu::WebGpuHal;
 
 use crate::execute::segment::Segment;
 
@@ -44,7 +49,13 @@ pub trait SegmentProver {
 
 pub fn segment_prover() -> Result<Box<dyn SegmentProver>> {
     cfg_if! {
-        if #[cfg(feature = "cuda")] {
+        if #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))] {
+            if let Some(hal) = current_webgpu_hal() {
+                self::hal::webgpu::segment_prover(hal)
+            } else {
+                anyhow::bail!("segment_prover cannot synchronously initialize browser WebGPU")
+            }
+        } else if #[cfg(feature = "cuda")] {
             self::hal::cuda::segment_prover()
         // } else if #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), target_os = "ios"))] {
         // self::hal::metal::segment_prover(hashfn)
@@ -52,4 +63,38 @@ pub fn segment_prover() -> Result<Box<dyn SegmentProver>> {
             self::hal::cpu::segment_prover()
         }
     }
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn segment_prover_with_hal(hal: Rc<WebGpuHal>) -> Result<Box<dyn SegmentProver>> {
+    self::hal::webgpu::segment_prover(hal)
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+thread_local! {
+    static WEBGPU_HAL: RefCell<Option<Rc<WebGpuHal>>> = RefCell::new(None);
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn with_webgpu_hal<T>(hal: Rc<WebGpuHal>, f: impl FnOnce() -> T) -> T {
+    struct Reset(Option<Rc<WebGpuHal>>);
+
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            WEBGPU_HAL.with(|slot| {
+                slot.replace(self.0.take());
+            });
+        }
+    }
+
+    WEBGPU_HAL.with(|slot| {
+        let previous = slot.replace(Some(hal));
+        let _reset = Reset(previous);
+        f()
+    })
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+fn current_webgpu_hal() -> Option<Rc<WebGpuHal>> {
+    WEBGPU_HAL.with(|slot| slot.borrow().clone())
 }

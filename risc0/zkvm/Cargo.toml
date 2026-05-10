@@ -66,6 +66,11 @@ tracing = { version = "0.1", default-features = false, features = [
   "attributes",
 ] }
 
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+js-sys = { version = "0.3.77", optional = true }
+wasm-bindgen = { version = "0.2.100", optional = true }
+web-sys = { version = "0.3.77", optional = true, features = ["console"] }
+
 # Host dependencies
 [target.'cfg(not(target_os = "zkvm"))'.dependencies]
 addr2line = { version = "0.24.2", optional = true, features = [
@@ -218,4 +223,14 @@ std = [
   "sha2/std",
 ]
 unstable = ["risc0-zkvm-platform/unstable"]
+webgpu = [
+  "dep:js-sys",
+  "prove",
+  "risc0-circuit-keccak/webgpu",
+  "risc0-circuit-recursion/webgpu",
+  "risc0-circuit-rv32im/webgpu",
+  "risc0-zkp/webgpu",
+  "dep:wasm-bindgen",
+  "dep:web-sys",
+]
 witgen_debug = ["risc0-circuit-rv32im/witgen_debug"]

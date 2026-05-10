@@ -14,6 +14,8 @@
 
 use std::rc::Rc;
 
+use std::collections::BTreeMap;
+
 use anyhow::{bail, Result};
 use risc0_circuit_recursion_sys::{
     risc0_circuit_recursion_cpu_accum, risc0_circuit_recursion_cpu_eval_check,
@@ -54,6 +56,7 @@ impl CircuitWitnessGenerator<CpuHal> for CpuCircuitHal {
         mode: StepMode,
         total_cycles: u32,
         preflight: &RawPreflightTrace,
+        _byte_reads: &BTreeMap<usize, Vec<u32>>,
         ctrl: &CpuBuffer<BabyBearElem>,
         data: &CpuBuffer<BabyBearElem>,
         global: &CpuBuffer<BabyBearElem>,
@@ -174,4 +177,60 @@ pub(crate) fn recursion_prover(hashfn: &str) -> Result<Box<dyn RecursionProver>>
     let hal = Rc::new(CpuHal::new(suite));
     let circuit_hal = Rc::new(CpuCircuitHal);
     Ok(Box::new(RecursionProverImpl::new(hal, circuit_hal)))
+}
+
+#[cfg(test)]
+mod tests {
+    use risc0_zkp::{
+        core::hash::sha::Sha256HashSuite,
+        hal::{cpu::CpuBuffer, AccumPreflight, CircuitHal},
+    };
+
+    use crate::CircuitImpl;
+
+    use super::*;
+
+    struct PortableCircuitHal;
+
+    impl CircuitHal<CpuHal> for PortableCircuitHal {
+        fn accumulate(
+            &self,
+            _preflight: &AccumPreflight,
+            _ctrl: &CpuBuffer<BabyBearElem>,
+            _io: &CpuBuffer<BabyBearElem>,
+            _data: &CpuBuffer<BabyBearElem>,
+            _mix: &CpuBuffer<BabyBearElem>,
+            _accum: &CpuBuffer<BabyBearElem>,
+            _steps: usize,
+        ) {
+            unimplemented!()
+        }
+
+        fn eval_check(
+            &self,
+            check: &CpuBuffer<BabyBearElem>,
+            groups: &[&CpuBuffer<BabyBearElem>],
+            globals: &[&CpuBuffer<BabyBearElem>],
+            poly_mix: BabyBearExtElem,
+            po2: usize,
+            steps: usize,
+        ) {
+            risc0_zkp::hal::portable::eval_check::<CpuHal, CircuitImpl>(
+                &CircuitImpl::new(),
+                check,
+                groups,
+                globals,
+                poly_mix,
+                po2,
+                steps,
+            );
+        }
+    }
+
+    #[test]
+    fn portable_eval_check_matches_cpu() {
+        const PO2: usize = 4;
+        let hal = CpuHal::new(Sha256HashSuite::new_suite());
+        crate::testutil::eval_check(&hal, CpuCircuitHal, &hal, PortableCircuitHal, PO2);
+    }
 }

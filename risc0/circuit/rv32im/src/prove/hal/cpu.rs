@@ -226,3 +226,132 @@ pub fn segment_prover() -> Result<Box<dyn SegmentProver>> {
     };
     Ok(Box::new(SegmentProverImpl::new(hal_factory)))
 }
+
+#[cfg(test)]
+mod tests {
+    use rand::Rng;
+    use risc0_zkp::{
+        adapter::CircuitInfo as _,
+        core::hash::sha::Sha256HashSuite,
+        hal::{Buffer, Hal},
+        INV_RATE,
+    };
+
+    use super::*;
+    use crate::zirgen::{circuit::REGISTER_GROUP_CODE, taps::TAPSET, CircuitImpl};
+
+    struct PortableCircuitHal;
+
+    impl CircuitHal<CpuHal> for PortableCircuitHal {
+        fn eval_check(
+            &self,
+            check: &CpuBuffer<Val>,
+            groups: &[&CpuBuffer<Val>],
+            globals: &[&CpuBuffer<Val>],
+            poly_mix: ExtVal,
+            po2: usize,
+            steps: usize,
+        ) {
+            risc0_zkp::hal::portable::eval_check::<CpuHal, CircuitImpl>(
+                &CircuitImpl,
+                check,
+                groups,
+                globals,
+                poly_mix,
+                po2,
+                steps,
+            );
+        }
+
+        fn accumulate(
+            &self,
+            _preflight: &AccumPreflight,
+            _ctrl: &CpuBuffer<Val>,
+            _global: &CpuBuffer<Val>,
+            _data: &CpuBuffer<Val>,
+            _mix: &CpuBuffer<Val>,
+            _accum: &CpuBuffer<Val>,
+            _steps: usize,
+        ) {
+            unimplemented!()
+        }
+    }
+
+    struct EvalCheckParams {
+        po2: usize,
+        steps: usize,
+        domain: usize,
+        code: Vec<Val>,
+        data: Vec<Val>,
+        accum: Vec<Val>,
+        mix: Vec<Val>,
+        out: Vec<Val>,
+        poly_mix: ExtVal,
+    }
+
+    impl EvalCheckParams {
+        fn new(po2: usize) -> Self {
+            let mut rng = rand::rng();
+            let steps = 1 << po2;
+            let domain = steps * INV_RATE;
+            let code_size = TAPSET.group_size(REGISTER_GROUP_CODE);
+            let data_size = TAPSET.group_size(REGISTER_GROUP_DATA);
+            let accum_size = TAPSET.group_size(REGISTER_GROUP_ACCUM);
+            Self {
+                po2,
+                steps,
+                domain,
+                code: random_fps(&mut rng, code_size * domain),
+                data: random_fps(&mut rng, data_size * domain),
+                accum: random_fps(&mut rng, accum_size * domain),
+                mix: random_fps(&mut rng, CircuitImpl::MIX_SIZE),
+                out: random_fps(&mut rng, CircuitImpl::OUTPUT_SIZE),
+                poly_mix: ExtVal::random(&mut rng),
+            }
+        }
+    }
+
+    fn random_fps<E: Elem>(rng: &mut impl Rng, size: usize) -> Vec<E> {
+        let mut ret = Vec::new();
+        for _ in 0..size {
+            ret.push(E::random(rng));
+        }
+        ret
+    }
+
+    fn eval_check_impl<H, C>(params: &EvalCheckParams, hal: &H, circuit_hal: &C) -> Vec<H::Elem>
+    where
+        H: Hal<Elem = Val, ExtElem = ExtVal>,
+        C: CircuitHal<H>,
+    {
+        let check = hal.alloc_elem("check", ExtVal::EXT_SIZE * params.domain);
+        let code = hal.copy_from_elem("code", &params.code);
+        let data = hal.copy_from_elem("data", &params.data);
+        let accum = hal.copy_from_elem("accum", &params.accum);
+        let mix = hal.copy_from_elem("mix", &params.mix);
+        let out = hal.copy_from_elem("out", &params.out);
+        circuit_hal.eval_check(
+            &check,
+            &[&accum, &code, &data],
+            &[&mix, &out],
+            params.poly_mix,
+            params.po2,
+            params.steps,
+        );
+        let mut ret = vec![H::Elem::ZERO; check.size()];
+        check.view(|view| {
+            ret.clone_from_slice(view);
+        });
+        ret
+    }
+
+    #[test]
+    fn portable_eval_check_matches_cpu() {
+        const PO2: usize = 4;
+        let hal: CpuHal = CpuHal::new(Sha256HashSuite::new_suite());
+        let params = EvalCheckParams::new(PO2);
+        let check1 = eval_check_impl(&params, &hal, &CpuCircuitHal);
+        let check2 = eval_check_impl(&params, &hal, &PortableCircuitHal);
+        assert_eq!(check1, check2);
+    }
+}

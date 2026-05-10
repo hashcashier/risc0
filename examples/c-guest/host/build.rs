@@ -44,6 +44,9 @@ fn main() {
     }
 
     let gcc_path = cpp_toolchain().join("bin/riscv32-unknown-elf-gcc");
+    let rust_toolchain = rust_toolchain();
+    let cargo = rust_toolchain.join("bin/cargo");
+    let rustc = rust_toolchain.join("bin/rustc");
 
     let guest_dir = fs::canonicalize(env!("CARGO_MANIFEST_DIR"))
         .unwrap()
@@ -56,8 +59,8 @@ fn main() {
     println!("cargo:rerun-if-changed={}", guest_dir.display());
 
     // Build static lib of platform to link against.
-    let cargo = rust_toolchain().join("bin/cargo");
-    Command::new(cargo)
+    let status = Command::new(cargo)
+        .env("RUSTC", &rustc)
         .args([
             "rustc",
             "-p",
@@ -73,9 +76,13 @@ fn main() {
         .arg(guest_dir.join("out").join("platform"))
         .status()
         .unwrap();
+    assert!(
+        status.success(),
+        "failed to build zkvm-platform guest staticlib"
+    );
 
     // Build the C code using gcc
-    Command::new(gcc_path)
+    let status = Command::new(gcc_path)
         .arg("-nostartfiles")
         .arg(guest_dir.join("main.c"))
         .arg("-o")
@@ -94,4 +101,5 @@ fn main() {
         .arg(guest_dir.join("riscv32im-risc0-zkvm-elf.ld"))
         .status()
         .unwrap();
+    assert!(status.success(), "failed to build c-guest ELF");
 }

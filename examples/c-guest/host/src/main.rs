@@ -13,8 +13,11 @@
 // limitations under the License.
 
 use std::fs;
+use std::time::Instant;
 
-use risc0_zkvm::{compute_image_id, default_prover, ExecutorEnv};
+use risc0_binfmt::ProgramBinary;
+use risc0_zkos_v1compat::V1COMPAT_ELF;
+use risc0_zkvm::{compute_image_id, default_prover, ExecutorEnv, ProverOpts};
 
 fn main() -> anyhow::Result<()> {
     // Initialize tracing. In order to view logs, run `RUST_LOG=info cargo run`
@@ -24,7 +27,8 @@ fn main() -> anyhow::Result<()> {
 
     // Load built gcc program and compute it's image ID.
     // TODO have the image ID be calculated at compile time, to avoid potential vulnerabilities
-    let consensus_elf = fs::read("./guest/out/main")?;
+    let user_elf = fs::read("./guest/out/main")?;
+    let consensus_elf = ProgramBinary::new(&user_elf, V1COMPAT_ELF).encode();
     let consensus_id = compute_image_id(&consensus_elf)?;
 
     let env = ExecutorEnv::builder()
@@ -34,7 +38,14 @@ fn main() -> anyhow::Result<()> {
     let prover = default_prover();
 
     // Produce a receipt by proving the specified ELF binary.
-    let receipt = prover.prove(env, &consensus_elf)?.receipt;
+    let started = Instant::now();
+    let prove_info = prover.prove_with_opts(env, &consensus_elf, &ProverOpts::succinct())?;
+    let elapsed = started.elapsed();
+    println!(
+        "native_prove name=c-guest elapsed={elapsed:?} segments={} user_cycles={} total_cycles={}",
+        prove_info.stats.segments, prove_info.stats.user_cycles, prove_info.stats.total_cycles
+    );
+    let receipt = prove_info.receipt;
 
     // The default serialization for u32 is to (de)serialize as le bytes, so this will match
     // the format committed from the guest.

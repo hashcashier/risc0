@@ -20,6 +20,8 @@ mod tests;
 pub mod testutil;
 pub mod zkr;
 
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use anyhow::Result;
@@ -73,7 +75,13 @@ pub trait KeccakProver {
 
 pub fn keccak_prover() -> Result<Box<dyn KeccakProver>> {
     cfg_if! {
-        if #[cfg(feature = "cuda")] {
+        if #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))] {
+            if let Some(hal) = current_webgpu_hal() {
+                self::hal::webgpu::keccak_prover(hal)
+            } else {
+                anyhow::bail!("keccak_prover cannot synchronously initialize browser WebGPU")
+            }
+        } else if #[cfg(feature = "cuda")] {
             self::hal::cuda::keccak_prover()
         // } else if #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), target_os = "ios"))] {
         //     self::metal::keccak_prover()
@@ -81,6 +89,42 @@ pub fn keccak_prover() -> Result<Box<dyn KeccakProver>> {
             self::hal::cpu::keccak_prover()
         }
     }
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn keccak_prover_with_hal(
+    hal: Rc<risc0_zkp::hal::webgpu::WebGpuHal>,
+) -> Result<Box<dyn KeccakProver>> {
+    self::hal::webgpu::keccak_prover(hal)
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+thread_local! {
+    static WEBGPU_HAL: RefCell<Option<Rc<risc0_zkp::hal::webgpu::WebGpuHal>>> = RefCell::new(None);
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn with_webgpu_hal<T>(hal: Rc<risc0_zkp::hal::webgpu::WebGpuHal>, f: impl FnOnce() -> T) -> T {
+    struct Reset(Option<Rc<risc0_zkp::hal::webgpu::WebGpuHal>>);
+
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            WEBGPU_HAL.with(|slot| {
+                slot.replace(self.0.take());
+            });
+        }
+    }
+
+    WEBGPU_HAL.with(|slot| {
+        let previous = slot.replace(Some(hal));
+        let _reset = Reset(previous);
+        f()
+    })
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+fn current_webgpu_hal() -> Option<Rc<risc0_zkp::hal::webgpu::WebGpuHal>> {
+    WEBGPU_HAL.with(|slot| slot.borrow().clone())
 }
 
 pub(crate) struct KeccakProverImpl<H, C>

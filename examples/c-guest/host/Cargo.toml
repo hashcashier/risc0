@@ -5,7 +5,9 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
+risc0-binfmt = { path = "../../../risc0/binfmt" }
 risc0-zkvm = { path = "../../../risc0/zkvm" }
+risc0-zkos-v1compat = { path = "../../../risc0/zkos/v1compat" }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [build-dependencies]

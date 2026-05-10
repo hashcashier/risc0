@@ -15,6 +15,10 @@
 pub(crate) mod cpu;
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda;
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+mod rust_steps;
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) mod webgpu;
 
 use std::rc::Rc;
 

@@ -13,8 +13,14 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+use std::rc::Rc;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+use crate::host::server::session::SimpleSegmentRef;
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+use risc0_zkp::hal::webgpu::WebGpuHal;
 
 use super::{keccak::prove_keccak, ProverServer};
 use crate::{
@@ -23,7 +29,10 @@ use crate::{
         client::prove::opts::ReceiptKind,
         prove_info::ProveInfo,
         recursion::{identity_p254, join, lift, resolve},
-        server::{exec::executor::ExecutorImpl, prove::union_peak::UnionPeak},
+        server::{
+            exec::executor::ExecutorImpl,
+            prove::union_peak::UnionPeak,
+        },
     },
     mmr::MerkleMountainAccumulator,
     receipt::{InnerReceipt, SegmentReceipt, SuccinctReceipt},
@@ -37,15 +46,46 @@ use crate::{
     UnionClaim, Unknown, VerifierContext, WorkClaim,
 };
 
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+const WEBGPU_DEFAULT_SEGMENT_LIMIT_PO2: u32 = 18;
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+const WEBGPU_DEFAULT_KECCAK_MAX_PO2: u32 = 14;
+
 /// An implementation of a Prover that runs locally.
 pub struct ProverImpl {
     opts: ProverOpts,
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    webgpu_hal: Option<Rc<WebGpuHal>>,
 }
 
 impl ProverImpl {
     /// Construct a [ProverImpl].
     pub fn new(opts: ProverOpts) -> Self {
-        Self { opts }
+        Self {
+            opts,
+            #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+            webgpu_hal: None,
+        }
+    }
+
+    /// Construct a browser WebGPU [ProverImpl] from an initialized HAL.
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    pub fn new_webgpu(opts: ProverOpts, hal: Rc<WebGpuHal>) -> Self {
+        Self {
+            opts,
+            webgpu_hal: Some(hal),
+        }
+    }
+
+    fn segment_prover(&self) -> Result<Box<dyn risc0_circuit_rv32im::prove::SegmentProver>> {
+        #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+        {
+            if let Some(hal) = &self.webgpu_hal {
+                return risc0_circuit_rv32im::prove::segment_prover_with_hal(hal.clone());
+            }
+        }
+
+        risc0_circuit_rv32im::prove::segment_prover()
     }
 }
 
@@ -61,8 +101,29 @@ impl ProverServer for ProverImpl {
         ctx: &VerifierContext,
         elf: &[u8],
     ) -> Result<ProveInfo> {
-        let session = ExecutorImpl::from_elf(env, elf)?.run()?;
-        self.prove_session(ctx, &session)
+        #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+        {
+            let mut env = env;
+            env.segment_limit_po2 = Some(
+                env.segment_limit_po2
+                    .unwrap_or(WEBGPU_DEFAULT_SEGMENT_LIMIT_PO2)
+                    .min(WEBGPU_DEFAULT_SEGMENT_LIMIT_PO2),
+            );
+            env.keccak_max_po2 = Some(
+                env.keccak_max_po2
+                    .unwrap_or(WEBGPU_DEFAULT_KECCAK_MAX_PO2)
+                    .min(WEBGPU_DEFAULT_KECCAK_MAX_PO2),
+            );
+            let session = ExecutorImpl::from_elf(env, elf)?
+                .run_with_callback(|segment| Ok(Box::new(SimpleSegmentRef::new(segment))))?;
+            return self.prove_session(ctx, &session);
+        }
+
+        #[cfg(not(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown")))]
+        {
+            let session = ExecutorImpl::from_elf(env, elf)?.run()?;
+            self.prove_session(ctx, &session)
+        }
     }
 
     fn prove_session(&self, ctx: &VerifierContext, session: &Session) -> Result<ProveInfo> {
@@ -233,7 +294,7 @@ impl ProverServer for ProverImpl {
             segment.po2(),
             self.opts.max_segment_po2
         );
-        let inner = risc0_circuit_rv32im::prove::segment_prover()?.preflight(&segment.inner)?;
+        let inner = self.segment_prover()?.preflight(&segment.inner)?;
 
         Ok(PreflightResults {
             inner,
@@ -258,8 +319,7 @@ impl ProverServer for ProverImpl {
         );
 
         let po2 = preflight_results.inner.po2();
-        let seal =
-            risc0_circuit_rv32im::prove::segment_prover()?.prove_core(preflight_results.inner)?;
+        let seal = self.segment_prover()?.prove_core(preflight_results.inner)?;
         let mut claim = ReceiptClaim::decode_from_seal_v2(&seal, Some(po2))?;
         claim.output = preflight_results.output.into();
 

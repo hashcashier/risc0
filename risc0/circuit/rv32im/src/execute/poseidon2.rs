@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{bail, Result};
-use risc0_binfmt::WordAddr;
+use anyhow::{anyhow, bail, Result};
+use risc0_binfmt::{ByteAddr, WordAddr};
 use risc0_zkp::{
     core::{
         digest::DIGEST_WORDS,
@@ -279,6 +279,13 @@ fn sbox2(x: u32) -> u32 {
     x7 as u32
 }
 
+fn aligned_word_addr(addr: u32) -> Result<u32> {
+    ByteAddr(addr)
+        .waddr_aligned()
+        .map(|addr| addr.0)
+        .ok_or_else(|| anyhow!("Poseidon2 address {addr:#010x} is unaligned"))
+}
+
 pub(crate) struct Poseidon2;
 
 impl Poseidon2 {
@@ -288,6 +295,13 @@ impl Poseidon2 {
         let buf_in_addr = ctx.load_machine_register(LoadOp::Record, REG_A1)?;
         let buf_out_addr = ctx.load_machine_register(LoadOp::Record, REG_A2)?;
         let bits_count = ctx.load_machine_register(LoadOp::Record, REG_A3)?;
+        let state_addr = if state_addr == 0 {
+            0
+        } else {
+            aligned_word_addr(state_addr)?
+        };
+        let buf_in_addr = aligned_word_addr(buf_in_addr)?;
+        let buf_out_addr = aligned_word_addr(buf_out_addr)?;
         let mut p2 = Poseidon2State::new_ecall(state_addr, buf_in_addr, buf_out_addr, bits_count);
         p2.rest(ctx, CycleState::Decode)
     }

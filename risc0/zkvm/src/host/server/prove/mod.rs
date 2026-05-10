@@ -26,6 +26,8 @@ use std::rc::Rc;
 use anyhow::{anyhow, bail, ensure, Result};
 use risc0_core::field::baby_bear::{BabyBear, Elem, ExtElem};
 use risc0_groth16::prove::shrink_wrap;
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+use risc0_zkp::hal::webgpu::WebGpuHal;
 use risc0_zkp::hal::{CircuitHal, Hal};
 
 use self::{dev_mode::DevModeProver, prover_impl::ProverImpl};
@@ -421,4 +423,17 @@ pub fn get_prover_server(opts: &ProverOpts) -> Result<Rc<dyn ProverServer>> {
     }
 
     Ok(Rc::new(ProverImpl::new(opts.clone())))
+}
+
+/// Select a browser WebGPU prover server using an initialized WebGPU HAL.
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) fn get_webgpu_prover_server(
+    opts: &ProverOpts,
+    hal: Rc<WebGpuHal>,
+) -> Result<Rc<dyn ProverServer>> {
+    ensure!(
+        !opts.dev_mode(),
+        "browser WebGPU proving does not support dev-mode"
+    );
+    Ok(Rc::new(ProverImpl::new_webgpu(opts.clone(), hal)))
 }

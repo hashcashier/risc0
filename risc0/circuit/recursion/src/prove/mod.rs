@@ -22,6 +22,8 @@ mod program;
 mod witgen;
 pub mod zkr;
 
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+use std::cell::RefCell;
 use std::{collections::VecDeque, fmt::Debug, rc::Rc};
 
 use anyhow::Result;
@@ -81,7 +83,15 @@ pub trait RecursionProver {
 
 pub fn recursion_prover(hashfn: &str) -> Result<Box<dyn RecursionProver>> {
     cfg_if! {
-        if #[cfg(feature = "cuda")] {
+        if #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))] {
+            if let Some(hal) = current_webgpu_hal() {
+                let _ = hashfn;
+                self::hal::webgpu::recursion_prover(hal)
+            } else {
+                let _ = hashfn;
+                anyhow::bail!("recursion_prover cannot synchronously initialize browser WebGPU")
+            }
+        } else if #[cfg(feature = "cuda")] {
             self::hal::cuda::recursion_prover(hashfn)
         // } else if #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), target_os = "ios"))] {
         // self::hal::metal::recursion_prover(hashfn)
@@ -89,6 +99,42 @@ pub fn recursion_prover(hashfn: &str) -> Result<Box<dyn RecursionProver>> {
             self::hal::cpu::recursion_prover(hashfn)
         }
     }
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn recursion_prover_with_hal(
+    hal: Rc<risc0_zkp::hal::webgpu::WebGpuHal>,
+) -> Result<Box<dyn RecursionProver>> {
+    self::hal::webgpu::recursion_prover(hal)
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+thread_local! {
+    static WEBGPU_HAL: RefCell<Option<Rc<risc0_zkp::hal::webgpu::WebGpuHal>>> = RefCell::new(None);
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn with_webgpu_hal<T>(hal: Rc<risc0_zkp::hal::webgpu::WebGpuHal>, f: impl FnOnce() -> T) -> T {
+    struct Reset(Option<Rc<risc0_zkp::hal::webgpu::WebGpuHal>>);
+
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            WEBGPU_HAL.with(|slot| {
+                slot.replace(self.0.take());
+            });
+        }
+    }
+
+    WEBGPU_HAL.with(|slot| {
+        let previous = slot.replace(Some(hal));
+        let _reset = Reset(previous);
+        f()
+    })
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+fn current_webgpu_hal() -> Option<Rc<risc0_zkp::hal::webgpu::WebGpuHal>> {
+    WEBGPU_HAL.with(|slot| slot.borrow().clone())
 }
 
 /// Prover for the recursion circuit.

@@ -129,7 +129,6 @@ pub use {
         client::{
             env::{ExecutorEnv, ExecutorEnvBuilder},
             prove::{
-                default::DefaultProver,
                 default_executor, default_prover,
                 external::ExternalProver,
                 opts::{ProverOpts, ReceiptKind},
@@ -139,6 +138,20 @@ pub use {
     },
     risc0_circuit_rv32im::trace::{TraceCallback, TraceEvent},
 };
+
+#[cfg(not(target_os = "zkvm"))]
+#[cfg(feature = "client")]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub use self::host::client::prove::default::DefaultProver;
+
+#[cfg(not(target_os = "zkvm"))]
+#[cfg(feature = "client")]
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use self::host::client::prove::webgpu::{webgpu_prover, WebGpuProver};
+#[cfg(not(target_os = "zkvm"))]
+#[cfg(feature = "client")]
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use risc0_zkp::hal::webgpu::{WebGpuDiagnostics, WebGpuHal, WebGpuOpDiagnostics};
 
 /// TODO
 #[cfg(not(target_os = "zkvm"))]

@@ -16,6 +16,7 @@
 
 use core::fmt::Display;
 
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use puffin;
 
 #[doc(hidden)]
@@ -25,12 +26,22 @@ impl NvtxRange {
     #[doc(hidden)]
     #[inline]
     #[must_use]
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     pub fn new<M: Display>(msg: M) -> Self {
         nvtx::__private::_range_push(msg);
         Self
     }
+
+    #[doc(hidden)]
+    #[inline]
+    #[must_use]
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    pub fn new<M: Display>(_msg: M) -> Self {
+        Self
+    }
 }
 
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 impl Drop for NvtxRange {
     #[inline]
     fn drop(&mut self) {
@@ -39,6 +50,7 @@ impl Drop for NvtxRange {
 }
 
 /// Opens a scope.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 #[macro_export]
 macro_rules! scope {
     ($name:expr) => {
@@ -56,6 +68,7 @@ macro_rules! scope {
 }
 
 /// Opens a scope with a formatted message.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 #[macro_export]
 macro_rules! scope_with {
     ($name:expr, $data:expr) => {
@@ -68,6 +81,34 @@ macro_rules! scope_with {
         // Keep range alive while `$body` is evaluated.
         let _nvtx = $crate::perf::NvtxRange::new(::core::format_args!($name, $data));
         $crate::perf::puffin::profile_scope!($name, $data);
+        $body
+    }};
+}
+
+/// Opens a scope.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+#[macro_export]
+macro_rules! scope {
+    ($name:expr) => {
+        let _nvtx = $crate::perf::NvtxRange::new($name);
+    };
+
+    ($name:expr, $body:expr) => {{
+        let _nvtx = $crate::perf::NvtxRange::new($name);
+        $body
+    }};
+}
+
+/// Opens a scope with a formatted message.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+#[macro_export]
+macro_rules! scope_with {
+    ($name:expr, $data:expr) => {
+        let _nvtx = $crate::perf::NvtxRange::new(::core::format_args!($name, $data));
+    };
+
+    ($name:expr, $data:expr, $body:expr) => {{
+        let _nvtx = $crate::perf::NvtxRange::new(::core::format_args!($name, $data));
         $body
     }};
 }

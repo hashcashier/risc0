@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+
 use anyhow::Result;
 use risc0_circuit_recursion_sys::{RawPreflightTrace, StepMode};
 use risc0_zkp::hal::Hal;
@@ -19,6 +21,10 @@ use risc0_zkp::hal::Hal;
 pub(crate) mod cpu;
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda;
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+mod rust_kernels;
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) mod webgpu;
 // #[cfg(all(
 //     feature = "prove",
 //     any(all(target_os = "macos", target_arch = "aarch64"), target_os = "ios")
@@ -31,6 +37,7 @@ pub(crate) trait CircuitWitnessGenerator<H: Hal> {
         mode: StepMode,
         total_cycles: u32,
         preflight: &RawPreflightTrace,
+        byte_reads: &BTreeMap<usize, Vec<u32>>,
         ctrl: &H::Buffer<H::Elem>,
         data: &H::Buffer<H::Elem>,
         global: &H::Buffer<H::Elem>,

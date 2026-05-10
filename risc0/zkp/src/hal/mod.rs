@@ -20,6 +20,9 @@ pub mod cuda;
 pub mod dual;
 #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), target_os = "ios"))]
 pub mod metal;
+pub mod portable;
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub mod webgpu;
 
 use std::{
     fmt::Debug,
@@ -296,8 +299,8 @@ pub fn tracker() -> &'static Mutex<MemoryTracker> {
 
 #[derive(Debug, Default)]
 pub struct MemoryTracker {
-    pub total: isize,
-    pub peak: isize,
+    pub total: i64,
+    pub peak: i64,
 }
 
 impl MemoryTracker {
@@ -307,12 +310,31 @@ impl MemoryTracker {
     }
 
     pub fn alloc(&mut self, size: usize) {
-        self.total += size as isize;
+        self.total += size as i64;
         self.peak = self.peak.max(self.total);
     }
 
     pub fn free(&mut self, size: usize) {
-        self.total -= size as isize;
+        self.total -= size as i64;
+    }
+}
+
+#[cfg(test)]
+mod memory_tracker_tests {
+    use super::MemoryTracker;
+
+    #[test]
+    fn tracks_totals_above_32_bit_isize_max() {
+        let mut tracker = MemoryTracker::default();
+        let size = i32::MAX as usize + 1;
+
+        tracker.alloc(size);
+        tracker.alloc(size);
+        assert_eq!(tracker.total, size as i64 * 2);
+        assert_eq!(tracker.peak, size as i64 * 2);
+
+        tracker.free(size);
+        assert_eq!(tracker.total, size as i64);
     }
 }
 

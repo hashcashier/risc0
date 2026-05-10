@@ -820,6 +820,68 @@ dependencies = [
 ]
 
 [[package]]
+name = "browser-prove"
+version = "0.1.0"
+dependencies = [
+ "bevy-core",
+ "bevy-methods",
+ "bn254-core",
+ "bn254-methods",
+ "bytemuck",
+ "bytes",
+ "chess-core",
+ "chess-methods",
+ "composition-example-methods",
+ "console_error_panic_hook",
+ "digital-signature-core",
+ "digital-signature-methods",
+ "forust-ml",
+ "groth16-verifier-methods",
+ "hello-world-methods",
+ "hex",
+ "image",
+ "json-core",
+ "json-methods",
+ "jwt-core",
+ "jwt-methods",
+ "k256",
+ "k256-methods",
+ "keccak-methods",
+ "num-bigint 0.4.6",
+ "p256",
+ "p256-methods",
+ "password-checker-core",
+ "password-checker-methods",
+ "prorata-core",
+ "prorata-methods",
+ "risc0-bigint2-methods",
+ "risc0-binfmt",
+ "risc0-groth16",
+ "risc0-zkos-v1compat",
+ "risc0-zkp",
+ "risc0-zkvm",
+ "risc0-zkvm-methods",
+ "rmp-serde",
+ "rust_decimal",
+ "rzup",
+ "serde",
+ "serde_json",
+ "sha-methods",
+ "smartcore",
+ "smartcore-ml-methods",
+ "voting-machine-core",
+ "voting-machine-methods",
+ "waldo-core",
+ "waldo-methods",
+ "wasm-bindgen-test",
+ "wasm-methods",
+ "wat",
+ "wordle-core",
+ "wordle-methods",
+ "xgboost-methods",
+]
+
+[[package]]
 name = "browser-verify"
 version = "0.1.0"
 dependencies = [
@@ -923,7 +985,9 @@ name = "c-guest-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "risc0-binfmt",
  "risc0-build",
+ "risc0-zkos-v1compat",
  "risc0-zkvm",
  "rzup",
  "tracing-subscriber 0.3.19",
@@ -1224,6 +1288,16 @@ dependencies = [
  "once_cell",
  "unicode-width 0.2.1",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "console_error_panic_hook"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
+dependencies = [
+ "cfg-if",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -2937,9 +3011,9 @@ dependencies = [
 
 [[package]]
 name = "k256"
-version = "0.13.4"
+version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6e3919bbaa2945715f0bb6d3934a173d1e9a59ac23767fbaaef277265a7411b"
+checksum = "956ff9b67e26e1a6a866cb758f12c6f8746208489e3e4a4b5580802f2f0a587b"
 dependencies = [
  "cfg-if",
  "ecdsa",
@@ -4443,6 +4517,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3df6368f71f205ff9c33c076d170dd56ebf68e8161c733c0caa07a7a5509ed53"
 
 [[package]]
+name = "risc0-bigint2-methods"
+version = "3.0.0"
+dependencies = [
+ "risc0-build",
+]
+
+[[package]]
 name = "risc0-binfmt"
 version = "3.0.4"
 dependencies = [
@@ -4711,8 +4792,11 @@ dependencies = [
  "cust",
  "digest 0.10.7",
  "ff",
+ "getrandom 0.2.16",
+ "getrandom 0.3.3",
  "hex",
  "hex-literal",
+ "js-sys",
  "metal",
  "ndarray",
  "parking_lot",
@@ -4727,6 +4811,9 @@ dependencies = [
  "sha2",
  "stability",
  "tracing",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
@@ -4781,6 +4868,7 @@ dependencies = [
 name = "risc0-zkvm-methods"
 version = "3.0.0"
 dependencies = [
+ "bincode",
  "borsh",
  "ciborium",
  "postcard",

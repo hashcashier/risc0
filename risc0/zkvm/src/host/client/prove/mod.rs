@@ -14,11 +14,14 @@
 
 #[cfg(feature = "bonsai")]
 pub(crate) mod bonsai;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub(crate) mod default;
 pub(crate) mod external;
 #[cfg(feature = "prove")]
 pub(crate) mod local;
 pub(crate) mod opts;
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) mod webgpu;
 
 use core::ops::Deref;
 use std::{path::PathBuf, rc::Rc};
@@ -28,7 +31,9 @@ use anyhow::{anyhow, Result};
 #[cfg(feature = "bonsai")]
 use self::bonsai::BonsaiProver;
 
-use self::{default::DefaultProver, external::ExternalProver, opts::ProverOpts};
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+use self::default::DefaultProver;
+use self::{external::ExternalProver, opts::ProverOpts};
 
 use crate::{
     get_version, host::prove_info::ProveInfo, ExecutorEnv, Receipt, SessionInfo, VerifierContext,
@@ -180,10 +185,30 @@ pub trait Executor {
 ///   variables are set unless `RISC0_DEV_MODE` is enabled.
 /// * LocalProver if the `prove` feature flag is enabled.
 /// * [ExternalProver] otherwise.
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn default_prover() -> Rc<dyn Prover> {
+    unimplemented!(
+        "default_prover cannot synchronously initialize WebGPU; use webgpu_prover().await"
+    )
+}
+
+/// Return a default [Prover] based on environment variables and feature flags.
+///
+/// Browser builds require the `webgpu` feature and the async `webgpu_prover` constructor.
+#[cfg(all(not(feature = "webgpu"), target_arch = "wasm32", target_os = "unknown"))]
+pub fn default_prover() -> Rc<dyn Prover> {
+    unimplemented!("browser proving requires the webgpu feature and webgpu_prover().await")
+}
+
+/// Return a default [Prover] based on environment variables and feature flags.
+///
+/// See the WebGPU-specific overload above for browser WebGPU builds.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub fn default_prover() -> Rc<dyn Prover> {
     let explicit = std::env::var("RISC0_PROVER").unwrap_or_default();
     if !explicit.is_empty() {
         return match explicit.to_lowercase().as_str() {
+            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
             "actor" => Rc::new(DefaultProver::new(get_r0vm_path().unwrap()).unwrap()),
             #[cfg(feature = "bonsai")]
             "bonsai" => Rc::new(BonsaiProver::new("bonsai")),

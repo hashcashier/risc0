@@ -29,6 +29,10 @@ fn main() {
 
 fn build_cpu_kernels() {
     rerun_if_changed("kernels/cxx");
+    if target_is_browser_wasm() {
+        return;
+    }
+
     KernelBuild::new(KernelType::Cpp)
         .files(glob_paths("kernels/cxx/*.cpp"))
         .include(env::var("DEP_RISC0_SYS_CXX_ROOT").unwrap())
@@ -79,6 +83,11 @@ fn build_cuda_kernels() {
 
 fn rerun_if_changed<P: AsRef<Path>>(path: P) {
     println!("cargo:rerun-if-changed={}", path.as_ref().display());
+}
+
+fn target_is_browser_wasm() -> bool {
+    env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|arch| arch == "wasm32")
+        && env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "unknown")
 }
 
 fn glob_paths(pattern: &str) -> Vec<PathBuf> {
