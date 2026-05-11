@@ -106,11 +106,13 @@ Validated so far:
   BigInt, and raw BigInt fixtures
 - Focused async/GPU-authoritative `multi_test/poseidon2_basic` proving via
   `WebGpuProver::prove_with_opts_async`: the latest run produced a verified
-  succinct receipt in Chrome in 30.42s after a 426.538233ms native CUDA
-  baseline for the same 1-segment, 3598-user-cycle fixture. This run recorded
-  `eval_check` as 6 WebGPU dispatches and 0 CPU fallbacks. The rv32im check
-  uses the interpreted WebGPU path; recursion uses the same interpreter with
-  bounded chunk uploads for its oversized data group.
+  succinct receipt in Chrome in 4.03s after a 426.880871ms native CUDA
+  baseline for the same 1-segment, 3598-user-cycle fixture. Chrome negotiated
+  1 GiB buffer and storage-binding limits. This run recorded
+  `eval_check` as 2 WebGPU dispatches and 0 CPU fallbacks, `batch_evaluate_any`
+  as 8 GPU dispatches and 0 CPU fallbacks, and `mix_poly_coeffs` as 8 GPU
+  dispatches and 0 CPU fallbacks. The rv32im and recursion checks use the
+  interpreted WebGPU path.
 
 Still required before completion:
 
@@ -170,12 +172,14 @@ but the group is not complete: `multi_test/rsa_compat` and the full
 proof path before producing succinct receipts. A smaller `KeccakUnion(1)`
 diagnostic now passes as a standalone Chrome/WebGPU succinct proof after the
 async Keccak receipt union fix and async WebGPU Keccak subproof path:
-native CUDA completed the latest focused run in 7.495052818s with 4 segments,
-while Chrome/WebGPU completed the same 4-segment proof in 1372.79s. The run had
-9 pending Keccak proofs, 1 assumption, and `cpu_only_ops=0`. Batched Merkle
-query readbacks reduced it to 1314 readbacks and 237 CPU fallbacks, and it no
-longer reports `gather_sample` fallbacks in the FRI query path. The full
-`KeccakUnion(3)` fixture remains a focused performance blocker.
+native CUDA completed the latest focused run in 7.46676192s with 4 segments,
+while Chrome/WebGPU completed the same 4-segment proof in 441.14s after
+negotiating 1 GiB WebGPU buffer and storage-binding limits. The run had 9
+pending Keccak proofs, 1 assumption, and `cpu_only_ops=0`. All ZKP bulk ops
+except `scatter` had 0 CPU fallbacks; the remaining blocker is Keccak circuit
+`eval_check`, which still falls back 9 times because the generic interpreter
+needs 6741 FP slots. The full `KeccakUnion(3)` fixture remains a focused
+performance blocker.
 
 ## GPU-Authoritative Work
 

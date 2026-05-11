@@ -691,18 +691,6 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
                 .alloc_extelem_zeroed("combos", self.cycles * (combo_count + 1))
         );
 
-        {
-            let _timer = crate::hal::webgpu::WebGpuStageTimer::new("finalize_async coeff_sync");
-            for pg in self.groups.iter() {
-                pg.as_ref()
-                    .unwrap()
-                    .coeffs
-                    .sync_gpu_to_cpu(self.hal)
-                    .await?;
-            }
-            check_group.coeffs.sync_gpu_to_cpu(self.hal).await?;
-        }
-
         scope!("mix_poly_coeffs", {
             let _timer =
                 crate::hal::webgpu::WebGpuStageTimer::new("finalize_async mix_poly_coeffs");

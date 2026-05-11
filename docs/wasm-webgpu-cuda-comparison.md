@@ -12,6 +12,7 @@ runtime gap.
 All native baselines should be measured before browser runs with:
 
 ```bash
+RECURSION_SRC_PATH=/home/rami/repos/risc0/examples/target/release/build/risc0-circuit-recursion-4e96382f0d1db440/out/recursion_zkr.zip \
 RISC0_PROVER=local RISC0_EXECUTOR=local RISC0_INFO=1 RUST_LOG=info RISC0_PRINT_SEGMENTS=1
 ```
 
@@ -21,46 +22,46 @@ count and produce a succinct receipt that verifies with the existing verifier:
 
 | Path | API | Receipt | Segments | User cycles | Total cycles | Wall time |
 | --- | --- | --- | ---: | ---: | ---: | ---: |
-| Native CUDA | native local prover | Succinct | 1 | 3598 | 32768 | 426.538233ms |
-| Chrome/WASM/WebGPU | `WebGpuProver::prove_with_opts_async` | Succinct | 1 | 3598 | 32768 | 30.42s |
+| Native CUDA | native local prover | Succinct | 1 | 3598 | 32768 | 426.880871ms |
+| Chrome/WASM/WebGPU | `WebGpuProver::prove_with_opts_async` | Succinct | 1 | 3598 | 32768 | 4.03s |
 
 Browser stage telemetry for that run:
 
 | Browser stage | Time |
 | --- | ---: |
-| `execute` | 56ms |
-| `segment_preflight` | 22ms |
+| `execute` | 57ms |
+| `segment_preflight` | 24ms |
 | `rv32im_witgen` | 86ms |
-| `rv32im_accumulate` | 238ms |
+| `rv32im_accumulate` | 241ms |
 | `rv32im eval_check_interpreter_submit` | 1ms |
-| `segment_prove_core_async` | 995ms |
-| `verify_segment` | 13ms |
-| `recursion_witgen` | 204ms |
-| `recursion_accumulate` | 201ms |
-| `recursion chunked eval_check_interpreter_submit` | 5 dispatches |
-| `lift_prove_async` | 29.223s |
+| `segment_prove_core_async` | 969ms |
+| `verify_segment` | 14ms |
+| `recursion_witgen` | 203ms |
+| `recursion_accumulate` | 200ms |
+| `recursion eval_check_interpreter_submit` | 1 dispatch |
+| `lift_prove_async` | 2.878s |
 | `verify_lift` | 15ms |
-| `prove_session_async` | 30.282s |
+| `prove_session_async` | 3.913s |
 
 The same proof recorded mostly GPU-authoritative ZKP dispatches, with explicit
 readbacks and CPU fallbacks at the remaining compatibility boundaries:
 
 ```text
-gpu_dispatches=303 cpu_mirrors=12 cpu_fallbacks=8 cpu_only_ops=0
-uploads=725 upload_bytes=1042124836
+gpu_dispatches=306 cpu_mirrors=11 cpu_fallbacks=1 cpu_only_ops=0
+uploads=750 upload_bytes=444187604
 device_copies=8 device_copy_bytes=212208640
-readbacks=68 readback_bytes=122424608
-buffers=795 buffer_bytes=1862479004
+readbacks=62 readback_bytes=431840
+buffers=818 buffer_bytes=1738130508
 ```
 
 This latest run is correctness-positive for the interpreted circuit
 `eval_check` path: the proof still verifies, and the HAL operation counters
-now record `eval_check` as 6 WebGPU dispatches and 0 CPU fallbacks. The first
+now record `eval_check` as 2 WebGPU dispatches and 0 CPU fallbacks. Chrome
+granted 1 GiB `maxBufferSize` and `maxStorageBufferBindingSize`, so the
+recursion data group is now allocated and bound directly instead of being
+uploaded through bounded chunks. The first
 dispatch is the rv32im check (`domain=131072`, `instructions=20202`,
-`fp_slots=927`, `mix_slots=29`). The recursion data group is too large for one
-GPU buffer/binding (`536870912` bytes with a `125829120` byte binding cap), so
-the prototype uploads it in five chunks and dispatches the interpreter over
-those chunks.
+`fp_slots=927`, `mix_slots=29`).
 
 For the older `multi_test/libm` performance anchor, both paths also prove one
 segment with the same cycle count:
@@ -109,7 +110,7 @@ buffers=2032 buffer_bytes=1736647420
 | Guest execution | The guest executes in the browser WASM host executor. Execution is not the current bottleneck for small fixtures; `libm` execution measured 56ms. | The guest executes on the native host executor, then proof work is handed to CUDA-backed proving. |
 | Segment proof core | Uses the browser `rv32im` circuit HAL plus WebGPU ZKP HAL operations. The circuit path is browser-compatible Rust/WASM for witness and accumulation, with portable check evaluation where WebGPU circuit kernels are not yet present. | Uses generated CUDA circuit kernels for `rv32im` witness generation, accumulation, and `eval_check`, plus CUDA ZKP HAL kernels. |
 | Keccak proof core | Uses the browser `keccak` circuit HAL plus WebGPU ZKP HAL operations. Like `rv32im`, correctness is brought up through browser-compatible circuit code rather than generated CUDA kernels. | Uses generated CUDA Keccak witness and `eval_check` kernels plus CUDA ZKP HAL operations. |
-| Recursion proof core | Uses the browser recursion circuit HAL for lift, join, resolve, union, and identity. The async `poseidon2_basic` run now keeps ZKP commit/finalize and combo prepare/divide GPU-authoritative. The interpreted WebGPU `eval_check` path runs for both rv32im and recursion; recursion `group2` is uploaded through bounded chunks because the full group exceeds browser buffer/binding limits. | Uses generated CUDA recursion witness, accumulation, and `eval_check` kernels. The focused native CUDA proof, including compression to succinct, completes in 426.538233ms in the latest run. |
+| Recursion proof core | Uses the browser recursion circuit HAL for lift, join, resolve, union, and identity. The async `poseidon2_basic` run now keeps ZKP commit/finalize and combo prepare/divide GPU-authoritative. The interpreted WebGPU `eval_check` path runs for both rv32im and recursion; Chrome currently grants 1 GiB buffer and storage-binding limits, so the focused recursion data group binds directly. | Uses generated CUDA recursion witness, accumulation, and `eval_check` kernels. The focused native CUDA proof, including compression to succinct, completes in 426.880871ms in the latest run. |
 | ZKP HAL buffers | `WebGpuBuffer` owns a real `GPUBuffer` and tracks CPU-dirty vs CPU-stale state. The async public path can keep successful WebGPU outputs GPU-owned and materialize CPU shadows with explicit async readback. | CUDA buffers are device-resident. Circuit and ZKP kernels operate on device pointers; host visibility is explicit and much less frequent. |
 | ZKP HAL kernels | WebGPU kernels cover proof-critical bulk operations such as NTT, hashing, FRI fold, gather, scatter, mixing, copies, and prefix products. Current async diagnostics assert `cpu_only_ops == 0` and reduce CPU mirrors sharply, but some large storage-binding cases still fall back to CPU after explicit readback. | CUDA kernels are the authoritative execution path for bulk ZKP work, with no browser-style synchronous CPU shadow. |
 | Transcript and verification | Existing receipt assembly and verifier logic are reused. Internal `verify_segment`, `verify_lift`, and `verify_composite` timings are milliseconds and are not the blocker. | Existing receipt assembly and verifier logic are reused. Verification work is also not the dominant cost. |
@@ -126,9 +127,10 @@ exceed the conservative WebGPU storage-binding limit, and portable WASM circuit
 
 That explains the current diagnostics: `gpu_dispatches` is high,
 `cpu_only_ops` is zero, and `cpu_mirrors` is much lower than dispatches. The
-batched Merkle query path reduced the focused proof to 68 readbacks and 8 CPU
-fallbacks, but circuit checks and host-visible transcript boundaries still
-dominate wall time.
+batched Merkle query path plus bounded oversized `batch_evaluate_any` and
+chunked `mix_poly_coeffs` paths reduced the focused proof to 61 readbacks,
+2870560 readback bytes, and 6 CPU fallbacks. Circuit checks and oversized
+recursion-data uploads still dominate wall time.
 
 The second major gap is circuit-specific work. Native CUDA uses generated CUDA
 kernels for `rv32im`, `keccak`, and especially `recursion` witness,
@@ -141,15 +143,16 @@ finishes the entire succinct proof in about 436 milliseconds.
 
 Keccak-heavy fixtures amplify the same gap. The smaller
 `KeccakUnion(1)` diagnostic now proves and verifies as a Chrome/WebGPU
-succinct receipt after the async Keccak receipt union fix and async WebGPU
-Keccak subproof path, but it still takes 1372.79s versus a 7.495052818s native
-CUDA baseline for the same 4 segments, 9 pending Keccak proofs, and 1
-assumption. The async Keccak work reduced CPU mirrors from the prior 7659 to
-216, and batched Merkle query readbacks reduced CPU fallbacks to 237 and
-readbacks to 1314. The full `KeccakUnion(3)` fixture still exceeds the current
-browser runner budget: the latest run progressed through all 11 RV32IM
-segments and into the async Keccak/union proof tree before a 3600s
-timeout/SIGKILL.
+succinct receipt after the async Keccak receipt union fix, async WebGPU
+Keccak subproof path, and 1 GiB WebGPU limit negotiation. The latest verified
+run took 441.14s versus a 7.46676192s native CUDA baseline for the same 4
+segments, 9 pending Keccak proofs, and 1 assumption. All ZKP HAL bulk ops
+except `scatter` ran on WebGPU with zero CPU fallbacks; the remaining major
+cost is the Keccak circuit `eval_check`, which still falls back to portable
+WASM 9 times because the generic interpreter shape needs 6741 FP slots. The
+full `KeccakUnion(3)` fixture still exceeds the current browser runner budget:
+the latest run progressed through all 11 RV32IM segments and into the async
+Keccak/union proof tree before a 3600s timeout/SIGKILL.
 
 The portable `eval_check` loop now precomputes the zerofier inverse table for
 the `INV_RATE` expanded-domain residues instead of recomputing powers and
@@ -167,25 +170,25 @@ real recursion monolithic shader probe still lost the WebGPU device after
 about 128 seconds, so large straight-line shaders remain disabled. The current
 prototype instead uses a small interpreted WGSL program for large real
 definitions. A recursion CPU-equivalence smoke test passes in Chrome, and the
-latest focused proof verifies with `eval_check` recorded as 6 WebGPU dispatches
+latest focused proof verifies with `eval_check` recorded as 2 WebGPU dispatches
 and 0 CPU fallbacks. The rv32im interpreter path is fast enough for the
-focused segment proof. Recursion `group2` is still CPU-shadow sourced, but it
-is uploaded in bounded chunks and evaluated on WebGPU instead of running the
-portable recursion check.
+focused segment proof. With 1 GiB Chrome WebGPU limits, recursion `group2` now
+binds directly in the focused proof instead of being uploaded through bounded
+chunks.
 
-A split recursion `eval_check` prototype is also not production-ready. It
-showed that one recursion contribution needs 1603 FP dependencies, and the
-slot-reusing split shader still lost the Chrome WebGPU device after 486.20s on
-a `po2 = 0` reference-comparison smoke test. Real circuit `eval_check` now
-needs GPU-resident recursion data, then smaller semantic staging or
-circuit-specific kernels rather than larger straight-line WGSL chunks.
+A split `eval_check` prototype is also not production-ready. Earlier recursion
+experiments showed that one recursion contribution needs 1603 FP dependencies,
+and the slot-reusing split shader lost the Chrome WebGPU device after 486.20s
+on a `po2 = 0` reference-comparison smoke test. A later Keccak-only split
+attempt avoided the CPU fallback but deferred about 148s of GPU work into
+`check_group` and then lost the device. Real circuit `eval_check` needs smaller
+semantic staging or circuit-specific kernels rather than larger straight-line
+WGSL chunks.
 
-`mix_poly_coeffs` now has an async GPU-authoritative wrapper for STARK
-finalize. The prior one-line enablement failed because a later CPU fallback
-could read a stale CPU shadow after an earlier GPU accumulation. The async path
-materializes the accumulated output before CPU fallback, and the focused
-`poseidon2_basic` proof now records `mix_poly_coeffs` as 7 GPU dispatches and
-1 CPU fallback while still producing a verified succinct receipt.
+`mix_poly_coeffs` now has an async GPU-authoritative wrapper plus a chunked
+path for oversized input bindings. The focused `poseidon2_basic` proof now
+records `mix_poly_coeffs` as 8 GPU dispatches and 0 CPU fallbacks while still
+producing a verified succinct receipt.
 
 ## GPU-Authoritative Refactor Status
 

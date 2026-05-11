@@ -66,7 +66,10 @@ pub const WEBGPU_MAP_MODE_READ: u32 = 0x0001;
 const MAX_EXACT_JS_INTEGER: u64 = 1 << 53;
 const WEBGPU_WORKGROUP_SIZE: u32 = 256;
 const WEBGPU_MAX_WORKGROUPS_PER_DIMENSION: u32 = 65_535;
-const WEBGPU_SAFE_STORAGE_BINDING_BYTES: u64 = 120 * 1024 * 1024;
+const WEBGPU_REQUESTED_MAX_BUFFER_BYTES: u64 = 1024 * 1024 * 1024;
+const WEBGPU_REQUESTED_MAX_STORAGE_BINDING_BYTES: u64 = 1024 * 1024 * 1024;
+const WEBGPU_REQUESTED_MAX_WORKGROUP_STORAGE_BYTES: u32 = 32 * 1024;
+const WEBGPU_SAFE_STORAGE_BINDING_BYTES: u64 = 1024 * 1024 * 1024;
 const WEBGPU_SAFE_QUEUE_WRITE_BYTES: usize = 16 * 1024 * 1024;
 const WEBGPU_STORAGE_BUFFER_OFFSET_ALIGNMENT: u64 = 256;
 const WEBGPU_EVAL_CHECK_MAX_POLY_EXT_STEPS: usize = 4096;
@@ -74,9 +77,12 @@ const WEBGPU_EVAL_CHECK_ENABLE_SPLIT: bool = false;
 const WEBGPU_EVAL_CHECK_SPLIT_TERMS_PER_SHADER: usize = 64;
 const WEBGPU_EVAL_CHECK_SPLIT_FP_OPS_PER_SHADER: usize = 2048;
 const WEBGPU_EVAL_CHECK_MAX_FP_SLOTS: usize = 1536;
+const WEBGPU_EVAL_CHECK_MAX_FP_ELEM_SLOTS: usize = 8192;
+const WEBGPU_EVAL_CHECK_BASE_PRIVATE_MAX_FP_SLOTS: usize = 1536;
 const WEBGPU_EVAL_CHECK_MAX_MIX_SLOTS: usize = 64;
 const WEBGPU_EVAL_CHECK_INTERPRETER_WORKGROUP_SIZE: u32 = 32;
 const WEBGPU_EVAL_CHECK_INSTRUCTION_WORDS: usize = 8;
+const WEBGPU_BATCH_EVALUATE_CHUNK_SIZE: usize = 1024;
 
 const WEBGPU_EVAL_OP_CONST: u32 = 0;
 const WEBGPU_EVAL_OP_CONST_EXT: u32 = 1;
@@ -588,9 +594,11 @@ fn eval_check_mix_slot(slots: &[Option<usize>], var: usize) -> Result<usize> {
         .ok_or_else(|| anyhow!("poly_ext mix var {var} is not live"))
 }
 
-fn eval_check_interpreter_instructions(
+fn eval_check_interpreter_instructions_with_limit(
     taps: &TapSet<'_>,
     def: &PolyExtStepDef,
+    max_fp_slots: usize,
+    allow_const_ext: bool,
 ) -> Result<(Vec<u32>, usize, usize, usize)> {
     let tap_info: Vec<_> = taps
         .taps()
@@ -635,6 +643,10 @@ fn eval_check_interpreter_instructions(
                 }
             }
             PolyExtStep::ConstExt(x0, x1, x2, x3) => {
+                ensure!(
+                    allow_const_ext,
+                    "WebGPU base-field eval_check does not support extension constants"
+                );
                 let out_idx = fp_slots.len();
                 let out_slot = fp_alloc.alloc();
                 fp_slots.push(Some(out_slot));
@@ -853,10 +865,10 @@ fn eval_check_interpreter_instructions(
 
     let ret_slot = eval_check_mix_slot(&mix_slots, def.ret)?;
     ensure!(
-        fp_alloc.max <= WEBGPU_EVAL_CHECK_MAX_FP_SLOTS,
+        fp_alloc.max <= max_fp_slots,
         "WebGPU interpreted eval_check needs {} FP slots, max is {}",
         fp_alloc.max,
-        WEBGPU_EVAL_CHECK_MAX_FP_SLOTS
+        max_fp_slots
     );
     ensure!(
         mix_alloc.max <= WEBGPU_EVAL_CHECK_MAX_MIX_SLOTS,
@@ -866,6 +878,25 @@ fn eval_check_interpreter_instructions(
     );
 
     Ok((instructions, fp_alloc.max, mix_alloc.max, ret_slot))
+}
+
+fn eval_check_interpreter_instructions(
+    taps: &TapSet<'_>,
+    def: &PolyExtStepDef,
+) -> Result<(Vec<u32>, usize, usize, usize)> {
+    eval_check_interpreter_instructions_with_limit(taps, def, WEBGPU_EVAL_CHECK_MAX_FP_SLOTS, true)
+}
+
+fn eval_check_base_interpreter_instructions(
+    taps: &TapSet<'_>,
+    def: &PolyExtStepDef,
+) -> Result<(Vec<u32>, usize, usize, usize)> {
+    eval_check_interpreter_instructions_with_limit(
+        taps,
+        def,
+        WEBGPU_EVAL_CHECK_MAX_FP_ELEM_SLOTS,
+        false,
+    )
 }
 
 const EVAL_CHECK_WGSL_PREFIX: &str = r#"
@@ -978,6 +1009,15 @@ fn ext_mul(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
             mul(NBETA, mul(lhs.w, rhs.w)),
         ),
         add(add(add(mul(lhs.x, rhs.w), mul(lhs.y, rhs.z)), mul(lhs.z, rhs.y)), mul(lhs.w, rhs.x)),
+    );
+}
+
+fn ext_scale(lhs: vec4<u32>, rhs: u32) -> vec4<u32> {
+    return vec4<u32>(
+        mul(lhs.x, rhs),
+        mul(lhs.y, rhs),
+        mul(lhs.z, rhs),
+        mul(lhs.w, rhs),
     );
 }
 
@@ -1284,6 +1324,310 @@ fn build_eval_check_interpreter_wgsl(fp_slots: usize, mix_slots: usize) -> Strin
     EVAL_CHECK_INTERPRETER_WGSL
         .replace("{FP_SLOTS}", &fp_slots.max(1).to_string())
         .replace("{MIX_SLOTS}", &mix_slots.max(1).to_string())
+}
+
+const EVAL_CHECK_BASE_INTERPRETER_WGSL: &str = r#"
+const P: u32 = 2013265921u;
+const M: u32 = 2281701377u;
+const NBETA: u32 = 1073741848u;
+const INSTRUCTION_WORDS: u32 = 8u;
+const LINEAR_DISPATCH_STRIDE: u32 = {LINEAR_DISPATCH_STRIDE}u;
+
+struct ElemBuffer {
+    data: array<u32>,
+};
+
+struct Params {
+    check_base: u32,
+    group0_base: u32,
+    group1_base: u32,
+    group2_base: u32,
+    global0_base: u32,
+    global1_base: u32,
+    domain: u32,
+    instr_count: u32,
+    instr_base: u32,
+    mix_pows_base: u32,
+    ret_mix_slot: u32,
+    dispatch_count: u32,
+    cycle_base: u32,
+    group0_chunk_base: u32,
+    group0_chunk_rows: u32,
+    group1_chunk_base: u32,
+    group1_chunk_rows: u32,
+    group2_chunk_base: u32,
+    group2_chunk_rows: u32,
+    _pad0: u32,
+    invs: vec4<u32>,
+};
+
+@group(0) @binding(0) var<storage, read_write> check: ElemBuffer;
+@group(0) @binding(1) var<storage, read> group0: ElemBuffer;
+@group(0) @binding(2) var<storage, read> group1: ElemBuffer;
+@group(0) @binding(3) var<storage, read> group2: ElemBuffer;
+@group(0) @binding(4) var<storage, read> global0: ElemBuffer;
+@group(0) @binding(5) var<storage, read> global1: ElemBuffer;
+@group(0) @binding(6) var<storage, read> instrs: ElemBuffer;
+@group(0) @binding(7) var<storage, read> mix_pows: ElemBuffer;
+@group(0) @binding(8) var<uniform> params: Params;
+
+{BASE_SCRATCH_DECLS}
+
+fn add(lhs: u32, rhs: u32) -> u32 {
+    let sum = lhs + rhs;
+    if (sum >= P) {
+        return sum - P;
+    }
+    return sum;
+}
+
+fn sub(lhs: u32, rhs: u32) -> u32 {
+    if (lhs >= rhs) {
+        return lhs - rhs;
+    }
+    return lhs + P - rhs;
+}
+
+fn mul_wide(lhs: u32, rhs: u32) -> vec2<u32> {
+    let lhs_lo = lhs & 0xffffu;
+    let lhs_hi = lhs >> 16u;
+    let rhs_lo = rhs & 0xffffu;
+    let rhs_hi = rhs >> 16u;
+
+    let p0 = lhs_lo * rhs_lo;
+    let p1 = lhs_hi * rhs_lo;
+    let p2 = lhs_lo * rhs_hi;
+    let p3 = lhs_hi * rhs_hi;
+
+    let carry = (p0 >> 16u) + (p1 & 0xffffu) + (p2 & 0xffffu);
+    let lo = (p0 & 0xffffu) | ((carry & 0xffffu) << 16u);
+    let hi = p3 + (p1 >> 16u) + (p2 >> 16u) + (carry >> 16u);
+    return vec2<u32>(lo, hi);
+}
+
+fn mul(lhs: u32, rhs: u32) -> u32 {
+    let product = mul_wide(lhs, rhs);
+    let low = 0u - product.x;
+    let red = M * low;
+    let red_product = mul_wide(red, P);
+    var ret = product.y + red_product.y;
+    if (product.x + red_product.x < product.x) {
+        ret = ret + 1u;
+    }
+    if (ret >= P) {
+        return ret - P;
+    }
+    return ret;
+}
+
+fn ext_add(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        add(lhs.x, rhs.x),
+        add(lhs.y, rhs.y),
+        add(lhs.z, rhs.z),
+        add(lhs.w, rhs.w),
+    );
+}
+
+fn ext_mul(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        add(
+            mul(lhs.x, rhs.x),
+            mul(NBETA, add(add(mul(lhs.y, rhs.w), mul(lhs.z, rhs.z)), mul(lhs.w, rhs.y))),
+        ),
+        add(
+            add(mul(lhs.x, rhs.y), mul(lhs.y, rhs.x)),
+            mul(NBETA, add(mul(lhs.z, rhs.w), mul(lhs.w, rhs.z))),
+        ),
+        add(
+            add(add(mul(lhs.x, rhs.z), mul(lhs.y, rhs.y)), mul(lhs.z, rhs.x)),
+            mul(NBETA, mul(lhs.w, rhs.w)),
+        ),
+        add(add(add(mul(lhs.x, rhs.w), mul(lhs.y, rhs.z)), mul(lhs.z, rhs.y)), mul(lhs.w, rhs.x)),
+    );
+}
+
+fn ext_scale(lhs: vec4<u32>, rhs: u32) -> vec4<u32> {
+    return vec4<u32>(
+        mul(lhs.x, rhs),
+        mul(lhs.y, rhs),
+        mul(lhs.z, rhs),
+        mul(lhs.w, rhs),
+    );
+}
+
+fn instr_word(op_idx: u32, word_idx: u32) -> u32 {
+    return instrs.data[params.instr_base + op_idx * INSTRUCTION_WORDS + word_idx];
+}
+
+fn load_mix_pow(mix_idx: u32) -> vec4<u32> {
+    let base = params.mix_pows_base + mix_idx * 4u;
+    return vec4<u32>(
+        mix_pows.data[base + 0u],
+        mix_pows.data[base + 1u],
+        mix_pows.data[base + 2u],
+        mix_pows.data[base + 3u],
+    );
+}
+
+fn zerofier_inv(idx: u32) -> u32 {
+    switch (idx & 3u) {
+        case 0u: { return params.invs.x; }
+        case 1u: { return params.invs.y; }
+        case 2u: { return params.invs.z; }
+        default: { return params.invs.w; }
+    }
+}
+
+@compute @workgroup_size({WORKGROUP_SIZE})
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let local_cycle = gid.x + gid.y * LINEAR_DISPATCH_STRIDE;
+    if (local_cycle >= params.dispatch_count) {
+        return;
+    }
+    let cycle = params.cycle_base + local_cycle;
+    if (cycle >= params.domain) {
+        return;
+    }
+
+{BASE_LOCAL_DECLS}
+
+    for (var op_idx = 0u; op_idx < params.instr_count; op_idx = op_idx + 1u) {
+        let op = instr_word(op_idx, 0u);
+        switch (op) {
+            case 0u: {
+                fp[instr_word(op_idx, 1u)] = instr_word(op_idx, 2u);
+            }
+            case 2u: {
+                let out = instr_word(op_idx, 1u);
+                let group_id = instr_word(op_idx, 2u);
+                let offset = instr_word(op_idx, 3u);
+                let back = instr_word(op_idx, 4u);
+                let row = (cycle + params.domain - (back % params.domain)) % params.domain;
+                var value = 0u;
+                if (group_id == 0u) {
+                    let local_row =
+                        (row + params.domain - (params.group0_chunk_base % params.domain)) %
+                        params.domain;
+                    value = group0.data[
+                        params.group0_base + offset * params.group0_chunk_rows + local_row
+                    ];
+                } else if (group_id == 1u) {
+                    let local_row =
+                        (row + params.domain - (params.group1_chunk_base % params.domain)) %
+                        params.domain;
+                    value = group1.data[
+                        params.group1_base + offset * params.group1_chunk_rows + local_row
+                    ];
+                } else {
+                    let local_row =
+                        (row + params.domain - (params.group2_chunk_base % params.domain)) %
+                        params.domain;
+                    value = group2.data[
+                        params.group2_base + offset * params.group2_chunk_rows + local_row
+                    ];
+                }
+                fp[out] = value;
+            }
+            case 3u: {
+                let out = instr_word(op_idx, 1u);
+                let arg = instr_word(op_idx, 2u);
+                let offset = instr_word(op_idx, 3u);
+                var value = 0u;
+                if (arg == 0u) {
+                    value = global0.data[params.global0_base + offset];
+                } else {
+                    value = global1.data[params.global1_base + offset];
+                }
+                fp[out] = value;
+            }
+            case 4u: {
+                fp[instr_word(op_idx, 1u)] =
+                    add(fp[instr_word(op_idx, 2u)], fp[instr_word(op_idx, 3u)]);
+            }
+            case 5u: {
+                fp[instr_word(op_idx, 1u)] =
+                    sub(fp[instr_word(op_idx, 2u)], fp[instr_word(op_idx, 3u)]);
+            }
+            case 6u: {
+                fp[instr_word(op_idx, 1u)] =
+                    mul(fp[instr_word(op_idx, 2u)], fp[instr_word(op_idx, 3u)]);
+            }
+            case 7u: {
+                let out = instr_word(op_idx, 1u);
+                mix_tot[out] = vec4<u32>(0u, 0u, 0u, 0u);
+                mix_mul[out] = load_mix_pow(instr_word(op_idx, 2u));
+            }
+            case 8u: {
+                let out = instr_word(op_idx, 1u);
+                let chain = instr_word(op_idx, 2u);
+                let inner = instr_word(op_idx, 3u);
+                mix_tot[out] = ext_add(mix_tot[chain], ext_scale(mix_mul[chain], fp[inner]));
+                mix_mul[out] = load_mix_pow(instr_word(op_idx, 4u));
+            }
+            case 9u: {
+                let out = instr_word(op_idx, 1u);
+                let chain = instr_word(op_idx, 2u);
+                let cond = instr_word(op_idx, 3u);
+                let inner = instr_word(op_idx, 4u);
+                mix_tot[out] = ext_add(
+                    mix_tot[chain],
+                    ext_scale(ext_mul(mix_tot[inner], mix_mul[chain]), fp[cond]),
+                );
+                mix_mul[out] = load_mix_pow(instr_word(op_idx, 5u));
+            }
+            default: {}
+        }
+    }
+
+    let result = ext_scale(mix_tot[params.ret_mix_slot], zerofier_inv(cycle));
+    check.data[params.check_base + 0u * params.domain + cycle] = result.x;
+    check.data[params.check_base + 1u * params.domain + cycle] = result.y;
+    check.data[params.check_base + 2u * params.domain + cycle] = result.z;
+    check.data[params.check_base + 3u * params.domain + cycle] = result.w;
+}
+"#;
+
+fn build_eval_check_base_interpreter_wgsl(
+    fp_slots: usize,
+    mix_slots: usize,
+    private_parallel: bool,
+) -> String {
+    let fp_slots = fp_slots.max(1);
+    let mix_slots = mix_slots.max(1);
+    let scratch_decls = if private_parallel {
+        String::new()
+    } else {
+        format!(
+            "var<workgroup> fp: array<u32, {fp_slots}>;\nvar<workgroup> mix_tot: array<vec4<u32>, {mix_slots}>;\nvar<workgroup> mix_mul: array<vec4<u32>, {mix_slots}>;"
+        )
+    };
+    let local_decls = if private_parallel {
+        format!(
+            "    var fp: array<u32, {fp_slots}>;\n    var mix_tot: array<vec4<u32>, {mix_slots}>;\n    var mix_mul: array<vec4<u32>, {mix_slots}>;"
+        )
+    } else {
+        String::new()
+    };
+    let (workgroup_size, linear_dispatch_stride) = if private_parallel {
+        (
+            WEBGPU_EVAL_CHECK_INTERPRETER_WORKGROUP_SIZE,
+            WEBGPU_EVAL_CHECK_INTERPRETER_WORKGROUP_SIZE * WEBGPU_MAX_WORKGROUPS_PER_DIMENSION,
+        )
+    } else {
+        (1, WEBGPU_MAX_WORKGROUPS_PER_DIMENSION)
+    };
+
+    EVAL_CHECK_BASE_INTERPRETER_WGSL
+        .replace("{FP_SLOTS}", &fp_slots.to_string())
+        .replace("{MIX_SLOTS}", &mix_slots.to_string())
+        .replace("{BASE_SCRATCH_DECLS}", &scratch_decls)
+        .replace("{BASE_LOCAL_DECLS}", &local_decls)
+        .replace("{WORKGROUP_SIZE}", &workgroup_size.to_string())
+        .replace(
+            "{LINEAR_DISPATCH_STRIDE}",
+            &linear_dispatch_stride.to_string(),
+        )
 }
 
 #[allow(dead_code)]
@@ -2028,6 +2372,8 @@ pub struct WebGpuDiagnostics {
     pub cpu_fallbacks: u64,
     pub cpu_only_ops: u64,
     pub ops: Vec<WebGpuOpDiagnostics>,
+    pub upload_sources: Vec<WebGpuUploadDiagnostics>,
+    pub readback_sources: Vec<WebGpuReadbackDiagnostics>,
 }
 
 /// Per-operation WebGPU HAL backend usage.
@@ -2040,12 +2386,40 @@ pub struct WebGpuOpDiagnostics {
     pub cpu_only_ops: u64,
 }
 
+/// Per-buffer WebGPU host-to-device upload usage.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WebGpuUploadDiagnostics {
+    pub name: &'static str,
+    pub uploads: u64,
+    pub upload_bytes: u64,
+}
+
+/// Per-buffer WebGPU readback usage.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WebGpuReadbackDiagnostics {
+    pub name: &'static str,
+    pub readbacks: u64,
+    pub readback_bytes: u64,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct WebGpuOpStats {
     gpu_dispatches: u64,
     cpu_mirrors: u64,
     cpu_fallbacks: u64,
     cpu_only_ops: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct WebGpuUploadStats {
+    uploads: u64,
+    upload_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct WebGpuReadbackStats {
+    readbacks: u64,
+    readback_bytes: u64,
 }
 
 #[derive(Debug, Default)]
@@ -2063,6 +2437,8 @@ struct WebGpuDiagnosticsState {
     cpu_fallbacks: Cell<u64>,
     cpu_only_ops: Cell<u64>,
     ops: RefCell<BTreeMap<&'static str, WebGpuOpStats>>,
+    upload_sources: RefCell<BTreeMap<&'static str, WebGpuUploadStats>>,
+    readback_sources: RefCell<BTreeMap<&'static str, WebGpuReadbackStats>>,
 }
 
 impl WebGpuDiagnosticsState {
@@ -2092,6 +2468,26 @@ impl WebGpuDiagnosticsState {
                     cpu_only_ops: stats.cpu_only_ops,
                 })
                 .collect(),
+            upload_sources: self
+                .upload_sources
+                .borrow()
+                .iter()
+                .map(|(&name, stats)| WebGpuUploadDiagnostics {
+                    name,
+                    uploads: stats.uploads,
+                    upload_bytes: stats.upload_bytes,
+                })
+                .collect(),
+            readback_sources: self
+                .readback_sources
+                .borrow()
+                .iter()
+                .map(|(&name, stats)| WebGpuReadbackDiagnostics {
+                    name,
+                    readbacks: stats.readbacks,
+                    readback_bytes: stats.readback_bytes,
+                })
+                .collect(),
         }
     }
 
@@ -2109,6 +2505,8 @@ impl WebGpuDiagnosticsState {
         self.cpu_fallbacks.set(0);
         self.cpu_only_ops.set(0);
         self.ops.borrow_mut().clear();
+        self.upload_sources.borrow_mut().clear();
+        self.readback_sources.borrow_mut().clear();
     }
 
     fn add(cell: &Cell<u64>, value: u64) {
@@ -2125,9 +2523,13 @@ impl WebGpuDiagnosticsState {
         Self::add(&self.bytes_allocated, byte_len);
     }
 
-    fn record_upload(&self, byte_len: u64) {
+    fn record_upload(&self, name: &'static str, byte_len: u64) {
         Self::add(&self.host_to_gpu_uploads, 1);
         Self::add(&self.host_to_gpu_bytes, byte_len);
+        let mut uploads = self.upload_sources.borrow_mut();
+        let stats = uploads.entry(name).or_default();
+        stats.uploads = stats.uploads.saturating_add(1);
+        stats.upload_bytes = stats.upload_bytes.saturating_add(byte_len);
     }
 
     fn record_device_copy(&self, byte_len: u64) {
@@ -2135,9 +2537,13 @@ impl WebGpuDiagnosticsState {
         Self::add(&self.device_copy_bytes, byte_len);
     }
 
-    fn record_readback(&self, byte_len: u64) {
+    fn record_readback(&self, name: &'static str, byte_len: u64) {
         Self::add(&self.readbacks, 1);
         Self::add(&self.readback_bytes, byte_len);
+        let mut readbacks = self.readback_sources.borrow_mut();
+        let stats = readbacks.entry(name).or_default();
+        stats.readbacks = stats.readbacks.saturating_add(1);
+        stats.readback_bytes = stats.readback_bytes.saturating_add(byte_len);
     }
 
     fn record_gpu_dispatch(&self, name: &'static str) {
@@ -3490,8 +3896,8 @@ struct Params {
     coeffs_base: u32,
     which_base: u32,
     xs_base: u32,
-    _pad0: u32,
-    _pad1: u32,
+    eval_base: u32,
+    poly_stride: u32,
 };
 
 @group(0) @binding(0) var<storage, read_write> output: ElemBuffer;
@@ -3612,13 +4018,14 @@ fn store_output(elem_idx: u32, value: vec4<u32>) {
 fn main(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {
-    let eval_idx = gid.x;
-    if (eval_idx >= params.eval_count) {
+    let local_eval_idx = gid.x;
+    if (local_eval_idx >= params.eval_count) {
         return;
     }
 
+    let eval_idx = params.eval_base + local_eval_idx;
     let poly_id = which.data[params.which_base + eval_idx];
-    let cur_poly = params.coeffs_base + poly_id * params.deg;
+    let cur_poly = params.coeffs_base + poly_id * params.poly_stride;
     let x = load_ext(params.xs_base, eval_idx);
     var pow_x = vec4<u32>(MONT_ONE, 0u, 0u, 0u);
     var total = vec4<u32>(0u, 0u, 0u, 0u);
@@ -3628,6 +4035,196 @@ fn main(
         pow_x = ext_mul(pow_x, x);
     }
     store_output(eval_idx, total);
+}
+"#;
+
+const BATCH_EVALUATE_ANY_SLICE_PARTIAL_WGSL: &str = r#"
+const P: u32 = 2013265921u;
+const M: u32 = 2281701377u;
+const NBETA: u32 = 1073741848u;
+const MONT_ONE: u32 = 268435454u;
+struct ElemBuffer {
+    data: array<u32>,
+};
+
+struct Params {
+    deg: u32,
+    chunk_count: u32,
+    partials_base: u32,
+    xs_base: u32,
+    eval_idx: u32,
+    chunk_size: u32,
+    _pad0: u32,
+    _pad1: u32,
+};
+
+@group(0) @binding(0) var<storage, read_write> partials: ElemBuffer;
+@group(0) @binding(1) var<storage, read> coeffs: ElemBuffer;
+@group(0) @binding(2) var<storage, read> xs: ElemBuffer;
+@group(0) @binding(3) var<uniform> params: Params;
+
+fn add(lhs: u32, rhs: u32) -> u32 {
+    let sum = lhs + rhs;
+    if (sum >= P) {
+        return sum - P;
+    }
+    return sum;
+}
+
+fn mul_wide(lhs: u32, rhs: u32) -> vec2<u32> {
+    let lhs_lo = lhs & 0xffffu;
+    let lhs_hi = lhs >> 16u;
+    let rhs_lo = rhs & 0xffffu;
+    let rhs_hi = rhs >> 16u;
+
+    let p0 = lhs_lo * rhs_lo;
+    let p1 = lhs_hi * rhs_lo;
+    let p2 = lhs_lo * rhs_hi;
+    let p3 = lhs_hi * rhs_hi;
+
+    let carry = (p0 >> 16u) + (p1 & 0xffffu) + (p2 & 0xffffu);
+    let lo = (p0 & 0xffffu) | ((carry & 0xffffu) << 16u);
+    let hi = p3 + (p1 >> 16u) + (p2 >> 16u) + (carry >> 16u);
+    return vec2<u32>(lo, hi);
+}
+
+fn mul(lhs: u32, rhs: u32) -> u32 {
+    let product = mul_wide(lhs, rhs);
+    let low = 0u - product.x;
+    let red = M * low;
+    let red_product = mul_wide(red, P);
+    var ret = product.y + red_product.y;
+    if (product.x + red_product.x < product.x) {
+        ret = ret + 1u;
+    }
+    if (ret >= P) {
+        return ret - P;
+    }
+    return ret;
+}
+
+fn ext_add(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        add(lhs.x, rhs.x),
+        add(lhs.y, rhs.y),
+        add(lhs.z, rhs.z),
+        add(lhs.w, rhs.w),
+    );
+}
+
+fn ext_mul(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        add(
+            mul(lhs.x, rhs.x),
+            mul(NBETA, add(add(mul(lhs.y, rhs.w), mul(lhs.z, rhs.z)), mul(lhs.w, rhs.y))),
+        ),
+        add(
+            add(mul(lhs.x, rhs.y), mul(lhs.y, rhs.x)),
+            mul(NBETA, add(mul(lhs.z, rhs.w), mul(lhs.w, rhs.z))),
+        ),
+        add(
+            add(add(mul(lhs.x, rhs.z), mul(lhs.y, rhs.y)), mul(lhs.z, rhs.x)),
+            mul(NBETA, mul(lhs.w, rhs.w)),
+        ),
+        add(add(add(mul(lhs.x, rhs.w), mul(lhs.y, rhs.z)), mul(lhs.z, rhs.y)), mul(lhs.w, rhs.x)),
+    );
+}
+
+fn ext_mul_elem(lhs: vec4<u32>, rhs: u32) -> vec4<u32> {
+    return vec4<u32>(
+        mul(lhs.x, rhs),
+        mul(lhs.y, rhs),
+        mul(lhs.z, rhs),
+        mul(lhs.w, rhs),
+    );
+}
+
+fn ext_pow(base: vec4<u32>, exponent: u32) -> vec4<u32> {
+    var x = base;
+    var n = exponent;
+    var total = vec4<u32>(MONT_ONE, 0u, 0u, 0u);
+    while (n != 0u) {
+        if ((n & 1u) == 1u) {
+            total = ext_mul(total, x);
+        }
+        n = n >> 1u;
+        x = ext_mul(x, x);
+    }
+    return total;
+}
+
+fn load_ext(buffer_base: u32, elem_idx: u32) -> vec4<u32> {
+    let base = buffer_base + elem_idx * 4u;
+    return vec4<u32>(
+        xs.data[base + 0u],
+        xs.data[base + 1u],
+        xs.data[base + 2u],
+        xs.data[base + 3u],
+    );
+}
+
+fn store_partial(chunk_idx: u32, value: vec4<u32>) {
+    let base = params.partials_base + chunk_idx * 4u;
+    partials.data[base + 0u] = value.x;
+    partials.data[base + 1u] = value.y;
+    partials.data[base + 2u] = value.z;
+    partials.data[base + 3u] = value.w;
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let chunk_idx = gid.x;
+    if (chunk_idx >= params.chunk_count) {
+        return;
+    }
+
+    let x = load_ext(params.xs_base, params.eval_idx);
+    let start = chunk_idx * params.chunk_size;
+    var end = start + params.chunk_size;
+    if (end > params.deg) {
+        end = params.deg;
+    }
+    var pow_x = ext_pow(x, start);
+    var total = vec4<u32>(0u, 0u, 0u, 0u);
+
+    for (var i = start; i < end; i = i + 1u) {
+        total = ext_add(total, ext_mul_elem(pow_x, coeffs.data[i]));
+        pow_x = ext_mul(pow_x, x);
+    }
+    store_partial(chunk_idx, total);
+}
+"#;
+
+const EVAL_CHECK_PACK_GROUP_CHUNK_WGSL: &str = r#"
+struct ElemBuffer {
+    data: array<u32>,
+};
+
+struct Params {
+    domain: u32,
+    chunk_base: u32,
+    chunk_rows: u32,
+    dst_col_base: u32,
+    col_count: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read_write> dst: ElemBuffer;
+@group(0) @binding(1) var<storage, read> src_col: ElemBuffer;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let local_row = gid.x;
+    let local_col = gid.y;
+    if (local_row >= params.chunk_rows || local_col >= params.col_count) {
+        return;
+    }
+    let src_row = (params.chunk_base + local_row) % params.domain;
+    dst.data[params.dst_col_base + local_col * params.chunk_rows + local_row] =
+        src_col.data[local_col * params.domain + src_row];
 }
 "#;
 
@@ -4060,6 +4657,11 @@ impl<T> WebGpuBuffer<T> {
         !self.cpu_stale.get()
     }
 
+    /// Returns true when the browser `GPUBuffer` is current.
+    pub fn gpu_is_current(&self) -> bool {
+        !self.cpu_dirty.get()
+    }
+
     /// Return the underlying browser `GPUBuffer`, when the allocation is non-empty.
     pub fn raw_buffer(&self) -> Option<&web_sys::GpuBuffer> {
         self.gpu.as_ref()
@@ -4093,8 +4695,9 @@ impl<T> WebGpuBuffer<T> {
                     let chunk_offset = chunk_idx
                         .checked_mul(elems_per_chunk)
                         .expect("WebGPU upload chunk offset overflow");
-                    upload = hal.write_buffer(
+                    upload = hal.write_buffer_named(
                         gpu,
+                        self.cpu.name(),
                         self.byte_offset() + byte_len_for::<T>(chunk_offset),
                         bytemuck::cast_slice(chunk),
                     );
@@ -4133,7 +4736,7 @@ impl<T> WebGpuBuffer<T> {
 
         let byte_len = byte_len_for::<T>(self.cpu.size());
         let bytes = hal
-            .read_buffer_range(gpu, self.byte_offset(), byte_len)
+            .read_buffer_range_named(gpu, self.byte_offset(), byte_len, self.cpu.name())
             .await?;
         let values = bytemuck::checked::try_cast_slice::<u8, T>(bytes.as_slice())
             .map_err(|err| anyhow!("invalid WebGPU readback for {}: {err}", self.cpu.name()))?;
@@ -4254,6 +4857,12 @@ impl WebGpuHal {
         let use_poseidon2 = hash_suite.name == "poseidon2";
         let limits = device.limits();
         let queue = device.queue();
+        let max_buffer_size = limits.max_buffer_size() as u64;
+        let max_storage_buffer_binding_size = limits.max_storage_buffer_binding_size() as u64;
+        log_webgpu_stage(&format!(
+            "browser-prove:webgpu-limits max_buffer_size={} max_storage_buffer_binding_size={}",
+            max_buffer_size, max_storage_buffer_binding_size
+        ));
         let mut hal = Self {
             device,
             queue,
@@ -4268,8 +4877,8 @@ impl WebGpuHal {
             hash_fold_gpu_enabled: Cell::new(true),
             hash_rows_gpu_enabled: Cell::new(true),
             zk_shift_gpu_enabled: Cell::new(true),
-            max_buffer_size: limits.max_buffer_size() as u64,
-            max_storage_buffer_binding_size: limits.max_storage_buffer_binding_size() as u64,
+            max_buffer_size,
+            max_storage_buffer_binding_size,
         };
         if use_poseidon2 {
             hal.poseidon2 = Some(
@@ -4401,6 +5010,7 @@ impl WebGpuHal {
         poly_mix: BabyBearExtElem,
         domain_u32: u32,
         params: [u32; 12],
+        base_field_fp: bool,
     ) -> Result<bool> {
         let (Some(group0_gpu), Some(group1_gpu), Some(group2_gpu)) = (
             groups[0].raw_buffer(),
@@ -4424,6 +5034,7 @@ impl WebGpuHal {
             poly_mix,
             domain_u32,
             params,
+            base_field_fp,
         )
     }
 
@@ -4443,25 +5054,38 @@ impl WebGpuHal {
         poly_mix: BabyBearExtElem,
         domain_u32: u32,
         params: [u32; 12],
+        base_field_fp: bool,
     ) -> Result<bool> {
-        let (instructions, fp_slots, mix_slots, ret_mix_slot) =
-            match eval_check_interpreter_instructions(taps, def) {
-                Ok(program) => program,
-                Err(err) => {
-                    log_webgpu_stage(&format!(
-                        "webgpu eval_check interpreter build failed: {err}"
-                    ));
-                    self.record_gpu_result_authoritative("eval_check", false);
-                    return Ok(false);
-                }
-            };
+        let (instructions, fp_slots, mix_slots, ret_mix_slot) = match if base_field_fp {
+            eval_check_base_interpreter_instructions(taps, def)
+        } else {
+            eval_check_interpreter_instructions(taps, def)
+        } {
+            Ok(program) => program,
+            Err(err) => {
+                log_webgpu_stage(&format!(
+                    "webgpu eval_check interpreter build failed: {err}"
+                ));
+                self.record_gpu_result_authoritative("eval_check", false);
+                return Ok(false);
+            }
+        };
         if instructions.is_empty() {
             self.record_gpu_result_authoritative("eval_check", false);
             return Ok(false);
         }
         let instruction_count = instructions.len() / WEBGPU_EVAL_CHECK_INSTRUCTION_WORDS;
+        let base_private_parallel =
+            base_field_fp && fp_slots <= WEBGPU_EVAL_CHECK_BASE_PRIVATE_MAX_FP_SLOTS;
+        let interpreter_label = if base_private_parallel {
+            "eval_check_base_private_interpreter_submit"
+        } else if base_field_fp {
+            "eval_check_base_interpreter_submit"
+        } else {
+            "eval_check_interpreter_submit"
+        };
         let _timer = WebGpuStageTimer::new(format!(
-            "eval_check_interpreter_submit domain={} dispatch_count={} cycle_base={} instructions={} fp_slots={} mix_slots={}",
+            "{interpreter_label} domain={} dispatch_count={} cycle_base={} instructions={} fp_slots={} mix_slots={}",
             domain_u32, dispatch_count, cycle_base, instruction_count, fp_slots, mix_slots
         ));
 
@@ -4471,16 +5095,32 @@ impl WebGpuHal {
             mix_pow_words.extend(ext_words(value));
         }
 
-        let instructions_gpu = self.create_storage_buffer(
-            "webgpu_eval_check_interpreter_instructions",
-            byte_len_for::<u32>(instructions.len()),
+        let instructions_name = if base_field_fp {
+            "webgpu_eval_check_base_interpreter_instructions"
+        } else {
+            "webgpu_eval_check_interpreter_instructions"
+        };
+        let instructions_gpu =
+            self.create_storage_buffer(instructions_name, byte_len_for::<u32>(instructions.len()))?;
+        self.write_buffer_named(
+            &instructions_gpu,
+            instructions_name,
+            0,
+            bytemuck::cast_slice(&instructions),
         )?;
-        self.write_buffer(&instructions_gpu, 0, bytemuck::cast_slice(&instructions))?;
-        let mix_pows_gpu = self.create_storage_buffer(
-            "webgpu_eval_check_interpreter_mix_pows",
-            byte_len_for::<u32>(mix_pow_words.len()),
+        let mix_pows_name = if base_field_fp {
+            "webgpu_eval_check_base_interpreter_mix_pows"
+        } else {
+            "webgpu_eval_check_interpreter_mix_pows"
+        };
+        let mix_pows_gpu =
+            self.create_storage_buffer(mix_pows_name, byte_len_for::<u32>(mix_pow_words.len()))?;
+        self.write_buffer_named(
+            &mix_pows_gpu,
+            mix_pows_name,
+            0,
+            bytemuck::cast_slice(&mix_pow_words),
         )?;
-        self.write_buffer(&mix_pows_gpu, 0, bytemuck::cast_slice(&mix_pow_words))?;
 
         let params = [
             params[0],
@@ -4528,13 +5168,24 @@ impl WebGpuHal {
                 WebGpuBindingLayout::uniform(8, 96),
             ],
         )?;
-        let wgsl = build_eval_check_interpreter_wgsl(fp_slots, mix_slots);
-        let kernel = match self.create_compute_kernel(
-            "webgpu_eval_check_interpreter",
-            &wgsl,
-            "main",
-            &[layout.clone()],
-        ) {
+        let (kernel_name, wgsl) = if base_private_parallel {
+            (
+                "webgpu_eval_check_base_private_interpreter",
+                build_eval_check_base_interpreter_wgsl(fp_slots, mix_slots, true),
+            )
+        } else if base_field_fp {
+            (
+                "webgpu_eval_check_base_interpreter",
+                build_eval_check_base_interpreter_wgsl(fp_slots, mix_slots, false),
+            )
+        } else {
+            (
+                "webgpu_eval_check_interpreter",
+                build_eval_check_interpreter_wgsl(fp_slots, mix_slots),
+            )
+        };
+        let kernel = match self.create_compute_kernel(kernel_name, &wgsl, "main", &[layout.clone()])
+        {
             Ok(kernel) => kernel,
             Err(err) => {
                 log_webgpu_stage(&format!(
@@ -4580,11 +5231,145 @@ impl WebGpuHal {
                 },
             ],
         )?;
-        let workgroups = dispatch_count.div_ceil(WEBGPU_EVAL_CHECK_INTERPRETER_WORKGROUP_SIZE);
+        let workgroups = if base_field_fp && !base_private_parallel {
+            dispatch_count
+        } else {
+            dispatch_count.div_ceil(WEBGPU_EVAL_CHECK_INTERPRETER_WORKGROUP_SIZE)
+        };
         self.dispatch_compute_1d(&kernel, &bind_group, workgroups);
         check.mark_gpu_dirty();
         self.record_gpu_result_authoritative("eval_check", true);
         Ok(true)
+    }
+
+    fn dispatch_eval_check_pack_group_chunk(
+        &self,
+        group: &WebGpuBuffer<BabyBearElem>,
+        cols: usize,
+        domain: usize,
+        chunk_base: usize,
+        chunk_rows: usize,
+    ) -> Result<Option<web_sys::GpuBuffer>> {
+        if cols == 0 || chunk_rows == 0 {
+            return Ok(None);
+        }
+        let Some(group_gpu) = group.raw_buffer() else {
+            return Ok(None);
+        };
+        if !group.gpu_is_current() {
+            return Ok(None);
+        }
+
+        let domain_bytes = byte_len_for::<BabyBearElem>(domain);
+        if domain_bytes == 0
+            || domain_bytes > self.max_storage_binding_bytes()
+            || domain_bytes % WEBGPU_STORAGE_BUFFER_OFFSET_ALIGNMENT != 0
+        {
+            return Ok(None);
+        }
+
+        let group_base = group.byte_offset();
+        if group_base % WEBGPU_STORAGE_BUFFER_OFFSET_ALIGNMENT != 0 {
+            return Ok(None);
+        }
+        let max_cols_per_binding = (self.max_storage_binding_bytes() / domain_bytes) as usize;
+        if max_cols_per_binding == 0 {
+            return Ok(None);
+        }
+
+        let chunk_len = cols
+            .checked_mul(chunk_rows)
+            .ok_or_else(|| anyhow!("WebGPU eval_check group chunk length overflow"))?;
+        let chunk_bytes = byte_len_for::<BabyBearElem>(chunk_len);
+        if chunk_bytes == 0 || chunk_bytes > self.max_storage_binding_bytes() {
+            return Ok(None);
+        }
+
+        let chunk_gpu =
+            self.create_storage_buffer("webgpu_eval_check_interpreter_group_chunk", chunk_bytes)?;
+        let layout = self.create_bind_group_layout(
+            "webgpu_eval_check_pack_group_chunk_layout",
+            &[
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::read_only_storage(1, 0),
+                WebGpuBindingLayout::uniform(2, 32),
+            ],
+        )?;
+        let kernel = self.create_compute_kernel(
+            "webgpu_eval_check_pack_group_chunk",
+            EVAL_CHECK_PACK_GROUP_CHUNK_WGSL,
+            "main",
+            &[layout.clone()],
+        )?;
+
+        for col_start in (0..cols).step_by(max_cols_per_binding) {
+            let col_count = (cols - col_start).min(max_cols_per_binding);
+            let col_offset = group_base
+                .checked_add(byte_len_for::<BabyBearElem>(
+                    col_start
+                        .checked_mul(domain)
+                        .ok_or_else(|| anyhow!("WebGPU eval_check pack column overflow"))?,
+                ))
+                .ok_or_else(|| anyhow!("WebGPU eval_check pack column offset overflow"))?;
+            if col_offset % WEBGPU_STORAGE_BUFFER_OFFSET_ALIGNMENT != 0 {
+                return Ok(None);
+            }
+            let binding_bytes = domain_bytes
+                .checked_mul(
+                    u64::try_from(col_count)
+                        .expect("WebGPU eval_check pack column count exceeds u64"),
+                )
+                .ok_or_else(|| anyhow!("WebGPU eval_check pack binding size overflow"))?;
+            let params = [
+                u32::try_from(domain).expect("WebGPU eval_check pack domain exceeds u32"),
+                u32::try_from(chunk_base).expect("WebGPU eval_check pack chunk base exceeds u32"),
+                u32::try_from(chunk_rows).expect("WebGPU eval_check pack chunk rows exceeds u32"),
+                u32::try_from(
+                    col_start
+                        .checked_mul(chunk_rows)
+                        .ok_or_else(|| anyhow!("WebGPU eval_check pack dst offset overflow"))?,
+                )
+                .expect("WebGPU eval_check pack dst offset exceeds u32"),
+                u32::try_from(col_count).expect("WebGPU eval_check pack col count exceeds u32"),
+                0,
+                0,
+                0,
+            ];
+            let params = self.create_uniform_buffer(
+                "webgpu_eval_check_pack_group_chunk_params",
+                bytemuck::cast_slice(&params),
+            )?;
+            let bind_group = self.create_bind_group(
+                "webgpu_eval_check_pack_group_chunk_bind_group",
+                &layout,
+                &[
+                    WebGpuBufferBinding::new(0, &chunk_gpu),
+                    WebGpuBufferBinding {
+                        binding: 1,
+                        buffer: group_gpu,
+                        offset: col_offset,
+                        size: Some(binding_bytes),
+                    },
+                    WebGpuBufferBinding {
+                        binding: 2,
+                        buffer: &params,
+                        offset: 0,
+                        size: Some(32),
+                    },
+                ],
+            )?;
+            self.dispatch_compute(
+                &kernel,
+                &bind_group,
+                u32::try_from(chunk_rows)
+                    .expect("WebGPU eval_check pack chunk rows exceeds u32")
+                    .div_ceil(WEBGPU_WORKGROUP_SIZE),
+                u32::try_from(col_count).expect("WebGPU eval_check pack col count exceeds u32"),
+                1,
+            );
+        }
+
+        Ok(Some(chunk_gpu))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4598,6 +5383,7 @@ impl WebGpuHal {
         poly_mix: BabyBearExtElem,
         domain_u32: u32,
         params: [u32; 12],
+        base_field_fp: bool,
     ) -> Result<bool> {
         let chunked_groups = [
             groups[0].raw_buffer().is_none() || !self.storage_binding_fits(groups[0]),
@@ -4631,10 +5417,16 @@ impl WebGpuHal {
 
         for group_id in 0..3 {
             if chunked_groups[group_id] {
-                ensure!(
-                    groups[group_id].cpu_is_current(),
-                    "WebGPU chunked eval_check group {group_id} requires a current CPU shadow"
-                );
+                if !groups[group_id].cpu_is_current()
+                    && !(groups[group_id].raw_buffer().is_some()
+                        && groups[group_id].gpu_is_current())
+                {
+                    log_webgpu_stage(&format!(
+                        "browser-prove:stage eval_check chunked_groups unavailable stale_group group={group_id}"
+                    ));
+                    self.record_gpu_result_authoritative("eval_check", false);
+                    return Ok(false);
+                }
             } else if groups[group_id].raw_buffer().is_none()
                 || !self.storage_binding_fits(groups[group_id])
             {
@@ -4695,6 +5487,21 @@ impl WebGpuHal {
                     continue;
                 }
                 let cols = taps.group_size(group_id);
+                if let Some(chunk_gpu) = self.dispatch_eval_check_pack_group_chunk(
+                    groups[group_id],
+                    cols,
+                    domain,
+                    chunk_base,
+                    chunk_rows,
+                )? {
+                    chunk_gpus[group_id] = Some(chunk_gpu);
+                    continue;
+                }
+
+                ensure!(
+                    groups[group_id].cpu_is_current(),
+                    "WebGPU chunked eval_check group {group_id} requires a current CPU shadow"
+                );
                 let mut chunk = vec![BabyBearElem::ZERO; cols * chunk_rows];
                 groups[group_id].cpu.view(|source| {
                     for col in 0..cols {
@@ -4710,7 +5517,12 @@ impl WebGpuHal {
                     "webgpu_eval_check_interpreter_group_chunk",
                     byte_len_for::<BabyBearElem>(chunk.len()),
                 )?;
-                self.write_buffer(&chunk_gpu, 0, bytemuck::cast_slice(&chunk))?;
+                self.write_buffer_named(
+                    &chunk_gpu,
+                    "webgpu_eval_check_interpreter_group_chunk",
+                    0,
+                    bytemuck::cast_slice(&chunk),
+                )?;
                 chunk_gpus[group_id] = Some(chunk_gpu);
             }
 
@@ -4787,6 +5599,7 @@ impl WebGpuHal {
                 poly_mix,
                 domain_u32,
                 params,
+                base_field_fp,
             )?;
             if !dispatched {
                 return Ok(false);
@@ -4846,11 +5659,21 @@ impl WebGpuHal {
         for value in mix_pows {
             mix_pow_words.extend(ext_words(value));
         }
+        let _timer = WebGpuStageTimer::new(format!(
+            "eval_check_split_submit domain={} chunks={}",
+            domain_u32,
+            term_chunks.len()
+        ));
         let mix_pows_gpu = self.create_storage_buffer(
             "webgpu_eval_check_split_mix_pows",
             byte_len_for::<u32>(mix_pow_words.len()),
         )?;
-        self.write_buffer(&mix_pows_gpu, 0, bytemuck::cast_slice(&mix_pow_words))?;
+        self.write_buffer_named(
+            &mix_pows_gpu,
+            "webgpu_eval_check_split_mix_pows",
+            0,
+            bytemuck::cast_slice(&mix_pow_words),
+        )?;
 
         let params = self.create_uniform_buffer(
             "webgpu_eval_check_split_params",
@@ -5135,11 +5958,63 @@ impl WebGpuHal {
         ];
 
         if def.block.len() > WEBGPU_EVAL_CHECK_MAX_POLY_EXT_STEPS {
-            if WEBGPU_EVAL_CHECK_ENABLE_SPLIT {
+            let base_interpreter_fits = eval_check_base_interpreter_instructions(taps, def).is_ok();
+            if base_interpreter_fits {
                 if !group_can_bind.iter().all(|can_bind| *can_bind) {
-                    self.record_gpu_result_authoritative("eval_check", false);
-                    return Ok(false);
+                    return self.dispatch_eval_check_poly_ext_interpreted_group_chunks(
+                        check,
+                        groups,
+                        &logical_globals,
+                        taps,
+                        def,
+                        poly_mix,
+                        domain_u32,
+                        params,
+                        true,
+                    );
                 }
+                return self.dispatch_eval_check_poly_ext_interpreted(
+                    check,
+                    groups,
+                    &logical_globals,
+                    taps,
+                    def,
+                    poly_mix,
+                    domain_u32,
+                    params,
+                    true,
+                );
+            }
+
+            let interpreter_fits = eval_check_interpreter_instructions(taps, def).is_ok();
+            if interpreter_fits {
+                if !group_can_bind.iter().all(|can_bind| *can_bind) {
+                    return self.dispatch_eval_check_poly_ext_interpreted_group_chunks(
+                        check,
+                        groups,
+                        &logical_globals,
+                        taps,
+                        def,
+                        poly_mix,
+                        domain_u32,
+                        params,
+                        false,
+                    );
+                }
+                return self.dispatch_eval_check_poly_ext_interpreted(
+                    check,
+                    groups,
+                    &logical_globals,
+                    taps,
+                    def,
+                    poly_mix,
+                    domain_u32,
+                    params,
+                    false,
+                );
+            }
+
+            if WEBGPU_EVAL_CHECK_ENABLE_SPLIT && group_can_bind.iter().all(|can_bind| *can_bind) {
                 return self.dispatch_eval_check_poly_ext_split(
                     check,
                     groups,
@@ -5151,28 +6026,9 @@ impl WebGpuHal {
                     params,
                 );
             }
-            if !group_can_bind.iter().all(|can_bind| *can_bind) {
-                return self.dispatch_eval_check_poly_ext_interpreted_group_chunks(
-                    check,
-                    groups,
-                    &logical_globals,
-                    taps,
-                    def,
-                    poly_mix,
-                    domain_u32,
-                    params,
-                );
-            }
-            return self.dispatch_eval_check_poly_ext_interpreted(
-                check,
-                groups,
-                &logical_globals,
-                taps,
-                def,
-                poly_mix,
-                domain_u32,
-                params,
-            );
+
+            self.record_gpu_result_authoritative("eval_check", false);
+            return Ok(false);
         }
         if !group_can_bind.iter().all(|can_bind| *can_bind) {
             self.record_gpu_result_authoritative("eval_check", false);
@@ -5188,7 +6044,12 @@ impl WebGpuHal {
             "webgpu_eval_check_mix_pows",
             byte_len_for::<u32>(mix_pow_words.len()),
         )?;
-        self.write_buffer(&mix_pows_gpu, 0, bytemuck::cast_slice(&mix_pow_words))?;
+        self.write_buffer_named(
+            &mix_pows_gpu,
+            "webgpu_eval_check_mix_pows",
+            0,
+            bytemuck::cast_slice(&mix_pow_words),
+        )?;
 
         let params =
             self.create_uniform_buffer("webgpu_eval_check_params", bytemuck::cast_slice(&params))?;
@@ -5285,11 +6146,15 @@ impl WebGpuHal {
         &self,
         out: &WebGpuBuffer<BabyBearExtElem>,
         coeffs: &WebGpuBuffer<BabyBearElem>,
+        poly_count: usize,
         which: &WebGpuBuffer<u32>,
         xs: &WebGpuBuffer<BabyBearExtElem>,
     ) -> bool {
         if which.size() == 0 {
             return true;
+        }
+        if poly_count == 0 || coeffs.size() % poly_count != 0 {
+            return false;
         }
         out.raw_buffer().is_some()
             && coeffs.raw_buffer().is_some()
@@ -5298,6 +6163,34 @@ impl WebGpuHal {
             && self.storage_binding_fits(out)
             && self.storage_binding_fits(coeffs)
             && self.storage_binding_fits(which)
+            && self.storage_binding_fits(xs)
+    }
+
+    fn can_dispatch_batch_evaluate_any_chunked(
+        &self,
+        out: &WebGpuBuffer<BabyBearExtElem>,
+        coeffs: &WebGpuBuffer<BabyBearElem>,
+        poly_count: usize,
+        which: &WebGpuBuffer<u32>,
+        xs: &WebGpuBuffer<BabyBearExtElem>,
+    ) -> bool {
+        if which.size() == 0 {
+            return true;
+        }
+        if poly_count == 0 || coeffs.size() % poly_count != 0 {
+            return false;
+        }
+        let deg = coeffs.size() / poly_count;
+        let coeff_slice_bytes = byte_len_for::<BabyBearElem>(deg);
+        out.size() == which.size()
+            && xs.size() == which.size()
+            && coeffs.raw_buffer().is_some()
+            && xs.raw_buffer().is_some()
+            && coeff_slice_bytes != 0
+            && coeff_slice_bytes <= self.max_storage_binding_bytes()
+            && coeff_slice_bytes <= MAX_EXACT_JS_INTEGER
+            && coeffs.byte_offset() % WEBGPU_STORAGE_BUFFER_OFFSET_ALIGNMENT == 0
+            && coeff_slice_bytes % WEBGPU_STORAGE_BUFFER_OFFSET_ALIGNMENT == 0
             && self.storage_binding_fits(xs)
     }
 
@@ -5440,15 +6333,199 @@ impl WebGpuHal {
         xs: &WebGpuBuffer<BabyBearExtElem>,
         out: &WebGpuBuffer<BabyBearExtElem>,
     ) -> Result<()> {
-        if !self.gpu_authoritative()
-            || !self.can_dispatch_batch_evaluate_any(out, coeffs, which, xs)
+        if self.gpu_authoritative()
+            && self.can_dispatch_batch_evaluate_any(out, coeffs, poly_count, which, xs)
         {
-            coeffs.sync_gpu_to_cpu(self).await?;
-            which.sync_gpu_to_cpu(self).await?;
-            xs.sync_gpu_to_cpu(self).await?;
+            self.batch_evaluate_any(coeffs, poly_count, which, xs, out);
+            return Ok(());
         }
+
+        if self.gpu_authoritative()
+            && self.can_dispatch_batch_evaluate_any_chunked(out, coeffs, poly_count, which, xs)
+            && self
+                .batch_evaluate_any_chunked_async(coeffs, poly_count, which, xs, out)
+                .await?
+        {
+            return Ok(());
+        }
+
+        coeffs.sync_gpu_to_cpu(self).await?;
+        which.sync_gpu_to_cpu(self).await?;
+        xs.sync_gpu_to_cpu(self).await?;
         self.batch_evaluate_any(coeffs, poly_count, which, xs, out);
         Ok(())
+    }
+
+    async fn batch_evaluate_any_chunked_async(
+        &self,
+        coeffs: &WebGpuBuffer<BabyBearElem>,
+        poly_count: usize,
+        which: &WebGpuBuffer<u32>,
+        xs: &WebGpuBuffer<BabyBearExtElem>,
+        out: &WebGpuBuffer<BabyBearExtElem>,
+    ) -> Result<bool> {
+        let eval_count = which.size();
+        if eval_count == 0 {
+            return Ok(true);
+        }
+        if poly_count == 0 || coeffs.size() % poly_count != 0 {
+            return Ok(false);
+        }
+        let deg = coeffs.size() / poly_count;
+        let chunk_size = WEBGPU_BATCH_EVALUATE_CHUNK_SIZE.min(deg).max(1);
+        let chunk_count = deg.div_ceil(chunk_size);
+        let coeff_slice_bytes = byte_len_for::<BabyBearElem>(deg);
+        if coeff_slice_bytes == 0
+            || coeff_slice_bytes > self.max_storage_binding_bytes()
+            || coeff_slice_bytes > MAX_EXACT_JS_INTEGER
+            || coeffs.byte_offset() % WEBGPU_STORAGE_BUFFER_OFFSET_ALIGNMENT != 0
+            || coeff_slice_bytes % WEBGPU_STORAGE_BUFFER_OFFSET_ALIGNMENT != 0
+        {
+            return Ok(false);
+        }
+
+        let (Some(coeffs_gpu), Some(xs_gpu)) = (coeffs.raw_buffer(), xs.raw_buffer()) else {
+            return Ok(false);
+        };
+        if !self.storage_binding_fits(xs) {
+            return Ok(false);
+        }
+
+        let partial_count = eval_count
+            .checked_mul(chunk_count)
+            .ok_or_else(|| anyhow!("WebGPU batch_evaluate_any partial count overflow"))?;
+        let partials = self.alloc_extelem("batch_evaluate_partials", partial_count);
+        if !self.storage_binding_fits(&partials) {
+            return Ok(false);
+        }
+        let Some(partials_gpu) = partials.raw_buffer() else {
+            return Ok(false);
+        };
+
+        coeffs.sync_cpu_to_gpu(self)?;
+        which.sync_gpu_to_cpu(self).await?;
+        xs.sync_cpu_to_gpu(self)?;
+
+        let xs_base = xs
+            .elem_offset
+            .checked_mul(BabyBearExtElem::EXT_SIZE)
+            .and_then(|offset| u32::try_from(offset).ok())
+            .ok_or_else(|| anyhow!("WebGPU batch_evaluate_any xs offset exceeds u32"))?;
+        let partials_base = partials
+            .elem_offset
+            .checked_mul(BabyBearExtElem::EXT_SIZE)
+            .and_then(|offset| u32::try_from(offset).ok())
+            .ok_or_else(|| anyhow!("WebGPU batch_evaluate_any partials offset exceeds u32"))?;
+
+        let layout = self.create_bind_group_layout(
+            "webgpu_batch_evaluate_any_partial_layout",
+            &[
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::read_only_storage(1, 0),
+                WebGpuBindingLayout::read_only_storage(2, 0),
+                WebGpuBindingLayout::uniform(3, 32),
+            ],
+        )?;
+        let kernel = self.create_compute_kernel(
+            "webgpu_batch_evaluate_any_partial",
+            BATCH_EVALUATE_ANY_SLICE_PARTIAL_WGSL,
+            "main",
+            &[layout.clone()],
+        )?;
+
+        let which_values = which.to_vec();
+        for (eval_idx, poly_id) in which_values.iter().copied().enumerate() {
+            let poly_id = poly_id as usize;
+            if poly_id >= poly_count {
+                return Err(anyhow!(
+                    "WebGPU batch_evaluate_any poly id {poly_id} exceeds poly count {poly_count}"
+                ));
+            }
+            let coeff_offset = coeffs
+                .byte_offset()
+                .checked_add(
+                    u64::try_from(poly_id)
+                        .ok()
+                        .and_then(|id| id.checked_mul(coeff_slice_bytes))
+                        .ok_or_else(|| anyhow!("WebGPU batch_evaluate_any coeff slice overflow"))?,
+                )
+                .ok_or_else(|| anyhow!("WebGPU batch_evaluate_any coeff offset overflow"))?;
+            let eval_partials_base = partials_base
+                .checked_add(
+                    eval_idx
+                        .checked_mul(chunk_count)
+                        .and_then(|offset| offset.checked_mul(BabyBearExtElem::EXT_SIZE))
+                        .and_then(|offset| u32::try_from(offset).ok())
+                        .ok_or_else(|| {
+                            anyhow!("WebGPU batch_evaluate_any partial offset overflow")
+                        })?,
+                )
+                .ok_or_else(|| anyhow!("WebGPU batch_evaluate_any partial base overflow"))?;
+            let params = [
+                u32::try_from(deg).expect("WebGPU batch_evaluate_any degree exceeds u32"),
+                u32::try_from(chunk_count)
+                    .expect("WebGPU batch_evaluate_any chunk count exceeds u32"),
+                eval_partials_base,
+                xs_base,
+                u32::try_from(eval_idx).expect("WebGPU batch_evaluate_any eval index exceeds u32"),
+                u32::try_from(chunk_size)
+                    .expect("WebGPU batch_evaluate_any chunk size exceeds u32"),
+                0,
+                0,
+            ];
+            let params = self.create_uniform_buffer(
+                "webgpu_batch_evaluate_any_partial_params",
+                bytemuck::cast_slice(&params),
+            )?;
+            let bind_group = self.create_bind_group(
+                "webgpu_batch_evaluate_any_partial_bind_group",
+                &layout,
+                &[
+                    WebGpuBufferBinding::new(0, partials_gpu),
+                    WebGpuBufferBinding {
+                        binding: 1,
+                        buffer: coeffs_gpu,
+                        offset: coeff_offset,
+                        size: Some(coeff_slice_bytes),
+                    },
+                    WebGpuBufferBinding::new(2, xs_gpu),
+                    WebGpuBufferBinding {
+                        binding: 3,
+                        buffer: &params,
+                        offset: 0,
+                        size: Some(32),
+                    },
+                ],
+            )?;
+            self.dispatch_compute(
+                &kernel,
+                &bind_group,
+                u32::try_from(chunk_count)
+                    .expect("WebGPU batch_evaluate_any chunk count exceeds u32")
+                    .div_ceil(WEBGPU_WORKGROUP_SIZE),
+                1,
+                1,
+            );
+        }
+
+        partials.mark_gpu_dirty();
+        partials.sync_gpu_to_cpu(self).await?;
+        let partial_values = partials.to_vec();
+        let mut output = vec![BabyBearExtElem::ZERO; eval_count];
+        for eval_idx in 0..eval_count {
+            let start = eval_idx * chunk_count;
+            let mut total = BabyBearExtElem::ZERO;
+            for value in &partial_values[start..start + chunk_count] {
+                total += *value;
+            }
+            output[eval_idx] = total;
+        }
+        out.cpu.view_mut(|cpu| {
+            cpu.clone_from_slice(output.as_slice());
+        });
+        out.mark_cpu_result(false);
+        self.record_gpu_result_authoritative("batch_evaluate_any", true);
+        Ok(true)
     }
 
     /// Async-safe variant of [`Hal::mix_poly_coeffs`].
@@ -5477,6 +6554,13 @@ impl WebGpuHal {
         let gpu_mixed = self.dispatch_mix_poly_coeffs_inner(
             out, mix_start, mix, input, combos, input_size, count, true,
         )?;
+        let gpu_mixed = if self.gpu_authoritative() && !gpu_mixed {
+            self.dispatch_mix_poly_coeffs_chunked(
+                out, mix_start, mix, input, combos, input_size, count,
+            )?
+        } else {
+            gpu_mixed
+        };
         if self.gpu_authoritative() {
             if gpu_mixed {
                 self.record_gpu_result_authoritative("mix_poly_coeffs", true);
@@ -5676,7 +6760,14 @@ impl WebGpuHal {
             src.sync_cpu_to_gpu(self)?;
             if let Some(src_gpu) = src.raw_buffer() {
                 let sample = self
-                    .read_gathered_elem_sample(src_gpu, src.elem_offset, idx, size, stride)
+                    .read_gathered_elem_sample(
+                        src_gpu,
+                        src.name(),
+                        src.elem_offset,
+                        idx,
+                        size,
+                        stride,
+                    )
                     .await?;
                 dst.cpu.view_mut(|cpu| {
                     cpu[..sample.len()].clone_from_slice(sample.as_slice());
@@ -5797,7 +6888,7 @@ impl WebGpuHal {
     {
         let buffer = self.alloc_shadowed_buffer(name, cpu);
         if let Some(gpu) = buffer.raw_buffer() {
-            self.write_buffer(gpu, 0, bytemuck::cast_slice(slice))
+            self.write_buffer_named(gpu, name, 0, bytemuck::cast_slice(slice))
                 .unwrap_or_else(|err| panic!("failed to upload WebGPU buffer {name}: {err}"));
         }
         buffer.mark_synced();
@@ -5844,7 +6935,7 @@ impl WebGpuHal {
             bytes.len() as u64,
             WEBGPU_BUFFER_USAGE_UNIFORM | WEBGPU_BUFFER_USAGE_COPY_DST,
         )?;
-        self.write_buffer(&buffer, 0, bytes)?;
+        self.write_buffer_named(&buffer, label, 0, bytes)?;
         Ok(buffer)
     }
 
@@ -5855,10 +6946,21 @@ impl WebGpuHal {
         byte_offset: u64,
         bytes: &[u8],
     ) -> Result<()> {
+        self.write_buffer_named(buffer, "unattributed", byte_offset, bytes)
+    }
+
+    /// Upload raw bytes to a WebGPU buffer and attribute diagnostics to `name`.
+    pub fn write_buffer_named(
+        &self,
+        buffer: &web_sys::GpuBuffer,
+        name: &'static str,
+        byte_offset: u64,
+        bytes: &[u8],
+    ) -> Result<()> {
         self.queue
             .write_buffer_with_f64_and_u8_slice(buffer, byte_offset_as_f64(byte_offset)?, bytes)
             .map_err(js_error)?;
-        self.diagnostics.record_upload(bytes.len() as u64);
+        self.diagnostics.record_upload(name, bytes.len() as u64);
         Ok(())
     }
 
@@ -6054,7 +7156,8 @@ impl WebGpuHal {
 
     /// Copy a GPU buffer into WASM memory.
     pub async fn read_buffer(&self, source: &web_sys::GpuBuffer, byte_len: u64) -> Result<Vec<u8>> {
-        self.read_buffer_range(source, 0, byte_len).await
+        self.read_buffer_range_named(source, 0, byte_len, "read_buffer")
+            .await
     }
 
     /// Copy a byte range from a GPU buffer into WASM memory.
@@ -6063,6 +7166,19 @@ impl WebGpuHal {
         source: &web_sys::GpuBuffer,
         source_offset: u64,
         byte_len: u64,
+    ) -> Result<Vec<u8>> {
+        self.read_buffer_range_named(source, source_offset, byte_len, "read_buffer_range")
+            .await
+    }
+
+    /// Copy a byte range from a GPU buffer into WASM memory and attribute the
+    /// readback to the source buffer's logical name.
+    pub async fn read_buffer_range_named(
+        &self,
+        source: &web_sys::GpuBuffer,
+        source_offset: u64,
+        byte_len: u64,
+        name: &'static str,
     ) -> Result<Vec<u8>> {
         let readback = self.create_buffer(
             "webgpu_readback",
@@ -6093,7 +7209,7 @@ impl WebGpuHal {
             .map_err(js_error)?;
         let bytes = js_sys::Uint8Array::new(&mapped).to_vec();
         readback.unmap();
-        self.diagnostics.record_readback(bytes.len() as u64);
+        self.diagnostics.record_readback(name, bytes.len() as u64);
         Ok(bytes)
     }
 
@@ -6105,6 +7221,27 @@ impl WebGpuHal {
         base_byte_offset: u64,
         elem_size: u64,
         indices: &[usize],
+    ) -> Result<Vec<u8>> {
+        self.read_buffer_indices_named(
+            source,
+            base_byte_offset,
+            elem_size,
+            indices,
+            "indexed_readback",
+        )
+        .await
+    }
+
+    /// Copy fixed-size elements at arbitrary indices from a GPU buffer into
+    /// contiguous WASM memory and attribute the readback to the source buffer's
+    /// logical name.
+    pub async fn read_buffer_indices_named(
+        &self,
+        source: &web_sys::GpuBuffer,
+        base_byte_offset: u64,
+        elem_size: u64,
+        indices: &[usize],
+        name: &'static str,
     ) -> Result<Vec<u8>> {
         if indices.is_empty() {
             return Ok(Vec::new());
@@ -6165,13 +7302,14 @@ impl WebGpuHal {
             .map_err(js_error)?;
         let bytes = js_sys::Uint8Array::new(&mapped).to_vec();
         readback.unmap();
-        self.diagnostics.record_readback(bytes.len() as u64);
+        self.diagnostics.record_readback(name, bytes.len() as u64);
         Ok(bytes)
     }
 
     async fn read_gathered_elem_sample(
         &self,
         source: &web_sys::GpuBuffer,
+        name: &'static str,
         source_elem_offset: usize,
         idx: usize,
         size: usize,
@@ -6226,7 +7364,7 @@ impl WebGpuHal {
             .map_err(js_error)?;
         let bytes = js_sys::Uint8Array::new(&mapped).to_vec();
         readback.unmap();
-        self.diagnostics.record_readback(bytes.len() as u64);
+        self.diagnostics.record_readback(name, bytes.len() as u64);
 
         let values = bytemuck::checked::try_cast_slice::<u8, BabyBearElem>(bytes.as_slice())
             .map_err(|err| anyhow!("invalid WebGPU gather readback: {err}"))?;
@@ -7126,6 +8264,145 @@ impl WebGpuHal {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn dispatch_mix_poly_coeffs_chunked(
+        &self,
+        output: &WebGpuBuffer<BabyBearExtElem>,
+        mix_start: &BabyBearExtElem,
+        mix: &BabyBearExtElem,
+        input: &WebGpuBuffer<BabyBearElem>,
+        combos: &WebGpuBuffer<u32>,
+        input_size: usize,
+        count: usize,
+    ) -> Result<bool> {
+        if count == 0 || input_size == 0 {
+            return Ok(true);
+        }
+        let (Some(output_gpu), Some(input_gpu), Some(combos_gpu)) =
+            (output.raw_buffer(), input.raw_buffer(), combos.raw_buffer())
+        else {
+            return Ok(false);
+        };
+        if !self.storage_binding_fits(output) || !self.storage_binding_fits(combos) {
+            return Ok(false);
+        }
+
+        let input_poly_bytes = byte_len_for::<BabyBearElem>(count);
+        if input_poly_bytes == 0
+            || input_poly_bytes > self.max_storage_binding_bytes()
+            || input.byte_offset() % WEBGPU_STORAGE_BUFFER_OFFSET_ALIGNMENT != 0
+            || input_poly_bytes % WEBGPU_STORAGE_BUFFER_OFFSET_ALIGNMENT != 0
+        {
+            return Ok(false);
+        }
+        let max_polys_per_chunk =
+            (self.max_storage_binding_bytes() / input_poly_bytes).max(1) as usize;
+        if max_polys_per_chunk == 0 {
+            return Ok(false);
+        }
+
+        let Some(output_base) = output
+            .elem_offset
+            .checked_mul(BabyBearExtElem::EXT_SIZE)
+            .and_then(|offset| u32::try_from(offset).ok())
+        else {
+            return Err(anyhow!("WebGPU mix_poly_coeffs output offset exceeds u32"));
+        };
+        let combos_base = u32::try_from(combos.elem_offset)
+            .expect("WebGPU mix_poly_coeffs combos offset exceeds u32");
+
+        output.sync_cpu_to_gpu(self)?;
+        input.sync_cpu_to_gpu(self)?;
+        combos.sync_cpu_to_gpu(self)?;
+
+        let layout = self.create_bind_group_layout(
+            "webgpu_mix_poly_coeffs_layout",
+            &[
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::read_only_storage(1, 0),
+                WebGpuBindingLayout::read_only_storage(2, 0),
+                WebGpuBindingLayout::uniform(3, 64),
+            ],
+        )?;
+        let kernel = self.create_compute_kernel(
+            "webgpu_mix_poly_coeffs",
+            MIX_POLY_COEFFS_WGSL,
+            "main",
+            &[layout.clone()],
+        )?;
+
+        let mix_words = mix.subelems();
+        for chunk_start in (0..input_size).step_by(max_polys_per_chunk) {
+            let chunk_size = (input_size - chunk_start).min(max_polys_per_chunk);
+            let chunk_input_bytes = input_poly_bytes
+                .checked_mul(u64::try_from(chunk_size).expect("WebGPU mix chunk size exceeds u64"))
+                .ok_or_else(|| anyhow!("WebGPU mix_poly_coeffs chunk byte length overflow"))?;
+            let input_offset = input
+                .byte_offset()
+                .checked_add(
+                    u64::try_from(chunk_start)
+                        .ok()
+                        .and_then(|start| start.checked_mul(input_poly_bytes))
+                        .ok_or_else(|| anyhow!("WebGPU mix_poly_coeffs input offset overflow"))?,
+                )
+                .ok_or_else(|| anyhow!("WebGPU mix_poly_coeffs input offset overflow"))?;
+            let chunk_mix_start = *mix_start * mix.pow(chunk_start);
+            let chunk_mix_start = chunk_mix_start.subelems();
+            let params = [
+                u32::try_from(chunk_size).expect("WebGPU mix_poly_coeffs input_size exceeds u32"),
+                u32::try_from(count).expect("WebGPU mix_poly_coeffs count exceeds u32"),
+                output_base,
+                0,
+                combos_base
+                    .checked_add(
+                        u32::try_from(chunk_start)
+                            .expect("WebGPU mix_poly_coeffs combo chunk offset exceeds u32"),
+                    )
+                    .ok_or_else(|| anyhow!("WebGPU mix_poly_coeffs combo offset overflow"))?,
+                0,
+                0,
+                0,
+                chunk_mix_start[0].as_u32_montgomery(),
+                chunk_mix_start[1].as_u32_montgomery(),
+                chunk_mix_start[2].as_u32_montgomery(),
+                chunk_mix_start[3].as_u32_montgomery(),
+                mix_words[0].as_u32_montgomery(),
+                mix_words[1].as_u32_montgomery(),
+                mix_words[2].as_u32_montgomery(),
+                mix_words[3].as_u32_montgomery(),
+            ];
+            let params = self.create_uniform_buffer(
+                "webgpu_mix_poly_coeffs_params",
+                bytemuck::cast_slice(&params),
+            )?;
+            let bind_group = self.create_bind_group(
+                "webgpu_mix_poly_coeffs_bind_group",
+                &layout,
+                &[
+                    WebGpuBufferBinding::new(0, output_gpu),
+                    WebGpuBufferBinding {
+                        binding: 1,
+                        buffer: input_gpu,
+                        offset: input_offset,
+                        size: Some(chunk_input_bytes),
+                    },
+                    WebGpuBufferBinding::new(2, combos_gpu),
+                    WebGpuBufferBinding {
+                        binding: 3,
+                        buffer: &params,
+                        offset: 0,
+                        size: Some(64),
+                    },
+                ],
+            )?;
+            let workgroups = u32::try_from(count)
+                .expect("WebGPU mix_poly_coeffs count exceeds u32")
+                .div_ceil(256);
+            self.dispatch_compute(&kernel, &bind_group, workgroups, 1, 1);
+        }
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn dispatch_combos_prepare(
         &self,
         combos: &WebGpuBuffer<BabyBearExtElem>,
@@ -7809,12 +9086,8 @@ impl WebGpuHal {
                 .expect("WebGPU batch_evaluate_any which offset exceeds u32"),
             xs_base,
             0,
-            0,
+            u32::try_from(deg).expect("WebGPU batch_evaluate_any degree exceeds u32"),
         ];
-        let params = self.create_uniform_buffer(
-            "webgpu_batch_evaluate_any_params",
-            bytemuck::cast_slice(&params),
-        )?;
 
         out.sync_cpu_to_gpu(self)?;
         coeffs.sync_cpu_to_gpu(self)?;
@@ -7837,27 +9110,40 @@ impl WebGpuHal {
             "main",
             &[layout.clone()],
         )?;
-        let bind_group = self.create_bind_group(
-            "webgpu_batch_evaluate_any_bind_group",
-            &layout,
-            &[
-                WebGpuBufferBinding::new(0, out_gpu),
-                WebGpuBufferBinding::new(1, coeffs_gpu),
-                WebGpuBufferBinding::new(2, which_gpu),
-                WebGpuBufferBinding::new(3, xs_gpu),
-                WebGpuBufferBinding {
-                    binding: 4,
-                    buffer: &params,
-                    offset: 0,
-                    size: Some(32),
-                },
-            ],
-        )?;
-        let workgroups = u32::try_from(eval_count)
-            .expect("WebGPU batch_evaluate_any eval_count exceeds u32")
-            .div_ceil(256);
-        self.dispatch_compute(&kernel, &bind_group, workgroups, 1, 1);
-        Ok(true)
+
+        if self.storage_binding_fits(coeffs) {
+            let params = self.create_uniform_buffer(
+                "webgpu_batch_evaluate_any_params",
+                bytemuck::cast_slice(&params),
+            )?;
+            let bind_group = self.create_bind_group(
+                "webgpu_batch_evaluate_any_bind_group",
+                &layout,
+                &[
+                    WebGpuBufferBinding::new(0, out_gpu),
+                    WebGpuBufferBinding::new(1, coeffs_gpu),
+                    WebGpuBufferBinding::new(2, which_gpu),
+                    WebGpuBufferBinding::new(3, xs_gpu),
+                    WebGpuBufferBinding {
+                        binding: 4,
+                        buffer: &params,
+                        offset: 0,
+                        size: Some(32),
+                    },
+                ],
+            )?;
+            self.dispatch_compute(
+                &kernel,
+                &bind_group,
+                u32::try_from(eval_count)
+                    .expect("WebGPU batch_evaluate_any eval_count exceeds u32")
+                    .div_ceil(WEBGPU_WORKGROUP_SIZE),
+                1,
+                1,
+            );
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     fn dispatch_poseidon2_hash_fold(
@@ -8094,12 +9380,48 @@ async fn request_device() -> Result<web_sys::GpuDevice> {
             .ok_or_else(|| anyhow!("GPUAdapter is not available"))?,
     };
 
-    JsFuture::from(adapter.request_device())
+    let adapter_limits = adapter.limits();
+    let max_buffer_size = (adapter_limits.max_buffer_size() as u64)
+        .min(WEBGPU_REQUESTED_MAX_BUFFER_BYTES)
+        .min(MAX_EXACT_JS_INTEGER);
+    let max_storage_buffer_binding_size = (adapter_limits.max_storage_buffer_binding_size() as u64)
+        .min(WEBGPU_REQUESTED_MAX_STORAGE_BINDING_BYTES)
+        .min(max_buffer_size)
+        .min(MAX_EXACT_JS_INTEGER);
+    let max_compute_workgroup_storage_size = adapter_limits
+        .max_compute_workgroup_storage_size()
+        .min(WEBGPU_REQUESTED_MAX_WORKGROUP_STORAGE_BYTES);
+    let required_limits = js_sys::Object::new();
+    set_required_limit(&required_limits, "maxBufferSize", max_buffer_size)?;
+    set_required_limit(
+        &required_limits,
+        "maxStorageBufferBindingSize",
+        max_storage_buffer_binding_size,
+    )?;
+    set_required_limit(
+        &required_limits,
+        "maxComputeWorkgroupStorageSize",
+        max_compute_workgroup_storage_size as u64,
+    )?;
+    let descriptor = web_sys::GpuDeviceDescriptor::new();
+    descriptor.set_required_limits(&required_limits);
+
+    JsFuture::from(adapter.request_device_with_descriptor(&descriptor))
         .await
         .map_err(js_error)
         .and_then(required_js("GPUDevice"))?
         .dyn_into::<web_sys::GpuDevice>()
         .map_err(|_| anyhow!("requestDevice did not return a GPUDevice"))
+}
+
+fn set_required_limit(limits: &js_sys::Object, name: &'static str, value: u64) -> Result<()> {
+    js_sys::Reflect::set(
+        limits,
+        &JsValue::from_str(name),
+        &JsValue::from_f64(value as f64),
+    )
+    .map_err(js_error)?;
+    Ok(())
 }
 
 async fn request_adapter(

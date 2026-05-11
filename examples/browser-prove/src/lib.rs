@@ -248,6 +248,22 @@ mod tests {
                 op.cpu_only_ops,
             );
         }
+        for source in diagnostics.upload_sources {
+            console_log!(
+                "browser-prove:webgpu-upload {name}: source={} uploads={} upload_bytes={}",
+                source.name,
+                source.uploads,
+                source.upload_bytes,
+            );
+        }
+        for source in diagnostics.readback_sources {
+            console_log!(
+                "browser-prove:webgpu-readback {name}: source={} readbacks={} readback_bytes={}",
+                source.name,
+                source.readbacks,
+                source.readback_bytes,
+            );
+        }
     }
 
     fn prove_succinct_info(

@@ -174,7 +174,12 @@ where
         .and_then(|value| value.try_into().ok())
         .ok_or_else(|| anyhow::anyhow!("WebGPU readback length overflow"))?;
     let bytes = hal
-        .read_buffer_range(gpu, buffer.byte_offset() + byte_offset, byte_len)
+        .read_buffer_range_named(
+            gpu,
+            buffer.byte_offset() + byte_offset,
+            byte_len,
+            buffer.name(),
+        )
         .await?;
     let values = bytemuck::checked::try_cast_slice::<u8, T>(bytes.as_slice())
         .map_err(|err| anyhow::anyhow!("invalid WebGPU readback slice: {err}"))?;
@@ -215,7 +220,13 @@ where
     }
 
     let bytes = hal
-        .read_buffer_indices(gpu, buffer.byte_offset(), elem_size_u64, indices)
+        .read_buffer_indices_named(
+            gpu,
+            buffer.byte_offset(),
+            elem_size_u64,
+            indices,
+            buffer.name(),
+        )
         .await?;
     let values = bytemuck::checked::try_cast_slice::<u8, T>(bytes.as_slice())
         .map_err(|err| anyhow::anyhow!("invalid WebGPU indexed readback: {err}"))?;

@@ -396,11 +396,12 @@ facts that affect the implementation path.
   a verified succinct receipt. It used `WebGpuProver::prove_with_opts_async`,
   produced 1 segment with 3598 user cycles and 32768 total cycles, and kept
   both rv32im and recursion ZKP commit/finalize in GPU-authoritative mode. The
-  latest focused rerun took 30.42s in Chrome after a 426.538233ms native CUDA
-  baseline for the same fixture. The run recorded `eval_check` as 6 WebGPU
-  dispatches and 0 CPU fallbacks. The rv32im check uses the interpreted WebGPU
-  path; recursion uses the same interpreter with bounded chunk uploads for its
-  oversized data group.
+  latest focused rerun took 4.03s in Chrome after a 426.880871ms native CUDA
+  baseline for the same fixture. Chrome negotiated 1 GiB buffer and
+  storage-binding limits. The run recorded `eval_check` as 2 WebGPU
+  dispatches and 0 CPU fallbacks, `batch_evaluate_any` as 8 GPU dispatches and
+  0 CPU fallbacks, and `mix_poly_coeffs` as 8 GPU dispatches and 0 CPU
+  fallbacks. The rv32im and recursion checks use the interpreted WebGPU path.
 - A WebGPU circuit `eval_check` hook now runs before the portable CPU fallback
   in async finalize, and a tiny generated straight-line WGSL `poly_ext`
   regression passes in Chrome. The generated WGSL path now reuses fixed named
@@ -414,8 +415,11 @@ facts that affect the implementation path.
   chunks produced a device loss; a dependency-budgeted version showed that one
   recursion contribution still needs 1603 FP dependencies; and a slot-reusing
   split shader still lost the WebGPU device after 486.20s in Chrome on a
-  `po2 = 0` CPU-reference smoke test. The split path is therefore disabled and
-  the real definitions still use the known-correct portable fallback.
+  `po2 = 0` CPU-reference smoke test. A later Keccak-only split attempt avoided
+  the CPU fallback for one request but deferred about 148s of GPU work into
+  `check_group` and then lost the WebGPU device. The split path is therefore
+  disabled and Keccak still uses the known-correct portable fallback for its
+  oversized `eval_check`.
 - Native CUDA baselines with segment/cycle telemetry have been collected for
   the passed browser cases and for the deferred large cases. See
   `docs/wasm-webgpu-validation.md` and
@@ -464,10 +468,12 @@ facts that affect the implementation path.
   A smaller `KeccakUnion(1)` diagnostic now proves and verifies as a
   standalone Chrome/WebGPU succinct receipt after the async Keccak receipt
   union fix and async WebGPU Keccak subproof path. The latest focused run took
-  1372.79s in Chrome/WebGPU versus a 7.495052818s native CUDA baseline for the
-  same 4 segments. Batched Merkle query readbacks reduced it to 1314 readbacks
-  and 237 CPU fallbacks; the full `KeccakUnion(3)` fixture remains
-  performance-blocked.
+  441.14s in Chrome/WebGPU versus a 7.46676192s native CUDA baseline for the
+  same 4 segments after Chrome negotiated 1 GiB WebGPU buffer and
+  storage-binding limits. All ZKP bulk ops except `scatter` had 0 CPU
+  fallbacks; the remaining blocker is Keccak circuit `eval_check`, which still
+  falls back 9 times because the generic interpreter needs 6741 FP slots. The
+  full `KeccakUnion(3)` fixture remains performance-blocked.
 - `RunUnconstrained { unconstrained: true }` is classified as a native-disabled
   fixture in this checkout because `SYS_FORK` is not registered in the native
   syscall table and the native proving test is ignored.
