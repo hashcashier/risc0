@@ -1,12 +1,15 @@
 # WASM/WebGPU Prover Validation
 
-Status: active validation; complete parity is not yet achieved.
+Status: validation paused at user request; complete parity is not yet achieved.
 
 This file records the current correctness matrix for the browser WebGPU prover.
 Native baselines are measured first with the local CUDA prover and the same
 browser-oriented segment and Keccak caps used by the wasm harness.
 The native CUDA and browser WebGPU proving paths are compared in
 `docs/wasm-webgpu-cuda-comparison.md`.
+
+See `docs/wasm-webgpu-prover-learnings.md` for the latest pause handoff,
+including results gathered after parts of this matrix were written.
 
 ## Commands
 
@@ -27,7 +30,7 @@ WASM_BINDGEN_TEST_TIMEOUT=7200 \
 CHROMEDRIVER=/home/rami/.cache/.wasm-pack/chromedriver-75649e7ca5ae435b/chromedriver \
 /home/rami/.cache/.wasm-pack/wasm-bindgen-c59d5019a2b42393/wasm-bindgen-test-runner \
   --nocapture \
-  /home/rami/repos/risc0/examples/target/wasm32-unknown-unknown/release/deps/browser_prove-af99d3d7a49982de.wasm \
+  /home/rami/repos/risc0/examples/target/wasm32-unknown-unknown/release/deps/browser_prove-0d71f73dbf7c3024.wasm \
   <browser_test_filter>
 ```
 
@@ -43,11 +46,11 @@ cargo test --manifest-path examples/browser-prove/Cargo.toml \
 ```
 
 The current targeted browser harness build check passes. The latest focused
-release test-artifact rebuild after adding the narrow async `gather_sample`
-readback fallback took 9m34s and produces:
+release test-artifact rebuild after converting the parity harness to async
+proving helpers and removing unused sync helpers took 1m57s and produces:
 
 ```text
-/home/rami/repos/risc0/examples/target/wasm32-unknown-unknown/release/deps/browser_prove-af99d3d7a49982de.wasm
+/home/rami/repos/risc0/examples/target/wasm32-unknown-unknown/release/deps/browser_prove-0d71f73dbf7c3024.wasm
 ```
 
 The broader examples workspace wasm build is not treated as the browser prover

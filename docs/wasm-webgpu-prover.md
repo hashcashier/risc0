@@ -1,6 +1,11 @@
 # WASM/WebGPU Prover
 
-Status: implementation active; Chrome/WebGPU parity validation in progress.
+Status: implementation paused at user request; Chrome/WebGPU parity validation
+was in progress when paused.
+
+See `docs/wasm-webgpu-prover-learnings.md` for the pause handoff, current
+implementation summary, validation evidence, performance findings, and resume
+plan.
 
 The browser WebGPU prover is intended to run local proving in a
 `wasm32-unknown-unknown` browser build while reusing the native zkVM proving

@@ -68,7 +68,7 @@ const WEBGPU_WORKGROUP_SIZE: u32 = 256;
 const WEBGPU_MAX_WORKGROUPS_PER_DIMENSION: u32 = 65_535;
 const WEBGPU_REQUESTED_MAX_BUFFER_BYTES: u64 = 1024 * 1024 * 1024;
 const WEBGPU_REQUESTED_MAX_STORAGE_BINDING_BYTES: u64 = 1024 * 1024 * 1024;
-const WEBGPU_REQUESTED_MAX_WORKGROUP_STORAGE_BYTES: u32 = 32 * 1024;
+const WEBGPU_REQUESTED_MAX_WORKGROUP_STORAGE_BYTES: u32 = 128 * 1024;
 const WEBGPU_SAFE_STORAGE_BINDING_BYTES: u64 = 1024 * 1024 * 1024;
 const WEBGPU_SAFE_QUEUE_WRITE_BYTES: usize = 16 * 1024 * 1024;
 const WEBGPU_STORAGE_BUFFER_OFFSET_ALIGNMENT: u64 = 256;
@@ -1480,7 +1480,10 @@ fn zerofier_inv(idx: u32) -> u32 {
 }
 
 @compute @workgroup_size({WORKGROUP_SIZE})
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn main(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
     let local_cycle = gid.x + gid.y * LINEAR_DISPATCH_STRIDE;
     if (local_cycle >= params.dispatch_count) {
         return;
@@ -1492,11 +1495,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 {BASE_LOCAL_DECLS}
 
+    let lane = {LANE_INDEX};
     for (var op_idx = 0u; op_idx < params.instr_count; op_idx = op_idx + 1u) {
         let op = instr_word(op_idx, 0u);
         switch (op) {
             case 0u: {
-                fp[instr_word(op_idx, 1u)] = instr_word(op_idx, 2u);
+                fp[lane][instr_word(op_idx, 1u)] = instr_word(op_idx, 2u);
             }
             case 2u: {
                 let out = instr_word(op_idx, 1u);
@@ -1527,7 +1531,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                         params.group2_base + offset * params.group2_chunk_rows + local_row
                     ];
                 }
-                fp[out] = value;
+                fp[lane][out] = value;
             }
             case 3u: {
                 let out = instr_word(op_idx, 1u);
@@ -1539,48 +1543,51 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 } else {
                     value = global1.data[params.global1_base + offset];
                 }
-                fp[out] = value;
+                fp[lane][out] = value;
             }
             case 4u: {
-                fp[instr_word(op_idx, 1u)] =
-                    add(fp[instr_word(op_idx, 2u)], fp[instr_word(op_idx, 3u)]);
+                fp[lane][instr_word(op_idx, 1u)] =
+                    add(fp[lane][instr_word(op_idx, 2u)], fp[lane][instr_word(op_idx, 3u)]);
             }
             case 5u: {
-                fp[instr_word(op_idx, 1u)] =
-                    sub(fp[instr_word(op_idx, 2u)], fp[instr_word(op_idx, 3u)]);
+                fp[lane][instr_word(op_idx, 1u)] =
+                    sub(fp[lane][instr_word(op_idx, 2u)], fp[lane][instr_word(op_idx, 3u)]);
             }
             case 6u: {
-                fp[instr_word(op_idx, 1u)] =
-                    mul(fp[instr_word(op_idx, 2u)], fp[instr_word(op_idx, 3u)]);
+                fp[lane][instr_word(op_idx, 1u)] =
+                    mul(fp[lane][instr_word(op_idx, 2u)], fp[lane][instr_word(op_idx, 3u)]);
             }
             case 7u: {
                 let out = instr_word(op_idx, 1u);
-                mix_tot[out] = vec4<u32>(0u, 0u, 0u, 0u);
-                mix_mul[out] = load_mix_pow(instr_word(op_idx, 2u));
+                mix_tot[lane][out] = vec4<u32>(0u, 0u, 0u, 0u);
+                mix_mul[lane][out] = load_mix_pow(instr_word(op_idx, 2u));
             }
             case 8u: {
                 let out = instr_word(op_idx, 1u);
                 let chain = instr_word(op_idx, 2u);
                 let inner = instr_word(op_idx, 3u);
-                mix_tot[out] = ext_add(mix_tot[chain], ext_scale(mix_mul[chain], fp[inner]));
-                mix_mul[out] = load_mix_pow(instr_word(op_idx, 4u));
+                mix_tot[lane][out] = ext_add(
+                    mix_tot[lane][chain],
+                    ext_scale(mix_mul[lane][chain], fp[lane][inner]),
+                );
+                mix_mul[lane][out] = load_mix_pow(instr_word(op_idx, 4u));
             }
             case 9u: {
                 let out = instr_word(op_idx, 1u);
                 let chain = instr_word(op_idx, 2u);
                 let cond = instr_word(op_idx, 3u);
                 let inner = instr_word(op_idx, 4u);
-                mix_tot[out] = ext_add(
-                    mix_tot[chain],
-                    ext_scale(ext_mul(mix_tot[inner], mix_mul[chain]), fp[cond]),
+                mix_tot[lane][out] = ext_add(
+                    mix_tot[lane][chain],
+                    ext_scale(ext_mul(mix_tot[lane][inner], mix_mul[lane][chain]), fp[lane][cond]),
                 );
-                mix_mul[out] = load_mix_pow(instr_word(op_idx, 5u));
+                mix_mul[lane][out] = load_mix_pow(instr_word(op_idx, 5u));
             }
             default: {}
         }
     }
 
-    let result = ext_scale(mix_tot[params.ret_mix_slot], zerofier_inv(cycle));
+    let result = ext_scale(mix_tot[lane][params.ret_mix_slot], zerofier_inv(cycle));
     check.data[params.check_base + 0u * params.domain + cycle] = result.x;
     check.data[params.check_base + 1u * params.domain + cycle] = result.y;
     check.data[params.check_base + 2u * params.domain + cycle] = result.z;
@@ -1592,37 +1599,34 @@ fn build_eval_check_base_interpreter_wgsl(
     fp_slots: usize,
     mix_slots: usize,
     private_parallel: bool,
+    workgroup_size: u32,
 ) -> String {
     let fp_slots = fp_slots.max(1);
     let mix_slots = mix_slots.max(1);
+    let scratch_lanes = if private_parallel { 1 } else { workgroup_size };
     let scratch_decls = if private_parallel {
         String::new()
     } else {
         format!(
-            "var<workgroup> fp: array<u32, {fp_slots}>;\nvar<workgroup> mix_tot: array<vec4<u32>, {mix_slots}>;\nvar<workgroup> mix_mul: array<vec4<u32>, {mix_slots}>;"
+            "var<workgroup> fp: array<array<u32, {fp_slots}>, {scratch_lanes}>;\nvar<workgroup> mix_tot: array<array<vec4<u32>, {mix_slots}>, {scratch_lanes}>;\nvar<workgroup> mix_mul: array<array<vec4<u32>, {mix_slots}>, {scratch_lanes}>;"
         )
     };
     let local_decls = if private_parallel {
         format!(
-            "    var fp: array<u32, {fp_slots}>;\n    var mix_tot: array<vec4<u32>, {mix_slots}>;\n    var mix_mul: array<vec4<u32>, {mix_slots}>;"
+            "    var fp: array<array<u32, {fp_slots}>, 1>;\n    var mix_tot: array<array<vec4<u32>, {mix_slots}>, 1>;\n    var mix_mul: array<array<vec4<u32>, {mix_slots}>, 1>;"
         )
     } else {
         String::new()
     };
-    let (workgroup_size, linear_dispatch_stride) = if private_parallel {
-        (
-            WEBGPU_EVAL_CHECK_INTERPRETER_WORKGROUP_SIZE,
-            WEBGPU_EVAL_CHECK_INTERPRETER_WORKGROUP_SIZE * WEBGPU_MAX_WORKGROUPS_PER_DIMENSION,
-        )
-    } else {
-        (1, WEBGPU_MAX_WORKGROUPS_PER_DIMENSION)
-    };
+    let lane_index = if private_parallel { "0u" } else { "lid.x" };
+    let linear_dispatch_stride = workgroup_size * WEBGPU_MAX_WORKGROUPS_PER_DIMENSION;
 
     EVAL_CHECK_BASE_INTERPRETER_WGSL
         .replace("{FP_SLOTS}", &fp_slots.to_string())
         .replace("{MIX_SLOTS}", &mix_slots.to_string())
         .replace("{BASE_SCRATCH_DECLS}", &scratch_decls)
         .replace("{BASE_LOCAL_DECLS}", &local_decls)
+        .replace("{LANE_INDEX}", lane_index)
         .replace("{WORKGROUP_SIZE}", &workgroup_size.to_string())
         .replace(
             "{LINEAR_DISPATCH_STRIDE}",
@@ -4533,6 +4537,21 @@ impl WebGpuKernel {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct EvalCheckInterpreterPipelineKey {
+    base_field_fp: bool,
+    private_parallel: bool,
+    fp_slots: usize,
+    mix_slots: usize,
+    workgroup_size: u32,
+}
+
+#[derive(Clone)]
+struct EvalCheckInterpreterPipeline {
+    layout: web_sys::GpuBindGroupLayout,
+    kernel: WebGpuKernel,
+}
+
 /// A single storage or uniform buffer binding in a WebGPU bind group layout.
 #[derive(Clone, Copy)]
 pub struct WebGpuBindingLayout {
@@ -4831,6 +4850,9 @@ pub struct WebGpuHal {
     zk_shift_gpu_enabled: Cell<bool>,
     max_buffer_size: u64,
     max_storage_buffer_binding_size: u64,
+    max_compute_workgroup_storage_size: u32,
+    eval_check_interpreter_pipelines:
+        RefCell<BTreeMap<EvalCheckInterpreterPipelineKey, EvalCheckInterpreterPipeline>>,
 }
 
 /// Restores the previous GPU-authoritative mode when dropped.
@@ -4859,9 +4881,10 @@ impl WebGpuHal {
         let queue = device.queue();
         let max_buffer_size = limits.max_buffer_size() as u64;
         let max_storage_buffer_binding_size = limits.max_storage_buffer_binding_size() as u64;
+        let max_compute_workgroup_storage_size = limits.max_compute_workgroup_storage_size();
         log_webgpu_stage(&format!(
-            "browser-prove:webgpu-limits max_buffer_size={} max_storage_buffer_binding_size={}",
-            max_buffer_size, max_storage_buffer_binding_size
+            "browser-prove:webgpu-limits max_buffer_size={} max_storage_buffer_binding_size={} max_compute_workgroup_storage_size={}",
+            max_buffer_size, max_storage_buffer_binding_size, max_compute_workgroup_storage_size
         ));
         let mut hal = Self {
             device,
@@ -4879,6 +4902,8 @@ impl WebGpuHal {
             zk_shift_gpu_enabled: Cell::new(true),
             max_buffer_size,
             max_storage_buffer_binding_size,
+            max_compute_workgroup_storage_size,
+            eval_check_interpreter_pipelines: RefCell::new(BTreeMap::new()),
         };
         if use_poseidon2 {
             hal.poseidon2 = Some(
@@ -4952,6 +4977,77 @@ impl WebGpuHal {
     fn max_storage_binding_bytes(&self) -> u64 {
         self.max_storage_buffer_binding_size
             .min(WEBGPU_SAFE_STORAGE_BINDING_BYTES)
+    }
+
+    fn eval_check_base_workgroup_lanes(&self, fp_slots: usize, mix_slots: usize) -> u32 {
+        let bytes_per_lane = fp_slots
+            .checked_mul(mem::size_of::<u32>())
+            .and_then(|bytes| {
+                let mix_bytes = mix_slots
+                    .checked_mul(mem::size_of::<[u32; 4]>())
+                    .and_then(|bytes| bytes.checked_mul(2))?;
+                bytes.checked_add(mix_bytes)
+            })
+            .expect("WebGPU eval_check base scratch size overflow");
+        let lanes = (self.max_compute_workgroup_storage_size as usize / bytes_per_lane).max(1);
+        lanes.min(WEBGPU_EVAL_CHECK_INTERPRETER_WORKGROUP_SIZE as usize) as u32
+    }
+
+    fn eval_check_interpreter_pipeline(
+        &self,
+        base_field_fp: bool,
+        private_parallel: bool,
+        fp_slots: usize,
+        mix_slots: usize,
+        workgroup_size: u32,
+    ) -> Result<EvalCheckInterpreterPipeline> {
+        let key = EvalCheckInterpreterPipelineKey {
+            base_field_fp,
+            private_parallel,
+            fp_slots,
+            mix_slots,
+            workgroup_size,
+        };
+        if let Some(pipeline) = self.eval_check_interpreter_pipelines.borrow().get(&key) {
+            return Ok(pipeline.clone());
+        }
+
+        let layout = self.create_bind_group_layout(
+            "webgpu_eval_check_interpreter_layout",
+            &[
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::read_only_storage(1, 0),
+                WebGpuBindingLayout::read_only_storage(2, 0),
+                WebGpuBindingLayout::read_only_storage(3, 0),
+                WebGpuBindingLayout::read_only_storage(4, 0),
+                WebGpuBindingLayout::read_only_storage(5, 0),
+                WebGpuBindingLayout::read_only_storage(6, 0),
+                WebGpuBindingLayout::read_only_storage(7, 0),
+                WebGpuBindingLayout::uniform(8, 96),
+            ],
+        )?;
+        let (kernel_name, wgsl) = if private_parallel {
+            (
+                "webgpu_eval_check_base_private_interpreter",
+                build_eval_check_base_interpreter_wgsl(fp_slots, mix_slots, true, workgroup_size),
+            )
+        } else if base_field_fp {
+            (
+                "webgpu_eval_check_base_interpreter",
+                build_eval_check_base_interpreter_wgsl(fp_slots, mix_slots, false, workgroup_size),
+            )
+        } else {
+            (
+                "webgpu_eval_check_interpreter",
+                build_eval_check_interpreter_wgsl(fp_slots, mix_slots),
+            )
+        };
+        let kernel = self.create_compute_kernel(kernel_name, &wgsl, "main", &[layout.clone()])?;
+        let pipeline = EvalCheckInterpreterPipeline { layout, kernel };
+        self.eval_check_interpreter_pipelines
+            .borrow_mut()
+            .insert(key, pipeline.clone());
+        Ok(pipeline)
     }
 
     fn can_allocate_gpu_buffer(&self, byte_len: u64) -> bool {
@@ -5077,6 +5173,13 @@ impl WebGpuHal {
         let instruction_count = instructions.len() / WEBGPU_EVAL_CHECK_INSTRUCTION_WORDS;
         let base_private_parallel =
             base_field_fp && fp_slots <= WEBGPU_EVAL_CHECK_BASE_PRIVATE_MAX_FP_SLOTS;
+        let base_workgroup_size = if base_private_parallel {
+            WEBGPU_EVAL_CHECK_INTERPRETER_WORKGROUP_SIZE
+        } else if base_field_fp {
+            self.eval_check_base_workgroup_lanes(fp_slots, mix_slots)
+        } else {
+            WEBGPU_EVAL_CHECK_INTERPRETER_WORKGROUP_SIZE
+        };
         let interpreter_label = if base_private_parallel {
             "eval_check_base_private_interpreter_submit"
         } else if base_field_fp {
@@ -5085,8 +5188,8 @@ impl WebGpuHal {
             "eval_check_interpreter_submit"
         };
         let _timer = WebGpuStageTimer::new(format!(
-            "{interpreter_label} domain={} dispatch_count={} cycle_base={} instructions={} fp_slots={} mix_slots={}",
-            domain_u32, dispatch_count, cycle_base, instruction_count, fp_slots, mix_slots
+            "{interpreter_label} domain={} dispatch_count={} cycle_base={} instructions={} fp_slots={} mix_slots={} workgroup_size={}",
+            domain_u32, dispatch_count, cycle_base, instruction_count, fp_slots, mix_slots, base_workgroup_size
         ));
 
         let mix_pows = eval_check_mix_pows(def, poly_mix)?;
@@ -5154,39 +5257,14 @@ impl WebGpuHal {
             bytemuck::cast_slice(&params),
         )?;
 
-        let layout = self.create_bind_group_layout(
-            "webgpu_eval_check_interpreter_layout",
-            &[
-                WebGpuBindingLayout::storage(0, 0),
-                WebGpuBindingLayout::read_only_storage(1, 0),
-                WebGpuBindingLayout::read_only_storage(2, 0),
-                WebGpuBindingLayout::read_only_storage(3, 0),
-                WebGpuBindingLayout::read_only_storage(4, 0),
-                WebGpuBindingLayout::read_only_storage(5, 0),
-                WebGpuBindingLayout::read_only_storage(6, 0),
-                WebGpuBindingLayout::read_only_storage(7, 0),
-                WebGpuBindingLayout::uniform(8, 96),
-            ],
-        )?;
-        let (kernel_name, wgsl) = if base_private_parallel {
-            (
-                "webgpu_eval_check_base_private_interpreter",
-                build_eval_check_base_interpreter_wgsl(fp_slots, mix_slots, true),
-            )
-        } else if base_field_fp {
-            (
-                "webgpu_eval_check_base_interpreter",
-                build_eval_check_base_interpreter_wgsl(fp_slots, mix_slots, false),
-            )
-        } else {
-            (
-                "webgpu_eval_check_interpreter",
-                build_eval_check_interpreter_wgsl(fp_slots, mix_slots),
-            )
-        };
-        let kernel = match self.create_compute_kernel(kernel_name, &wgsl, "main", &[layout.clone()])
-        {
-            Ok(kernel) => kernel,
+        let pipeline = match self.eval_check_interpreter_pipeline(
+            base_field_fp,
+            base_private_parallel,
+            fp_slots,
+            mix_slots,
+            base_workgroup_size,
+        ) {
+            Ok(pipeline) => pipeline,
             Err(err) => {
                 log_webgpu_stage(&format!(
                     "webgpu eval_check interpreter pipeline failed: {err}"
@@ -5198,7 +5276,7 @@ impl WebGpuHal {
 
         let bind_group = self.create_bind_group(
             "webgpu_eval_check_interpreter_bind_group",
-            &layout,
+            &pipeline.layout,
             &[
                 WebGpuBufferBinding::new(
                     0,
@@ -5232,11 +5310,11 @@ impl WebGpuHal {
             ],
         )?;
         let workgroups = if base_field_fp && !base_private_parallel {
-            dispatch_count
+            dispatch_count.div_ceil(base_workgroup_size)
         } else {
             dispatch_count.div_ceil(WEBGPU_EVAL_CHECK_INTERPRETER_WORKGROUP_SIZE)
         };
-        self.dispatch_compute_1d(&kernel, &bind_group, workgroups);
+        self.dispatch_compute_1d(&pipeline.kernel, &bind_group, workgroups);
         check.mark_gpu_dirty();
         self.record_gpu_result_authoritative("eval_check", true);
         Ok(true)
@@ -5763,9 +5841,7 @@ impl WebGpuHal {
             ],
         )?;
         let workgroups = domain_u32.div_ceil(WEBGPU_WORKGROUP_SIZE);
-        for kernel in &kernels {
-            self.dispatch_compute_1d(kernel, &bind_group, workgroups);
-        }
+        self.dispatch_compute_1d_sequence(kernels.as_slice(), &bind_group, workgroups);
         check.mark_gpu_dirty();
         self.record_gpu_result_authoritative("eval_check", true);
         Ok(true)
@@ -5958,8 +6034,35 @@ impl WebGpuHal {
         ];
 
         if def.block.len() > WEBGPU_EVAL_CHECK_MAX_POLY_EXT_STEPS {
-            let base_interpreter_fits = eval_check_base_interpreter_instructions(taps, def).is_ok();
-            if base_interpreter_fits {
+            let base_interpreter_program = eval_check_base_interpreter_instructions(taps, def);
+            if let Ok((_, fp_slots, _, _)) = &base_interpreter_program {
+                if WEBGPU_EVAL_CHECK_ENABLE_SPLIT
+                    && *fp_slots > WEBGPU_EVAL_CHECK_BASE_PRIVATE_MAX_FP_SLOTS
+                    && group_can_bind.iter().all(|can_bind| *can_bind)
+                {
+                    match self.dispatch_eval_check_poly_ext_split(
+                        check,
+                        groups,
+                        &logical_globals,
+                        taps,
+                        def,
+                        poly_mix,
+                        domain_u32,
+                        params,
+                    ) {
+                        Ok(true) => return Ok(true),
+                        Ok(false) => {
+                            log_webgpu_stage(
+                                "browser-prove:stage eval_check split unavailable; falling back to base interpreter",
+                            );
+                        }
+                        Err(err) => {
+                            log_webgpu_stage(&format!(
+                                "browser-prove:stage eval_check split failed: {err}; falling back to base interpreter"
+                            ));
+                        }
+                    }
+                }
                 if !group_can_bind.iter().all(|can_bind| *can_bind) {
                     return self.dispatch_eval_check_poly_ext_interpreted_group_chunks(
                         check,
@@ -7096,6 +7199,44 @@ impl WebGpuHal {
             workgroups_y,
             1,
         );
+    }
+
+    /// Dispatch multiple logical 1D kernels against the same bind group in one
+    /// compute pass and queue submit.
+    pub fn dispatch_compute_1d_sequence(
+        &self,
+        kernels: &[WebGpuKernel],
+        bind_group: &web_sys::GpuBindGroup,
+        workgroups: u32,
+    ) {
+        if kernels.is_empty() {
+            return;
+        }
+
+        let (workgroups_x, workgroups_y) = if workgroups <= WEBGPU_MAX_WORKGROUPS_PER_DIMENSION {
+            (workgroups, 1)
+        } else {
+            let workgroups_y = workgroups.div_ceil(WEBGPU_MAX_WORKGROUPS_PER_DIMENSION);
+            assert!(
+                workgroups_y <= WEBGPU_MAX_WORKGROUPS_PER_DIMENSION,
+                "WebGPU 1D dispatch exceeds portable 2D workgroup capacity"
+            );
+            (WEBGPU_MAX_WORKGROUPS_PER_DIMENSION, workgroups_y)
+        };
+
+        let encoder = self.device.create_command_encoder();
+        let pass = encoder.begin_compute_pass();
+        pass.set_bind_group(0, Some(bind_group));
+        for kernel in kernels {
+            pass.set_pipeline(&kernel.pipeline);
+            pass.dispatch_workgroups_with_workgroup_count_y_and_workgroup_count_z(
+                workgroups_x,
+                workgroups_y,
+                1,
+            );
+        }
+        pass.end();
+        self.submit(encoder.finish());
     }
 
     /// Submit a finished command buffer to the WebGPU queue.

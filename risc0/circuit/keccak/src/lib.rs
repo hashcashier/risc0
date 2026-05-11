@@ -44,6 +44,119 @@ pub fn max_keccak_inputs(po2: usize) -> usize {
     max_keccak_cycles / KECCAK_PERMUTE_CYCLES
 }
 
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub mod webgpu_testutil {
+    use anyhow::{bail, ensure, Result};
+    use risc0_zkp::{
+        adapter::{CircuitInfo as _, TapsProvider as _},
+        field::{
+            baby_bear::{BabyBearElem, BabyBearExtElem},
+            ExtElem as _,
+        },
+        hal::{webgpu::WebGpuHal, Buffer as _, Hal as _},
+        INV_RATE,
+    };
+
+    use crate::zirgen::{
+        circuit::{REGISTER_GROUP_ACCUM, REGISTER_GROUP_CODE, REGISTER_GROUP_DATA},
+        CircuitImpl,
+    };
+
+    fn deterministic_fp(seed: usize) -> BabyBearElem {
+        BabyBearElem::new((seed as u32).wrapping_mul(0x1f12bb5).wrapping_add(0x12345))
+    }
+
+    fn deterministic_ext(seed: usize) -> BabyBearExtElem {
+        BabyBearExtElem::new(
+            deterministic_fp(seed),
+            deterministic_fp(seed + 1),
+            deterministic_fp(seed + 2),
+            deterministic_fp(seed + 3),
+        )
+    }
+
+    fn deterministic_fps(size: usize, seed: usize) -> Vec<BabyBearElem> {
+        (0..size).map(|idx| deterministic_fp(seed + idx)).collect()
+    }
+
+    pub async fn eval_check_webgpu_matches_portable(hal: &WebGpuHal, po2: usize) -> Result<()> {
+        let steps = 1 << po2;
+        let domain = steps * INV_RATE;
+        let circuit = CircuitImpl;
+        let taps = circuit.get_taps();
+        let accum = hal.copy_from_elem(
+            "keccak_eval_check_accum",
+            &deterministic_fps(taps.group_size(REGISTER_GROUP_ACCUM) * domain, 1000),
+        );
+        let code = hal.copy_from_elem(
+            "keccak_eval_check_code",
+            &deterministic_fps(taps.group_size(REGISTER_GROUP_CODE) * domain, 2000),
+        );
+        let data = hal.copy_from_elem(
+            "keccak_eval_check_data",
+            &deterministic_fps(taps.group_size(REGISTER_GROUP_DATA) * domain, 3000),
+        );
+        let mix = hal.copy_from_elem(
+            "keccak_eval_check_mix",
+            &deterministic_fps(CircuitImpl::MIX_SIZE, 4000),
+        );
+        let out = hal.copy_from_elem(
+            "keccak_eval_check_out",
+            &deterministic_fps(CircuitImpl::OUTPUT_SIZE, 5000),
+        );
+        let poly_mix = deterministic_ext(6000);
+
+        let expected = hal.alloc_elem(
+            "keccak_eval_check_expected",
+            BabyBearExtElem::EXT_SIZE * domain,
+        );
+        risc0_zkp::hal::portable::eval_check::<WebGpuHal, CircuitImpl>(
+            &CircuitImpl,
+            &expected,
+            &[&accum, &code, &data],
+            &[&mix, &out],
+            poly_mix,
+            po2,
+            steps,
+        );
+
+        let actual = hal.alloc_elem(
+            "keccak_eval_check_actual",
+            BabyBearExtElem::EXT_SIZE * domain,
+        );
+        let dispatched = hal.dispatch_eval_check_poly_ext(
+            &actual,
+            &[&accum, &code, &data],
+            &[&mix, &out],
+            crate::zirgen::taps::TAPSET,
+            &crate::zirgen::poly_ext::DEF,
+            poly_mix,
+            po2,
+            steps,
+        )?;
+        ensure!(dispatched, "keccak eval_check did not dispatch on WebGPU");
+
+        actual.sync_gpu_to_cpu(hal).await?;
+        let actual_values = actual.to_vec();
+        let expected_values = expected.to_vec();
+        if let Some((idx, (actual, expected))) = actual_values
+            .iter()
+            .zip(expected_values.iter())
+            .enumerate()
+            .find(|(_, (actual, expected))| actual != expected)
+        {
+            bail!(
+                "keccak eval_check WebGPU output differed from portable output at index {idx}: actual={actual:?} expected={expected:?}"
+            );
+        }
+        ensure!(
+            actual_values == expected_values,
+            "keccak eval_check WebGPU output differed from portable output"
+        );
+        Ok(())
+    }
+}
+
 /// Given a slice of `KeccakState`, encoded as `[u8]`, produce the SHA-256 digest matching what is produced by the keccak circuit.
 #[cfg(feature = "prove")]
 pub fn compute_keccak_digest(input: &[u8]) -> Digest {

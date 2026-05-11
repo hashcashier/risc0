@@ -309,6 +309,18 @@ mod tests {
         prove_succinct_info(prover, name, env, elf, image_id, &ProverOpts::succinct()).receipt
     }
 
+    async fn prove_succinct_async(
+        prover: &WebGpuProver,
+        name: &str,
+        env: ExecutorEnv<'_>,
+        elf: &[u8],
+        image_id: [u32; 8],
+    ) -> Receipt {
+        prove_succinct_info_async(prover, name, env, elf, image_id, &ProverOpts::succinct())
+            .await
+            .receipt
+    }
+
     async fn prove_succinct_info_async(
         prover: &WebGpuProver,
         name: &str,
@@ -385,19 +397,22 @@ mod tests {
         prove_info
     }
 
-    fn prove_succinct_integrity(
+    async fn prove_succinct_integrity_async(
         prover: &WebGpuProver,
         name: &str,
-        env: ExecutorEnv,
+        env: ExecutorEnv<'_>,
         elf: &[u8],
         opts: &ProverOpts,
     ) -> Receipt {
         console_log!("browser-prove:start {name}");
         prover.reset_diagnostics();
-        let receipt = prover
-            .prove_with_opts(env, elf, opts)
-            .unwrap_or_else(|err| panic!("{name}: prove failed: {err}"))
-            .receipt;
+        let receipt = match prover.prove_with_opts_async(env, elf, opts).await {
+            Ok(prove_info) => prove_info.receipt,
+            Err(err) => {
+                log_webgpu_diagnostics(prover, name);
+                panic!("{name}: async prove failed: {err}");
+            }
+        };
 
         receipt
             .inner
@@ -411,7 +426,11 @@ mod tests {
         receipt
     }
 
-    fn prove_multi(prover: &WebGpuProver, name: &str, spec: impl serde::Serialize) -> Receipt {
+    async fn prove_multi_async(
+        prover: &WebGpuProver,
+        name: &str,
+        spec: impl serde::Serialize,
+    ) -> Receipt {
         use risc0_zkvm_methods::{MULTI_TEST_ELF, MULTI_TEST_ID};
 
         let env = ExecutorEnv::builder()
@@ -419,7 +438,7 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        prove_succinct(prover, name, env, MULTI_TEST_ELF, MULTI_TEST_ID)
+        prove_succinct_async(prover, name, env, MULTI_TEST_ELF, MULTI_TEST_ID).await
     }
 
     #[wasm_bindgen_test(async)]
@@ -647,7 +666,10 @@ mod tests {
         let mix_global = hal.copy_from_elem("webgpu_eval_check_mix_global", &[elem(5000)]);
         let out_global_value = elem(6000);
         let out_global = hal.copy_from_elem("webgpu_eval_check_out_global", &[out_global_value]);
-        let check = hal.alloc_elem("webgpu_eval_check_check", BabyBearExtElem::EXT_SIZE * domain);
+        let check = hal.alloc_elem(
+            "webgpu_eval_check_check",
+            BabyBearExtElem::EXT_SIZE * domain,
+        );
         let poly_mix = ext_elem(7000);
 
         let dispatched = hal
@@ -702,6 +724,18 @@ mod tests {
             .await
             .unwrap();
         risc0_circuit_recursion::testutil::eval_check_webgpu_matches_portable(&hal)
+            .await
+            .unwrap();
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn keccak_eval_check_poly_ext_matches_cpu() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        risc0_circuit_keccak::webgpu_testutil::eval_check_webgpu_matches_portable(&hal, 14)
             .await
             .unwrap();
     }
@@ -772,9 +806,8 @@ mod tests {
         let combo_count = 2;
         let reg_sizes = [3u32, 2u32];
         let reg_combo_ids = [1u32, 0u32];
-        let coeff_len =
-            reg_sizes.iter().map(|size| *size as usize).sum::<usize>()
-                + <WebGpuHal as Hal>::CHECK_SIZE;
+        let coeff_len = reg_sizes.iter().map(|size| *size as usize).sum::<usize>()
+            + <WebGpuHal as Hal>::CHECK_SIZE;
         let coeff_u = (0..coeff_len)
             .map(|idx| ext_elem(10100 + idx))
             .collect::<Vec<_>>();
@@ -865,7 +898,9 @@ mod tests {
         let fold_inputs = 512;
         let hash_fold = hal.copy_from_digest(
             "webgpu_hal_proof_shape_hash_fold",
-            &(0..fold_inputs).map(|idx| digest(idx as u32)).collect::<Vec<_>>(),
+            &(0..fold_inputs)
+                .map(|idx| digest(idx as u32))
+                .collect::<Vec<_>>(),
         );
         hal.hash_fold(&hash_fold, fold_inputs / 2, fold_inputs / 4);
         assert_gpu_buffer_matches_cpu(&hal, "proof_shape_hash_fold", &hash_fold).await;
@@ -1118,13 +1153,14 @@ mod tests {
 
         let prover = init_prover().await;
         let env = ExecutorEnv::builder().build().unwrap();
-        prove_succinct(
+        prove_succinct_async(
             prover.as_ref(),
             "risc0-zkvm-methods/cfg",
             env,
             CFG_ELF,
             CFG_ID,
-        );
+        )
+        .await;
     }
 
     #[wasm_bindgen_test(async)]
@@ -1141,7 +1177,8 @@ mod tests {
             .build()
             .unwrap();
         let composite = prover
-            .prove_with_opts(env, MULTI_TEST_ELF, &ProverOpts::composite())
+            .prove_with_opts_async(env, MULTI_TEST_ELF, &ProverOpts::composite())
+            .await
             .expect("multi_test/do_nothing: composite prove failed")
             .receipt;
         composite
@@ -1153,7 +1190,8 @@ mod tests {
             .expect("multi_test/do_nothing: composite receipt verification failed");
 
         let compressed = prover
-            .compress(&ProverOpts::succinct(), &composite)
+            .compress_async(&ProverOpts::succinct(), &composite)
+            .await
             .expect("multi_test/do_nothing: composite compression failed");
         compressed
             .inner
@@ -1164,20 +1202,22 @@ mod tests {
             .expect("multi_test/do_nothing: compressed receipt verification failed");
 
         let bytes = b"browser echo parity".to_vec();
-        let receipt = prove_multi(
+        let receipt = prove_multi_async(
             prover.as_ref(),
             "multi_test/echo",
             MultiTestSpec::Echo {
                 bytes: bytes.clone(),
             },
-        );
+        )
+        .await;
         assert_eq!(receipt.journal.bytes, bytes);
 
-        prove_multi(
+        prove_multi_async(
             prover.as_ref(),
             "multi_test/sha_cycle_count",
             MultiTestSpec::ShaCycleCount,
-        );
+        )
+        .await;
 
         let mut output = Vec::new();
         let env = ExecutorEnv::builder()
@@ -1188,13 +1228,14 @@ mod tests {
             .stdout(&mut output)
             .build()
             .unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover.as_ref(),
             "multi_test/read_write_mem",
             env,
             MULTI_TEST_ELF,
             MULTI_TEST_ID,
-        );
+        )
+        .await;
         assert!(receipt.journal.bytes.is_empty());
         assert_eq!(from_slice::<u32, u8>(&output).unwrap(), 0x1234_5678);
 
@@ -1595,8 +1636,8 @@ mod tests {
     }
 
     #[wasm_bindgen_test(async)]
-    async fn native_busy_loop_po2_18_async_composite_accum_make_coeffs_without_zk_shift_gpu_verify(
-    ) {
+    async fn native_busy_loop_po2_18_async_composite_accum_make_coeffs_without_zk_shift_gpu_verify()
+    {
         use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
 
         let prover = init_prover().await;
@@ -1821,13 +1862,14 @@ mod tests {
         assert!(session.receipt_claim.is_some());
 
         let env = ExecutorEnv::builder().build().unwrap();
-        let hello_receipt = prove_succinct(
+        let hello_receipt = prove_succinct_async(
             prover.as_ref(),
             "risc0-zkvm-methods/hello_commit",
             env,
             HELLO_COMMIT_ELF,
             HELLO_COMMIT_ID,
-        );
+        )
+        .await;
         assert_eq!(hello_receipt.journal.bytes, b"hello world");
 
         let env = ExecutorEnv::builder()
@@ -1835,13 +1877,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let fib_receipt = prove_succinct(
+        let fib_receipt = prove_succinct_async(
             prover.as_ref(),
             "risc0-zkvm-methods/fib",
             env,
             FIB_ELF,
             FIB_ID,
-        );
+        )
+        .await;
         assert_eq!(fib_receipt.journal.decode::<u64>().unwrap(), 55);
 
         let slice = b"browser-native-slice-io";
@@ -1850,13 +1893,14 @@ mod tests {
             .write_slice(slice)
             .build()
             .unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover.as_ref(),
             "risc0-zkvm-methods/slice_io",
             env,
             SLICE_IO_ELF,
             SLICE_IO_ID,
-        );
+        )
+        .await;
         assert_eq!(receipt.journal.bytes, slice);
 
         let env = ExecutorEnv::builder()
@@ -1865,32 +1909,35 @@ mod tests {
             .env_var("ALL_FORKS", "testing")
             .build()
             .unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover.as_ref(),
             "risc0-zkvm-methods/heap",
             env,
             HEAP_ELF,
             HEAP_ID,
-        );
+        )
+        .await;
         assert_eq!(receipt.journal.decode::<u32>().unwrap(), 0);
 
         let env = ExecutorEnv::builder().build().unwrap();
-        prove_succinct(
+        prove_succinct_async(
             prover.as_ref(),
             "risc0-zkvm-methods/zkvm-527",
             env,
             ZKVM_527_ELF,
             ZKVM_527_ID,
-        );
+        )
+        .await;
 
         let env = ExecutorEnv::builder().build().unwrap();
-        prove_succinct(
+        prove_succinct_async(
             prover.as_ref(),
             "risc0-zkvm-methods/rand2",
             env,
             RAND2_ELF,
             RAND2_ID,
-        );
+        )
+        .await;
 
         let env = ExecutorEnv::builder()
             .env_var("TEST_MODE", "ENV_VARS")
@@ -1899,13 +1946,14 @@ mod tests {
             .stdin("ENV_VAR1\nENV_VAR2\nENV_VAR3".as_bytes())
             .build()
             .unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover.as_ref(),
             "risc0-zkvm-methods/standard_lib/env",
             env,
             STANDARD_LIB_ELF,
             STANDARD_LIB_ID,
-        );
+        )
+        .await;
         assert_eq!(
             std::str::from_utf8(&receipt.journal.bytes).unwrap(),
             "ENV_VAR1=val1\nENV_VAR2=\n!ENV_VAR3\n"
@@ -1922,13 +1970,14 @@ mod tests {
             .args(&args)
             .build()
             .unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover.as_ref(),
             "risc0-zkvm-methods/standard_lib/args",
             env,
             STANDARD_LIB_ELF,
             STANDARD_LIB_ID,
-        );
+        )
+        .await;
         assert_eq!(receipt.journal.decode::<Vec<String>>().unwrap(), args);
 
         let input = b"1234567";
@@ -1939,23 +1988,25 @@ mod tests {
             .write_slice(input.as_slice())
             .build()
             .unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover.as_ref(),
             "risc0-zkvm-methods/standard_lib/buf_read",
             env,
             STANDARD_LIB_ELF,
             STANDARD_LIB_ID,
-        );
+        )
+        .await;
         assert_eq!(receipt.journal.bytes, input);
 
         let env = ExecutorEnv::builder().build().unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover.as_ref(),
             "risc0-zkvm-methods/blst",
             env,
             BLST_ELF,
             BLST_ID,
-        );
+        )
+        .await;
         assert_eq!(
             receipt.journal.decode::<String>().unwrap(),
             "blst is such a blast"
@@ -1966,22 +2017,24 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        prove_succinct(
+        prove_succinct_async(
             prover.as_ref(),
             "risc0-zkvm-methods/bench/simple_loop",
             env,
             BENCH_ELF,
             BENCH_ID,
-        );
+        )
+        .await;
 
         let env = ExecutorEnv::builder().build().unwrap();
-        prove_succinct(
+        prove_succinct_async(
             prover.as_ref(),
             "risc0-zkvm-methods/test_feature",
             env,
             TEST_FEATURE_ELF,
             TEST_FEATURE_ID,
-        );
+        )
+        .await;
 
         let verify_input = (
             hello_receipt,
@@ -1993,13 +2046,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        prove_succinct(
+        prove_succinct_async(
             prover.as_ref(),
             "risc0-zkvm-methods/verify",
             env,
             VERIFY_ELF,
             VERIFY_ID,
-        );
+        )
+        .await;
     }
 
     #[wasm_bindgen_test(async)]
@@ -2008,13 +2062,14 @@ mod tests {
 
         let prover = init_prover().await;
         let env = ExecutorEnv::builder().build().unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover.as_ref(),
             "risc0-zkvm-methods/blst",
             env,
             BLST_ELF,
             BLST_ID,
-        );
+        )
+        .await;
         assert_eq!(
             receipt.journal.decode::<String>().unwrap(),
             "blst is such a blast"
@@ -2031,13 +2086,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        prove_succinct(
+        prove_succinct_async(
             prover.as_ref(),
             "risc0-zkvm-methods/bench/simple_loop",
             env,
             BENCH_ELF,
             BENCH_ID,
-        );
+        )
+        .await;
     }
 
     #[wasm_bindgen_test(async)]
@@ -2046,13 +2102,14 @@ mod tests {
 
         let prover = init_prover().await;
         let env = ExecutorEnv::builder().build().unwrap();
-        prove_succinct(
+        prove_succinct_async(
             prover.as_ref(),
             "risc0-zkvm-methods/test_feature",
             env,
             TEST_FEATURE_ELF,
             TEST_FEATURE_ID,
-        );
+        )
+        .await;
     }
 
     #[wasm_bindgen_test(async)]
@@ -2061,13 +2118,14 @@ mod tests {
         use risc0_zkvm_methods::{HELLO_COMMIT_ELF, HELLO_COMMIT_ID, VERIFY_ELF, VERIFY_ID};
 
         let prover = init_prover().await;
-        let hello_receipt = prove_succinct(
+        let hello_receipt = prove_succinct_async(
             prover.as_ref(),
             "risc0-zkvm-methods/verify/hello_commit",
             ExecutorEnv::builder().build().unwrap(),
             HELLO_COMMIT_ELF,
             HELLO_COMMIT_ID,
-        );
+        )
+        .await;
         let verify_input = (
             hello_receipt,
             Digest::from(HELLO_COMMIT_ID),
@@ -2078,13 +2136,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        prove_succinct(
+        prove_succinct_async(
             prover.as_ref(),
             "risc0-zkvm-methods/verify",
             env,
             VERIFY_ELF,
             VERIFY_ID,
-        );
+        )
+        .await;
     }
 
     #[wasm_bindgen_test(async)]
@@ -2123,13 +2182,14 @@ mod tests {
                 })
                 .build()
                 .unwrap();
-            prove_succinct(
+            prove_succinct_async(
                 prover.as_ref(),
                 "multi_test/syscall",
                 env,
                 MULTI_TEST_ELF,
                 MULTI_TEST_ID,
-            );
+            )
+            .await;
         }
         assert_eq!(*actual.borrow(), expected[..expected.len() - 1]);
 
@@ -2139,13 +2199,14 @@ mod tests {
             .io_callback(SYS_MULTI_TEST_WORDS, Ok)
             .build()
             .unwrap();
-        prove_succinct(
+        prove_succinct_async(
             prover.as_ref(),
             "multi_test/syscall_words",
             env,
             MULTI_TEST_ELF,
             MULTI_TEST_ID,
-        );
+        )
+        .await;
 
         let digest = Digest::from([1, 2, 3, 4, 5, 6, 7, 8]);
         let env = ExecutorEnv::builder()
@@ -2154,13 +2215,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let receipt = prove_succinct_integrity(
+        let receipt = prove_succinct_integrity_async(
             prover.as_ref(),
             "multi_test/sys_input",
             env,
             MULTI_TEST_ELF,
             &ProverOpts::succinct(),
-        );
+        )
+        .await;
         let opened_claim = receipt.claim().unwrap();
         let claim = opened_claim.as_value().unwrap();
         assert_eq!(claim.exit_code, ExitCode::Halted(0));
@@ -2180,13 +2242,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover.as_ref(),
             "multi_test/sys_read",
             env,
             MULTI_TEST_ELF,
             MULTI_TEST_ID,
-        );
+        )
+        .await;
         let (actual, num_read): (Vec<u8>, Vec<usize>) = receipt.journal.decode().unwrap();
         assert_eq!(num_read, vec![6, 1]);
         assert_eq!(actual, b"abABCDEFG\0\0\0".to_vec());
@@ -2200,13 +2263,14 @@ mod tests {
                 .stdout(&mut stdout)
                 .build()
                 .unwrap();
-            prove_succinct(
+            prove_succinct_async(
                 prover.as_ref(),
                 "multi_test/echo_stdout",
                 env,
                 MULTI_TEST_ELF,
                 MULTI_TEST_ID,
-            );
+            )
+            .await;
         }
         assert_eq!(stdout, b"Hello world!");
 
@@ -2220,18 +2284,19 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover.as_ref(),
             "multi_test/echo_words",
             env,
             MULTI_TEST_ELF,
             MULTI_TEST_ID,
-        );
+        )
+        .await;
         let actual: &[u32] = bytemuck::cast_slice(&receipt.journal.bytes);
         assert_eq!(actual, words.as_slice());
     }
 
-    fn prove_accelerator_pre_rsa(prover: &WebGpuProver) {
+    async fn prove_accelerator_pre_rsa_async(prover: &WebGpuProver) {
         use risc0_zkvm_methods::multi_test::MultiTestSpec;
 
         for (name, spec) in [
@@ -2245,11 +2310,11 @@ mod tests {
             ),
             ("multi_test/sha_conforms", MultiTestSpec::ShaConforms),
         ] {
-            prove_multi(prover, name, spec);
+            prove_multi_async(prover, name, spec).await;
         }
     }
 
-    fn prove_accelerator_post_rsa(prover: &WebGpuProver) {
+    async fn prove_accelerator_post_rsa_async(prover: &WebGpuProver) {
         use risc0_zkvm::sha::Digest;
         use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
 
@@ -2264,7 +2329,7 @@ mod tests {
             ),
             ("multi_test/sys_keccak", MultiTestSpec::SysKeccak),
         ] {
-            prove_multi(prover, name, spec);
+            prove_multi_async(prover, name, spec).await;
         }
 
         let env = ExecutorEnv::builder()
@@ -2274,13 +2339,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover,
             "multi_test/sha_digest",
             env,
             MULTI_TEST_ELF,
             MULTI_TEST_ID,
-        );
+        )
+        .await;
         let digest = Digest::try_from(receipt.journal.bytes).unwrap();
         assert_eq!(
             hex::encode(digest),
@@ -2295,13 +2361,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        prove_succinct(
+        prove_succinct_async(
             prover,
             "multi_test/sha_digest_iter",
             env,
             MULTI_TEST_ELF,
             MULTI_TEST_ID,
-        );
+        )
+        .await;
 
         let env = ExecutorEnv::builder()
             .write(&MultiTestSpec::BigInt {
@@ -2313,13 +2380,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        prove_succinct(
+        prove_succinct_async(
             prover,
             "multi_test/bigint",
             env,
             MULTI_TEST_ELF,
             MULTI_TEST_ID,
-        );
+        )
+        .await;
 
         const BIGINT_LEGAL_ADDR: u32 = 0x3000_0000;
         let env = ExecutorEnv::builder()
@@ -2332,13 +2400,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        prove_succinct(
+        prove_succinct_async(
             prover,
             "multi_test/bigint_raw",
             env,
             MULTI_TEST_ELF,
             MULTI_TEST_ID,
-        );
+        )
+        .await;
 
         let env = ExecutorEnv::builder()
             .write(&MultiTestSpec::KeccakUpdate2)
@@ -2347,15 +2416,16 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        prove_succinct(
+        prove_succinct_async(
             prover,
             "multi_test/keccak_update2",
             env,
             MULTI_TEST_ELF,
             MULTI_TEST_ID,
-        );
+        )
+        .await;
 
-        prove_keccak_union(prover);
+        prove_keccak_union_async(prover).await;
     }
 
     fn keccak_union_env_with_count(proof_count: usize) -> ExecutorEnv<'static> {
@@ -2424,7 +2494,7 @@ mod tests {
     #[wasm_bindgen_test(async)]
     async fn native_accelerator_pre_rsa_succinct_receipts_verify() {
         let prover = init_prover().await;
-        prove_accelerator_pre_rsa(prover.as_ref());
+        prove_accelerator_pre_rsa_async(prover.as_ref()).await;
     }
 
     #[wasm_bindgen_test(async)]
@@ -2432,7 +2502,7 @@ mod tests {
         use risc0_zkvm_methods::multi_test::MultiTestSpec;
 
         let prover = init_prover().await;
-        prove_multi(prover.as_ref(), "multi_test/libm", MultiTestSpec::LibM);
+        prove_multi_async(prover.as_ref(), "multi_test/libm", MultiTestSpec::LibM).await;
     }
 
     #[wasm_bindgen_test(async)]
@@ -2440,17 +2510,18 @@ mod tests {
         use risc0_zkvm_methods::multi_test::MultiTestSpec;
 
         let prover = init_prover().await;
-        prove_multi(
+        prove_multi_async(
             prover.as_ref(),
             "multi_test/rsa_compat",
             MultiTestSpec::RsaCompat,
-        );
+        )
+        .await;
     }
 
     #[wasm_bindgen_test(async)]
     async fn native_accelerator_post_rsa_succinct_receipts_verify() {
         let prover = init_prover().await;
-        prove_accelerator_post_rsa(prover.as_ref());
+        prove_accelerator_post_rsa_async(prover.as_ref()).await;
     }
 
     #[wasm_bindgen_test(async)]
@@ -2483,13 +2554,14 @@ mod tests {
 
         let prover = init_prover().await;
 
-        prove_accelerator_pre_rsa(prover.as_ref());
-        prove_multi(
+        prove_accelerator_pre_rsa_async(prover.as_ref()).await;
+        prove_multi_async(
             prover.as_ref(),
             "multi_test/rsa_compat",
             MultiTestSpec::RsaCompat,
-        );
-        prove_accelerator_post_rsa(prover.as_ref());
+        )
+        .await;
+        prove_accelerator_post_rsa_async(prover.as_ref()).await;
     }
 
     #[wasm_bindgen_test(async)]
@@ -2503,13 +2575,14 @@ mod tests {
 
         let prover = init_prover().await;
 
-        let hello_receipt = prove_succinct(
+        let hello_receipt = prove_succinct_async(
             prover.as_ref(),
             "assumption/hello_commit",
             ExecutorEnv::builder().build().unwrap(),
             HELLO_COMMIT_ELF,
             HELLO_COMMIT_ID,
-        );
+        )
+        .await;
         let hello_claim = hello_receipt.claim().unwrap().as_value().unwrap().clone();
 
         let env = ExecutorEnv::builder()
@@ -2521,13 +2594,14 @@ mod tests {
             .add_assumption(hello_receipt.clone())
             .build()
             .unwrap();
-        prove_succinct(
+        prove_succinct_async(
             prover.as_ref(),
             "multi_test/sys_verify",
             env,
             MULTI_TEST_ELF,
             MULTI_TEST_ID,
-        );
+        )
+        .await;
 
         let env = ExecutorEnv::builder()
             .write(&MultiTestSpec::SysVerifyIntegrity {
@@ -2537,13 +2611,14 @@ mod tests {
             .add_assumption(hello_receipt.clone())
             .build()
             .unwrap();
-        prove_succinct(
+        prove_succinct_async(
             prover.as_ref(),
             "multi_test/sys_verify_integrity",
             env,
             MULTI_TEST_ELF,
             MULTI_TEST_ID,
-        );
+        )
+        .await;
 
         let assumption = Assumption {
             claim: hello_receipt.claim().unwrap().digest(),
@@ -2557,13 +2632,14 @@ mod tests {
             .add_assumption(hello_receipt.clone())
             .build()
             .unwrap();
-        prove_succinct(
+        prove_succinct_async(
             prover.as_ref(),
             "multi_test/sys_verify_assumption",
             env,
             MULTI_TEST_ELF,
             MULTI_TEST_ID,
-        );
+        )
+        .await;
 
         let env = ExecutorEnv::builder()
             .segment_limit_po2(15)
@@ -2571,13 +2647,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover.as_ref(),
             "multi_test/continuation",
             env,
             MULTI_TEST_ELF,
             MULTI_TEST_ID,
-        );
+        )
+        .await;
         assert_eq!(
             receipt.claim().unwrap().as_value().unwrap().exit_code,
             ExitCode::Halted(0)
@@ -2594,14 +2671,15 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let prove_info = prove_succinct_info(
+        let prove_info = prove_succinct_info_async(
             prover.as_ref(),
             "multi_test/povw",
             env,
             MULTI_TEST_ELF,
             MULTI_TEST_ID,
             &ProverOpts::succinct(),
-        );
+        )
+        .await;
         let work_receipt = prove_info
             .work_receipt
             .expect("multi_test/povw: missing work receipt");
@@ -2626,13 +2704,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let receipt = prove_succinct_integrity(
+        let receipt = prove_succinct_integrity_async(
             prover.as_ref(),
             "multi_test/halt_nonzero",
             env,
             MULTI_TEST_ELF,
             &ProverOpts::succinct().with_prove_guest_errors(true),
-        );
+        )
+        .await;
         assert_eq!(
             receipt.claim().unwrap().as_value().unwrap().exit_code,
             ExitCode::Halted(1)
@@ -2662,14 +2741,15 @@ mod tests {
             BigUint::parse_bytes(hex.as_bytes(), 16).unwrap()
         }
 
-        fn prove_decode<T: DeserializeOwned>(
+        async fn prove_decode<T: DeserializeOwned>(
             prover: &WebGpuProver,
             name: &str,
-            env: ExecutorEnv,
+            env: ExecutorEnv<'_>,
             elf: &[u8],
             image_id: [u32; 8],
         ) -> T {
-            prove_succinct(prover, name, env, elf, image_id)
+            prove_succinct_async(prover, name, env, elf, image_id)
+                .await
                 .journal
                 .decode()
                 .unwrap()
@@ -2696,7 +2776,7 @@ mod tests {
                 .unwrap()
                 .build()
                 .unwrap();
-            let result: BigUint = prove_decode(prover.as_ref(), name, env, elf, image_id);
+            let result: BigUint = prove_decode(prover.as_ref(), name, env, elf, image_id).await;
             assert_eq!(result, expected);
         }
 
@@ -2719,7 +2799,7 @@ mod tests {
                 .unwrap()
                 .build()
                 .unwrap();
-            let result: BigUint = prove_decode(prover.as_ref(), name, env, elf, image_id);
+            let result: BigUint = prove_decode(prover.as_ref(), name, env, elf, image_id).await;
             assert_eq!(result, expected);
         }
 
@@ -2742,7 +2822,7 @@ mod tests {
                 .unwrap()
                 .build()
                 .unwrap();
-            let result: BigUint = prove_decode(prover.as_ref(), name, env, elf, image_id);
+            let result: BigUint = prove_decode(prover.as_ref(), name, env, elf, image_id).await;
             assert_eq!(result, expected);
         }
 
@@ -2765,7 +2845,7 @@ mod tests {
                 .unwrap()
                 .build()
                 .unwrap();
-            let result: BigUint = prove_decode(prover.as_ref(), name, env, elf, image_id);
+            let result: BigUint = prove_decode(prover.as_ref(), name, env, elf, image_id).await;
             assert_eq!(result, expected);
         }
 
@@ -2789,7 +2869,7 @@ mod tests {
                 .build()
                 .unwrap();
             let result: (BigUint, BigUint) =
-                prove_decode(prover.as_ref(), name, env, elf, image_id);
+                prove_decode(prover.as_ref(), name, env, elf, image_id).await;
             assert_eq!(result, expected);
         }
 
@@ -2813,7 +2893,7 @@ mod tests {
                 .build()
                 .unwrap();
             let result: (BigUint, BigUint) =
-                prove_decode(prover.as_ref(), name, env, elf, image_id);
+                prove_decode(prover.as_ref(), name, env, elf, image_id).await;
             assert_eq!(result, expected);
         }
 
@@ -2836,7 +2916,8 @@ mod tests {
             env,
             EXTFIELD_DEG2_MUL_ELF,
             EXTFIELD_DEG2_MUL_ID,
-        );
+        )
+        .await;
         assert_eq!(result, (bu("04"), bu("05")));
 
         for (name, elf, image_id) in [
@@ -2857,7 +2938,7 @@ mod tests {
                 .build()
                 .unwrap();
             let result: (BigUint, BigUint) =
-                prove_decode(prover.as_ref(), name, env, elf, image_id);
+                prove_decode(prover.as_ref(), name, env, elf, image_id).await;
             assert_eq!(result, (bu("00"), bu("06")));
         }
 
@@ -2886,7 +2967,8 @@ mod tests {
             env,
             EXTFIELD_DEG4_MUL_ELF,
             EXTFIELD_DEG4_MUL_ID,
-        );
+        )
+        .await;
         assert_eq!(result, (bu("01"), bu("04"), bu("03"), bu("06")));
 
         const BIGINT_LEGAL_ADDR: u32 = 0x3000_0000;
@@ -2895,13 +2977,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        prove_succinct(
+        prove_succinct_async(
             prover.as_ref(),
             "bigint2/raw_test",
             env,
             RAW_TEST_ELF,
             RAW_TEST_ID,
-        );
+        )
+        .await;
 
         let lhs: Option<[[u32; 8]; 2]> = Some([
             [
@@ -2944,7 +3027,8 @@ mod tests {
             env,
             EC_ADD_256_ELF,
             EC_ADD_256_ID,
-        );
+        )
+        .await;
         assert_eq!(result, expected);
 
         let point: Option<[[u32; 8]; 2]> = Some([
@@ -2968,16 +3052,18 @@ mod tests {
             env,
             EC_DOUBLE_256_ELF,
             EC_DOUBLE_256_ID,
-        );
+        )
+        .await;
         assert!(result.is_some());
 
-        prove_succinct(
+        prove_succinct_async(
             prover.as_ref(),
             "bigint2/ec_mul_256",
             ExecutorEnv::builder().build().unwrap(),
             EC_MUL_256_ELF,
             EC_MUL_256_ID,
-        );
+        )
+        .await;
 
         let point384: Option<[[u32; 12]; 2]> = Some([
             [
@@ -3000,23 +3086,26 @@ mod tests {
             env,
             EC_384_ELF,
             EC_384_ID,
-        );
+        )
+        .await;
         assert!(result.is_some());
 
-        prove_succinct(
+        prove_succinct_async(
             prover.as_ref(),
             "bigint2/ecdsa",
             ExecutorEnv::builder().build().unwrap(),
             ECDSA_ELF,
             ECDSA_ID,
-        );
+        )
+        .await;
 
         let env = ExecutorEnv::builder()
             .write(&(bu("01"), bu("05")))
             .unwrap()
             .build()
             .unwrap();
-        let result: BigUint = prove_decode(prover.as_ref(), "bigint2/rsa", env, RSA_ELF, RSA_ID);
+        let result: BigUint =
+            prove_decode(prover.as_ref(), "bigint2/rsa", env, RSA_ELF, RSA_ID).await;
         assert_eq!(result, bu("01"));
     }
 
@@ -3032,13 +3121,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover.as_ref(),
             "hello-world",
             env,
             MULTIPLY_ELF,
             MULTIPLY_ID,
-        );
+        )
+        .await;
         assert_eq!(receipt.journal.decode::<u64>().unwrap(), 391);
     }
 
@@ -3054,13 +3144,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover.as_ref(),
             "json",
             env,
             SEARCH_JSON_ELF,
             SEARCH_JSON_ID,
-        );
+        )
+        .await;
         let outputs: Outputs = receipt.journal.decode().unwrap();
         assert_eq!(outputs.data, 47);
     }
@@ -3083,7 +3174,8 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let receipt = prove_succinct(prover.as_ref(), "chess", env, CHECKMATE_ELF, CHECKMATE_ID);
+        let receipt =
+            prove_succinct_async(prover.as_ref(), "chess", env, CHECKMATE_ELF, CHECKMATE_ID).await;
         assert_eq!(receipt.journal.decode::<String>().unwrap(), BOARD);
     }
 
@@ -3101,13 +3193,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let multiply_receipt = prove_succinct(
+        let multiply_receipt = prove_succinct_async(
             prover.as_ref(),
             "composition/multiply-assumption",
             multiply_env,
             MULTIPLY_ELF,
             MULTIPLY_ID,
-        );
+        )
+        .await;
         let n: u64 = multiply_receipt.journal.decode().unwrap();
 
         let env = ExecutorEnv::builder()
@@ -3116,13 +3209,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover.as_ref(),
             "composition",
             env,
             EXPONENTIATE_ELF,
             EXPONENTIATE_ID,
-        );
+        )
+        .await;
         let (n_out, e, c): (u64, u64, u64) = receipt.journal.decode().unwrap();
         assert_eq!((n_out, e, c), (391, 9, 32));
     }
@@ -3161,13 +3255,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover.as_ref(),
             "jwt-validator",
             env,
             VALIDATOR_ELF,
             VALIDATOR_ID,
-        );
+        )
+        .await;
         assert_eq!(receipt.journal.decode::<String>().unwrap(), claims.subject);
     }
 
@@ -3183,7 +3278,8 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let receipt = prove_succinct(prover.as_ref(), "bevy", env, BEVY_GUEST_ELF, BEVY_GUEST_ID);
+        let receipt =
+            prove_succinct_async(prover.as_ref(), "bevy", env, BEVY_GUEST_ELF, BEVY_GUEST_ID).await;
         let outputs: Outputs = receipt.journal.decode().unwrap();
         assert_eq!(outputs.position, turns as f32);
     }
@@ -3204,7 +3300,7 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        prove_succinct(prover.as_ref(), "digital-signature", env, SIGN_ELF, SIGN_ID);
+        prove_succinct_async(prover.as_ref(), "digital-signature", env, SIGN_ELF, SIGN_ID).await;
     }
 
     #[wasm_bindgen_test(async)]
@@ -3233,13 +3329,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover.as_ref(),
             "groth16-verifier",
             env,
             GROTH16_VERIFIER_ELF,
             GROTH16_VERIFIER_ID,
-        );
+        )
+        .await;
         let (_vk_digest, _public_inputs_digest): (Digest, Digest) =
             receipt.journal.decode().unwrap();
     }
@@ -3261,13 +3358,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover.as_ref(),
             "prorata",
             env,
             PRORATA_GUEST_ELF,
             PRORATA_GUEST_ID,
-        );
+        )
+        .await;
         let result: AllocationQueryResult = receipt.journal.decode().unwrap();
         assert_eq!(result.allocation.unwrap().name, "Alice");
     }
@@ -3311,13 +3409,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover.as_ref(),
             "wasm",
             env,
             WASM_INTERP_ELF,
             WASM_INTERP_ID,
-        );
+        )
+        .await;
         assert_eq!(receipt.journal.decode::<i32>().unwrap(), 55);
     }
 
@@ -3338,7 +3437,8 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let receipt = prove_succinct(prover.as_ref(), "xgboost", env, XGBOOST_ELF, XGBOOST_ID);
+        let receipt =
+            prove_succinct_async(prover.as_ref(), "xgboost", env, XGBOOST_ELF, XGBOOST_ID).await;
         assert_eq!(receipt.journal.decode::<f64>().unwrap(), 30.528042544062632);
     }
 
@@ -3367,13 +3467,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover.as_ref(),
             "bn254",
             env,
             BN254_VERIFY_ELF,
             BN254_VERIFY_ID,
-        );
+        )
+        .await;
         assert!(receipt.journal.decode::<bool>().unwrap());
     }
 
@@ -3392,13 +3493,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        prove_succinct(
+        prove_succinct_async(
             prover.as_ref(),
             "password-checker",
             env,
             PW_CHECKER_ELF,
             PW_CHECKER_ID,
-        );
+        )
+        .await;
     }
 
     #[wasm_bindgen_test(async)]
@@ -3423,13 +3525,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        prove_succinct(
+        prove_succinct_async(
             prover.as_ref(),
             "voting-machine/init",
             init_env,
             INIT_ELF,
             INIT_ID,
-        );
+        )
+        .await;
 
         let ballot = Ballot {
             voter: 1,
@@ -3443,13 +3546,14 @@ mod tests {
             .stdout(&mut submit_output)
             .build()
             .unwrap();
-        prove_succinct(
+        prove_succinct_async(
             prover.as_ref(),
             "voting-machine/submit",
             submit_env,
             SUBMIT_ELF,
             SUBMIT_ID,
-        );
+        )
+        .await;
         state = from_slice(&submit_output).unwrap();
 
         let params = FreezeVotingMachineParams::new(state.clone());
@@ -3460,13 +3564,14 @@ mod tests {
             .stdout(&mut freeze_output)
             .build()
             .unwrap();
-        prove_succinct(
+        prove_succinct_async(
             prover.as_ref(),
             "voting-machine/freeze",
             freeze_env,
             FREEZE_ELF,
             FREEZE_ID,
-        );
+        )
+        .await;
         let result: FreezeVotingMachineResult = from_slice(&freeze_output).unwrap();
         assert!(!result.state.polls_open);
     }
@@ -3482,7 +3587,7 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        prove_succinct(prover.as_ref(), "keccak", env, KECCAK_ELF, KECCAK_ID);
+        prove_succinct_async(prover.as_ref(), "keccak", env, KECCAK_ELF, KECCAK_ID).await;
     }
 
     #[wasm_bindgen_test(async)]
@@ -3514,13 +3619,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover.as_ref(),
             "smartcore-ml",
             env,
             ML_TEMPLATE_ELF,
             ML_TEMPLATE_ID,
-        );
+        )
+        .await;
         let result: Vec<u32> = receipt.journal.decode().unwrap();
         assert_eq!(result.len(), 150);
     }
@@ -3540,13 +3646,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover.as_ref(),
             "wordle",
             env,
             WORDLE_GUEST_ELF,
             WORDLE_GUEST_ID,
-        );
+        )
+        .await;
         let state: GameState = receipt.journal.decode().unwrap();
         let feedback: WordFeedback = state.feedback;
         assert_eq!(feedback.0.len(), 5);
@@ -3572,7 +3679,7 @@ mod tests {
                 .unwrap()
                 .build()
                 .unwrap();
-            prove_succinct(prover.as_ref(), name, env, elf, image_id);
+            prove_succinct_async(prover.as_ref(), name, env, elf, image_id).await;
         }
     }
 
@@ -3594,7 +3701,7 @@ mod tests {
             .write_slice(&11u32.to_le_bytes())
             .build()
             .unwrap();
-        let receipt = prove_succinct(prover.as_ref(), "c-guest", env, &elf, image_id);
+        let receipt = prove_succinct_async(prover.as_ref(), "c-guest", env, &elf, image_id).await;
         assert_eq!(receipt.journal.decode::<u32>().unwrap(), 77);
     }
 
@@ -3628,7 +3735,9 @@ mod tests {
             .io_callback(SYS_VECTOR_ORACLE, tree.vector_oracle_callback())
             .build()
             .unwrap();
-        let receipt = prove_succinct(prover.as_ref(), "waldo", env, IMAGE_CROP_ELF, IMAGE_CROP_ID);
+        let receipt =
+            prove_succinct_async(prover.as_ref(), "waldo", env, IMAGE_CROP_ELF, IMAGE_CROP_ID)
+                .await;
         let journal: Journal = receipt.journal.decode().unwrap();
         assert_eq!(journal.subimage_dimensions, (3, 3));
     }
@@ -3655,13 +3764,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover.as_ref(),
             "ecdsa/k256",
             env,
             K256_VERIFY_ELF,
             K256_VERIFY_ID,
-        );
+        )
+        .await;
         let (_key, msg): (EncodedPoint, Vec<u8>) = receipt.journal.decode().unwrap();
         assert_eq!(msg, message);
     }
@@ -3688,13 +3798,14 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let receipt = prove_succinct(
+        let receipt = prove_succinct_async(
             prover.as_ref(),
             "ecdsa/p256",
             env,
             P256_VERIFY_ELF,
             P256_VERIFY_ID,
-        );
+        )
+        .await;
         let (_key, msg): (EncodedPoint, Vec<u8>) = receipt.journal.decode().unwrap();
         assert_eq!(msg, message);
     }
@@ -4163,7 +4274,12 @@ mod native_stats_tests {
             .unwrap()
             .build()
             .unwrap();
-        prove_and_print_stats("multi_test/keccak_union", env, MULTI_TEST_ELF, MULTI_TEST_ID);
+        prove_and_print_stats(
+            "multi_test/keccak_union",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        );
     }
 
     #[test]

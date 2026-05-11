@@ -49,6 +49,9 @@ prorata-core = { path = "../prorata/core" }
 prorata-methods = { path = "../prorata/methods" }
 risc0-bigint2-methods = { path = "../../risc0/bigint2/methods" }
 risc0-binfmt = { path = "../../risc0/binfmt" }
+risc0-circuit-keccak = { path = "../../risc0/circuit/keccak", features = [
+  "webgpu",
+] }
 risc0-circuit-recursion = { path = "../../risc0/circuit/recursion", features = [
   "test",
   "webgpu",

@@ -4,6 +4,10 @@ Status: approved requirements seed
 
 Date: 2026-05-08
 
+Implementation note: work on this goal is paused at user request as of
+2026-05-11. See `docs/wasm-webgpu-prover-learnings.md` for the current
+implementation summary, validation evidence, remaining gaps, and resume plan.
+
 ## Goal Prompt
 
 Do not stop until you create a fully working end-to-end WASM/WebGPU proving

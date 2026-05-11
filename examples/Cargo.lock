@@ -856,6 +856,7 @@ dependencies = [
  "prorata-methods",
  "risc0-bigint2-methods",
  "risc0-binfmt",
+ "risc0-circuit-keccak",
  "risc0-circuit-recursion",
  "risc0-groth16",
  "risc0-zkos-v1compat",

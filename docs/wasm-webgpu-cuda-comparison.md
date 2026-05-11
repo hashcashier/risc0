@@ -1,6 +1,9 @@
 # Browser WebGPU vs Native CUDA Proving
 
-Status: working comparison for optimization discovery.
+Status: comparison paused at user request; retained as optimization context.
+
+See `docs/wasm-webgpu-prover-learnings.md` for the pause handoff, latest
+results summary, and recommended resume plan.
 
 This note compares the current browser WebGPU proving path with native CUDA
 proving as implemented in this branch. It is intentionally focused on the
