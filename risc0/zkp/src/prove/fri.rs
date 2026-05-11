@@ -164,18 +164,6 @@ impl WebGpuProveRoundInfo {
             merkle,
         })
     }
-
-    async fn prove_query_async(
-        &mut self,
-        hal: &crate::hal::webgpu::WebGpuHal,
-        iop: &mut WriteIOP<risc0_core::field::baby_bear::BabyBear>,
-        pos: &mut usize,
-    ) -> anyhow::Result<()> {
-        let group = *pos % (self.domain / FRI_FOLD);
-        self.merkle.prove_async(hal, iop, group).await?;
-        *pos = group;
-        Ok(())
-    }
 }
 
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
@@ -207,13 +195,50 @@ pub async fn fri_prove_async(
     });
 
     debug!("Doing Queries");
+    let mut query_positions = Vec::with_capacity(QUERIES);
+    let mut round_positions = Vec::with_capacity(QUERIES);
     for _ in 0..QUERIES {
-        let mut pos = iop.random_bits(log2_ceil(orig_domain)) as usize;
-        for merkle in inner_merkles {
-            merkle.prove_async(hal, iop, pos).await?;
+        let pos = iop.random_bits(log2_ceil(orig_domain)) as usize;
+        let mut pos_for_rounds = pos;
+        let mut per_round = Vec::with_capacity(rounds.len());
+        for round in rounds.iter() {
+            let group = pos_for_rounds % (round.domain / FRI_FOLD);
+            per_round.push(group);
+            pos_for_rounds = group;
         }
-        for round in rounds.iter_mut() {
-            round.prove_query_async(hal, iop, &mut pos).await?;
+        query_positions.push(pos);
+        round_positions.push(per_round);
+    }
+
+    let mut inner_proofs = Vec::with_capacity(inner_merkles.len());
+    for merkle in inner_merkles {
+        inner_proofs.push(
+            merkle
+                .prove_batch_async(hal, query_positions.as_slice())
+                .await?,
+        );
+    }
+
+    let mut round_proofs = Vec::with_capacity(rounds.len());
+    for (round_idx, round) in rounds.iter().enumerate() {
+        let positions = round_positions
+            .iter()
+            .map(|per_round| per_round[round_idx])
+            .collect::<Vec<_>>();
+        round_proofs.push(
+            round
+                .merkle
+                .prove_batch_async(hal, positions.as_slice())
+                .await?,
+        );
+    }
+
+    for query_idx in 0..QUERIES {
+        for proofs in &inner_proofs {
+            proofs[query_idx].write_to_iop(iop);
+        }
+        for proofs in &round_proofs {
+            proofs[query_idx].write_to_iop(iop);
         }
     }
     Ok(())

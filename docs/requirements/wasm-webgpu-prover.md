@@ -396,7 +396,7 @@ facts that affect the implementation path.
   a verified succinct receipt. It used `WebGpuProver::prove_with_opts_async`,
   produced 1 segment with 3598 user cycles and 32768 total cycles, and kept
   both rv32im and recursion ZKP commit/finalize in GPU-authoritative mode. The
-  latest focused rerun took 32.17s in Chrome after a 510.743182ms native CUDA
+  latest focused rerun took 30.42s in Chrome after a 426.538233ms native CUDA
   baseline for the same fixture. The run recorded `eval_check` as 6 WebGPU
   dispatches and 0 CPU fallbacks. The rv32im check uses the interpreted WebGPU
   path; recursion uses the same interpreter with bounded chunk uploads for its
@@ -459,9 +459,15 @@ facts that affect the implementation path.
   deferred until the async GPU-authoritative path is extended and optimized for
   the full matrix.
 - The accelerator/precompile group is not complete in browser:
-  `multi_test/rsa_compat` and `multi_test/keccak_union` time out under the
-  current browser proof path before producing succinct receipts.
-  `multi_test/keccak_union` also times out in a standalone 7200s browser run.
+  `multi_test/rsa_compat` and the full `multi_test/keccak_union` fixture time
+  out under the current browser proof path before producing succinct receipts.
+  A smaller `KeccakUnion(1)` diagnostic now proves and verifies as a
+  standalone Chrome/WebGPU succinct receipt after the async Keccak receipt
+  union fix and async WebGPU Keccak subproof path. The latest focused run took
+  1372.79s in Chrome/WebGPU versus a 7.495052818s native CUDA baseline for the
+  same 4 segments. Batched Merkle query readbacks reduced it to 1314 readbacks
+  and 237 CPU fallbacks; the full `KeccakUnion(3)` fixture remains
+  performance-blocked.
 - `RunUnconstrained { unconstrained: true }` is classified as a native-disabled
   fixture in this checkout because `SYS_FORK` is not registered in the native
   syscall table and the native proving test is ignored.

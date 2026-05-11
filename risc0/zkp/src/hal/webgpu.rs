@@ -5662,13 +5662,49 @@ impl WebGpuHal {
         size: usize,
         stride: usize,
     ) -> Result<()> {
-        if !self.gpu_authoritative()
-            || !self.can_dispatch_gather_sample(dst, src, idx, size, stride)
+        let can_dispatch = self.can_dispatch_gather_sample(dst, src, idx, size, stride);
+        if self.gpu_authoritative() && can_dispatch {
+            self.gather_sample(dst, src, idx, size, stride);
+            return Ok(());
+        }
+
+        if self.gpu_authoritative()
+            && !src.cpu_is_current()
+            && size <= dst.size()
+            && gather_region_in_bounds(src.size(), idx, size, stride)
         {
+            src.sync_cpu_to_gpu(self)?;
+            if let Some(src_gpu) = src.raw_buffer() {
+                let sample = self
+                    .read_gathered_elem_sample(src_gpu, src.elem_offset, idx, size, stride)
+                    .await?;
+                dst.cpu.view_mut(|cpu| {
+                    cpu[..sample.len()].clone_from_slice(sample.as_slice());
+                });
+                dst.mark_cpu_result(false);
+                self.diagnostics.record_cpu_fallback("gather_sample");
+                return Ok(());
+            }
+        }
+
+        if !self.gpu_authoritative() || !can_dispatch {
             src.sync_gpu_to_cpu(self).await?;
         }
         self.gather_sample(dst, src, idx, size, stride);
         Ok(())
+    }
+
+    /// Test hook for the async gather path used by Merkle query openings.
+    #[doc(hidden)]
+    pub async fn debug_gather_sample_async(
+        &self,
+        dst: &WebGpuBuffer<BabyBearElem>,
+        src: &WebGpuBuffer<BabyBearElem>,
+        idx: usize,
+        size: usize,
+        stride: usize,
+    ) -> Result<()> {
+        self.gather_sample_async(dst, src, idx, size, stride).await
     }
 
     /// Test hook for validating chunked gather bindings without changing the
@@ -6059,6 +6095,147 @@ impl WebGpuHal {
         readback.unmap();
         self.diagnostics.record_readback(bytes.len() as u64);
         Ok(bytes)
+    }
+
+    /// Copy fixed-size elements at arbitrary indices from a GPU buffer into
+    /// contiguous WASM memory.
+    pub async fn read_buffer_indices(
+        &self,
+        source: &web_sys::GpuBuffer,
+        base_byte_offset: u64,
+        elem_size: u64,
+        indices: &[usize],
+    ) -> Result<Vec<u8>> {
+        if indices.is_empty() {
+            return Ok(Vec::new());
+        }
+        ensure!(
+            elem_size > 0,
+            "WebGPU indexed readback element size is zero"
+        );
+
+        let byte_len = indices
+            .len()
+            .checked_mul(
+                usize::try_from(elem_size)
+                    .map_err(|_| anyhow!("WebGPU indexed readback element size exceeds usize"))?,
+            )
+            .and_then(|value| value.try_into().ok())
+            .ok_or_else(|| anyhow!("WebGPU indexed readback length overflow"))?;
+        let readback = self.create_buffer(
+            "webgpu_indexed_readback",
+            byte_len,
+            WEBGPU_BUFFER_USAGE_MAP_READ | WEBGPU_BUFFER_USAGE_COPY_DST,
+        )?;
+
+        let encoder = self.device.create_command_encoder();
+        for (out_idx, source_idx) in indices.iter().copied().enumerate() {
+            let indexed_byte_offset = u64::try_from(source_idx)
+                .ok()
+                .and_then(|idx| idx.checked_mul(elem_size))
+                .and_then(|offset| base_byte_offset.checked_add(offset))
+                .ok_or_else(|| anyhow!("WebGPU indexed readback source offset overflow"))?;
+            let destination_byte_offset = u64::try_from(out_idx)
+                .ok()
+                .and_then(|idx| idx.checked_mul(elem_size))
+                .ok_or_else(|| anyhow!("WebGPU indexed readback destination offset overflow"))?;
+            encoder
+                .copy_buffer_to_buffer_with_f64_and_f64_and_f64(
+                    source,
+                    byte_offset_as_f64(indexed_byte_offset)?,
+                    &readback,
+                    byte_offset_as_f64(destination_byte_offset)?,
+                    byte_len_as_f64(elem_size)?,
+                )
+                .map_err(js_error)?;
+        }
+        self.submit(encoder.finish());
+
+        let byte_len_f64 = byte_len_as_f64(byte_len)?;
+        JsFuture::from(readback.map_async_with_f64_and_f64(
+            WEBGPU_MAP_MODE_READ,
+            0.0,
+            byte_len_f64,
+        ))
+        .await
+        .map_err(js_error)?;
+
+        let mapped = readback
+            .get_mapped_range_with_f64_and_f64(0.0, byte_len_f64)
+            .map_err(js_error)?;
+        let bytes = js_sys::Uint8Array::new(&mapped).to_vec();
+        readback.unmap();
+        self.diagnostics.record_readback(bytes.len() as u64);
+        Ok(bytes)
+    }
+
+    async fn read_gathered_elem_sample(
+        &self,
+        source: &web_sys::GpuBuffer,
+        source_elem_offset: usize,
+        idx: usize,
+        size: usize,
+        stride: usize,
+    ) -> Result<Vec<BabyBearElem>> {
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        let byte_len = byte_len_for::<BabyBearElem>(size);
+        let readback = self.create_buffer(
+            "webgpu_gather_sample_readback",
+            byte_len,
+            WEBGPU_BUFFER_USAGE_MAP_READ | WEBGPU_BUFFER_USAGE_COPY_DST,
+        )?;
+
+        let encoder = self.device.create_command_encoder();
+        let elem_bytes = byte_len_for::<BabyBearElem>(1);
+        for out_idx in 0..size {
+            let source_idx = source_elem_offset
+                .checked_add(idx)
+                .and_then(|base| {
+                    out_idx
+                        .checked_mul(stride)
+                        .and_then(|offset| base.checked_add(offset))
+                })
+                .ok_or_else(|| anyhow!("WebGPU gather readback source offset overflow"))?;
+            let source_offset = byte_offset_as_f64(byte_len_for::<BabyBearElem>(source_idx))?;
+            let destination_offset = byte_offset_as_f64(byte_len_for::<BabyBearElem>(out_idx))?;
+            encoder
+                .copy_buffer_to_buffer_with_f64_and_f64_and_f64(
+                    source,
+                    source_offset,
+                    &readback,
+                    destination_offset,
+                    byte_len_as_f64(elem_bytes)?,
+                )
+                .map_err(js_error)?;
+        }
+        self.submit(encoder.finish());
+
+        JsFuture::from(readback.map_async_with_f64_and_f64(
+            WEBGPU_MAP_MODE_READ,
+            0.0,
+            byte_len_as_f64(byte_len)?,
+        ))
+        .await
+        .map_err(js_error)?;
+
+        let mapped = readback
+            .get_mapped_range_with_f64_and_f64(0.0, byte_len_as_f64(byte_len)?)
+            .map_err(js_error)?;
+        let bytes = js_sys::Uint8Array::new(&mapped).to_vec();
+        readback.unmap();
+        self.diagnostics.record_readback(bytes.len() as u64);
+
+        let values = bytemuck::checked::try_cast_slice::<u8, BabyBearElem>(bytes.as_slice())
+            .map_err(|err| anyhow!("invalid WebGPU gather readback: {err}"))?;
+        ensure!(
+            values.len() == size,
+            "WebGPU gather readback size mismatch: got {} elems, expected {size}",
+            values.len()
+        );
+        Ok(values.to_vec())
     }
 
     fn dispatch_zeroize_elem(&self, elems: &WebGpuBuffer<BabyBearElem>) -> Result<bool> {

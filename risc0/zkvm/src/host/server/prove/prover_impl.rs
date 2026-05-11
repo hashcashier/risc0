@@ -14,6 +14,8 @@
 
 use std::collections::HashMap;
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+use std::collections::VecDeque;
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 use std::rc::Rc;
 
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
@@ -22,6 +24,8 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 use risc0_zkp::hal::webgpu::WebGpuHal;
 
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+use super::keccak::prove_keccak_webgpu;
 use super::{keccak::prove_keccak, ProverServer};
 use crate::{
     claim::merge::Merge,
@@ -123,18 +127,6 @@ impl ProverImpl {
         self.webgpu_hal
             .clone()
             .ok_or_else(|| anyhow!("browser WebGPU HAL is not initialized"))
-    }
-
-    fn with_webgpu_circuit_hal<T>(&self, f: impl FnOnce() -> T) -> Result<T> {
-        let hal = self.webgpu_hal()?;
-        Ok(risc0_circuit_rv32im::prove::with_webgpu_hal(
-            hal.clone(),
-            || {
-                risc0_circuit_keccak::prove::with_webgpu_hal(hal.clone(), || {
-                    risc0_circuit_recursion::prove::with_webgpu_hal(hal, f)
-                })
-            },
-        ))
     }
 
     pub(crate) async fn prove_with_ctx_async(
@@ -275,18 +267,18 @@ impl ProverImpl {
             .digest();
 
         let mut zkr_receipts = HashMap::new();
-        let mut keccak_receipts: MerkleMountainAccumulator<UnionPeak> =
-            MerkleMountainAccumulator::new();
+        let mut keccak_receipts = VecDeque::new();
         for (_idx, proof_request) in session.pending_keccaks.iter().enumerate() {
             let _timer = WebGpuStageTimer::new(format!("prove_keccak_request index={_idx}"));
-            let receipt = self.with_webgpu_circuit_hal(|| prove_keccak(proof_request))??;
+            let receipt = prove_keccak_webgpu(proof_request, self.webgpu_hal()?).await?;
             tracing::debug!("adding keccak assumption: {}", receipt.claim.digest());
-            keccak_receipts.insert(receipt)?;
+            self.insert_union_receipt_async(&mut keccak_receipts, receipt)
+                .await?;
         }
 
         {
             let _timer = WebGpuStageTimer::new("keccak_receipts_root");
-            if let Ok(root_receipt) = self.with_webgpu_circuit_hal(|| keccak_receipts.root())? {
+            if let Some(root_receipt) = self.union_receipts_root_async(keccak_receipts).await? {
                 let assumption = Assumption {
                     claim: root_receipt.claim.digest(),
                     control_root: root_receipt.control_root()?,
@@ -463,6 +455,58 @@ impl ProverImpl {
             receipt.verify_integrity().context("verify resolve")?;
         }
         Ok(receipt)
+    }
+
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    async fn union_unknown_async(
+        &self,
+        a: &SuccinctReceipt<Unknown>,
+        b: &SuccinctReceipt<Unknown>,
+    ) -> Result<SuccinctReceipt<Unknown>> {
+        let _timer = WebGpuStageTimer::new("union_async");
+        let receipt = {
+            let _timer = WebGpuStageTimer::new("union_prove_async");
+            crate::host::recursion::prove::union_webgpu(a, b, self.webgpu_hal()?).await?
+        };
+        {
+            let _timer = WebGpuStageTimer::new("verify_union");
+            receipt.verify_integrity().context("verify union")?;
+        }
+        Ok(receipt.into_unknown())
+    }
+
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    async fn insert_union_receipt_async(
+        &self,
+        peaks: &mut VecDeque<(u32, SuccinctReceipt<Unknown>)>,
+        item: SuccinctReceipt<Unknown>,
+    ) -> Result<()> {
+        let mut to_add = (0, item);
+        while peaks.back().is_some_and(|(height, _)| *height == to_add.0) {
+            let (_, to_merge) = peaks
+                .pop_back()
+                .expect("checked non-empty keccak union peak stack");
+            to_add = (
+                to_add.0 + 1,
+                self.union_unknown_async(&to_add.1, &to_merge).await?,
+            );
+        }
+        peaks.push_back(to_add);
+        Ok(())
+    }
+
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    async fn union_receipts_root_async(
+        &self,
+        mut peaks: VecDeque<(u32, SuccinctReceipt<Unknown>)>,
+    ) -> Result<Option<SuccinctReceipt<Unknown>>> {
+        let Some((_, mut item)) = peaks.pop_front() else {
+            return Ok(None);
+        };
+        for (_, peak) in peaks {
+            item = self.union_unknown_async(&item, &peak).await?;
+        }
+        Ok(Some(item))
     }
 
     async fn composite_to_succinct_async(

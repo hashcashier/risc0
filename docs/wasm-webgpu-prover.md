@@ -106,7 +106,7 @@ Validated so far:
   BigInt, and raw BigInt fixtures
 - Focused async/GPU-authoritative `multi_test/poseidon2_basic` proving via
   `WebGpuProver::prove_with_opts_async`: the latest run produced a verified
-  succinct receipt in Chrome in 32.17s after a 510.743182ms native CUDA
+  succinct receipt in Chrome in 30.42s after a 426.538233ms native CUDA
   baseline for the same 1-segment, 3598-user-cycle fixture. This run recorded
   `eval_check` as 6 WebGPU dispatches and 0 CPU fallbacks. The rv32im check
   uses the interpreted WebGPU path; recursion uses the same interpreter with
@@ -165,10 +165,17 @@ fixture in this checkout because the native syscall table does not register
 The accelerator/precompile CUDA baseline passes end-to-end after fixing the
 Poseidon2 syscall address ABI to use byte addresses at the guest/ecall boundary.
 Chrome/WebGPU proves and verifies the smaller accelerator/precompile fixtures,
-but the group is not complete: `multi_test/rsa_compat` and
-`multi_test/keccak_union` still time out under the current browser proof path
-before producing succinct receipts. `multi_test/keccak_union` also times out in
-a standalone 7200s browser run, so it is a focused performance blocker.
+but the group is not complete: `multi_test/rsa_compat` and the full
+`multi_test/keccak_union` fixture still time out under the current browser
+proof path before producing succinct receipts. A smaller `KeccakUnion(1)`
+diagnostic now passes as a standalone Chrome/WebGPU succinct proof after the
+async Keccak receipt union fix and async WebGPU Keccak subproof path:
+native CUDA completed the latest focused run in 7.495052818s with 4 segments,
+while Chrome/WebGPU completed the same 4-segment proof in 1372.79s. The run had
+9 pending Keccak proofs, 1 assumption, and `cpu_only_ops=0`. Batched Merkle
+query readbacks reduced it to 1314 readbacks and 237 CPU fallbacks, and it no
+longer reports `gather_sample` fallbacks in the FRI query path. The full
+`KeccakUnion(3)` fixture remains a focused performance blocker.
 
 ## GPU-Authoritative Work
 

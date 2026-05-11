@@ -20,9 +20,9 @@ mod tests;
 pub mod testutil;
 pub mod zkr;
 
-#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
-use std::cell::RefCell;
 use std::rc::Rc;
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+use std::{cell::RefCell, future::Future, pin::Pin};
 
 use anyhow::Result;
 use cfg_if::cfg_if;
@@ -57,6 +57,15 @@ pub type Seal = Vec<u32>;
 
 pub trait KeccakProver {
     fn prove(&self, inputs: &[KeccakState], po2: usize) -> Result<Seal>;
+
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    fn prove_async<'a>(
+        &'a self,
+        inputs: &'a [KeccakState],
+        po2: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<Seal>> + 'a>> {
+        Box::pin(async move { self.prove(inputs, po2) })
+    }
 
     fn verify(&self, seal: &Seal) -> Result<()> {
         let hash_suite = Poseidon2HashSuite::new_suite();

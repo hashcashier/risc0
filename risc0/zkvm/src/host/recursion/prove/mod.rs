@@ -547,6 +547,57 @@ pub fn prove_zkr(
     })
 }
 
+/// Browser WebGPU async variant of [`prove_zkr`].
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub async fn prove_zkr_webgpu(
+    program: Program,
+    control_id: &Digest,
+    allowed_control_ids: Vec<Digest>,
+    input: &[u8],
+    hal: Rc<risc0_zkp::hal::webgpu::WebGpuHal>,
+) -> Result<SuccinctReceipt<Unknown>> {
+    let opts = ProverOpts::succinct().with_control_ids(allowed_control_ids);
+    let mut prover = Prover::new(program, *control_id, opts.clone());
+    prover.add_input(bytemuck::cast_slice(input));
+
+    tracing::debug!("Running prover");
+    let receipt = prover.run_with_webgpu_hal(hal).await?;
+
+    tracing::trace!("zkr receipt: {receipt:?}");
+
+    // Read the claim digest from the second of the global output slots.
+    let claim_digest: Digest = read_sha_halfs(&mut VecDeque::from_iter(
+        bytemuck::checked::cast_slice::<_, BabyBearElem>(
+            &receipt.seal[DIGEST_SHORTS..2 * DIGEST_SHORTS],
+        )
+        .iter()
+        .copied()
+        .map(u32::from),
+    ))?;
+
+    let hashfn = opts.hash_suite()?.hashfn;
+    let control_group = MerkleGroup::new(opts.control_ids.clone())?;
+    let control_root = control_group.calc_root(hashfn.as_ref());
+    let control_inclusion_proof = control_group.get_proof(control_id, hashfn.as_ref())?;
+
+    let verifier_parameters = SuccinctReceiptVerifierParameters {
+        control_root,
+        inner_control_root: None,
+        proof_system_info: PROOF_SYSTEM_INFO,
+        circuit_info: CircuitImpl::CIRCUIT_INFO,
+    }
+    .digest();
+
+    Ok(SuccinctReceipt {
+        seal: receipt.seal,
+        hashfn: opts.hashfn,
+        control_id: *control_id,
+        control_inclusion_proof,
+        claim: MaybePruned::<Unknown>::Pruned(claim_digest),
+        verifier_parameters,
+    })
+}
+
 /// Prove the specified program identified by the `control_id` using the specified `input`.
 pub fn prove_registered_zkr(
     control_id: &Digest,

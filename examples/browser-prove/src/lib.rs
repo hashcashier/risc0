@@ -1003,6 +1003,60 @@ mod tests {
     }
 
     #[wasm_bindgen_test(async)]
+    async fn webgpu_hal_oversized_async_gather_reads_only_sample() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+
+        let rows = 1 << 20;
+        let cols = 31;
+        let idx = rows / 2 + 17;
+        let source_elems = rows * cols;
+        let source_bytes = source_elems * std::mem::size_of::<BabyBearElem>();
+        assert!(source_bytes > 120 * 1024 * 1024);
+
+        let src = hal.alloc_elem("webgpu_hal_oversized_async_gather_src", source_elems);
+        src.view_mut(|view| {
+            for (idx, value) in view.iter_mut().enumerate() {
+                *value = elem(idx + 9100);
+            }
+        });
+        src.sync_cpu_to_gpu(&hal).unwrap();
+        src.mark_gpu_dirty();
+
+        let expected = (0..cols)
+            .map(|col| elem(col * rows + idx + 9100))
+            .collect::<Vec<_>>();
+        let dst = hal.alloc_elem("webgpu_hal_oversized_async_gather_dst", cols);
+
+        hal.reset_diagnostics();
+        {
+            let _gpu_scope = hal.gpu_authoritative_scope(true);
+            hal.debug_gather_sample_async(&dst, &src, idx, cols, rows)
+                .await
+                .unwrap();
+        }
+
+        assert!(dst.cpu_is_current());
+        assert_eq!(dst.to_vec(), expected);
+
+        let diagnostics = hal.diagnostics();
+        assert_eq!(
+            diagnostics.readback_bytes,
+            (cols * std::mem::size_of::<BabyBearElem>()) as u64
+        );
+        let gather = diagnostics
+            .ops
+            .iter()
+            .find(|op| op.name == "gather_sample")
+            .expect("expected gather_sample diagnostics");
+        assert_eq!(gather.gpu_dispatches, 0);
+        assert_eq!(gather.cpu_fallbacks, 1);
+    }
+
+    #[wasm_bindgen_test(async)]
     async fn webgpu_hal_gpu_authoritative_outputs_read_back() {
         console_error_panic_hook::set_once();
 
@@ -2288,16 +2342,20 @@ mod tests {
         prove_keccak_union(prover);
     }
 
-    fn keccak_union_env() -> ExecutorEnv<'static> {
+    fn keccak_union_env_with_count(proof_count: usize) -> ExecutorEnv<'static> {
         use risc0_zkvm_methods::multi_test::MultiTestSpec;
 
         let mut builder = ExecutorEnv::builder();
         builder.keccak_max_po2(14).unwrap();
         builder
-            .write(&MultiTestSpec::KeccakUnion(3))
+            .write(&MultiTestSpec::KeccakUnion(proof_count))
             .unwrap()
             .build()
             .unwrap()
+    }
+
+    fn keccak_union_env() -> ExecutorEnv<'static> {
+        keccak_union_env_with_count(3)
     }
 
     fn prove_keccak_union(prover: &WebGpuProver) {
@@ -2322,6 +2380,23 @@ mod tests {
         prove_succinct_info_async(
             prover,
             "multi_test/keccak_union",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+    }
+
+    async fn prove_keccak_union_small_async(prover: &WebGpuProver) {
+        use risc0_zkvm_methods::{MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        console_log!("browser-prove:keccak_union_small env_start");
+        let env = keccak_union_env_with_count(1);
+        console_log!("browser-prove:keccak_union_small env_done");
+        prove_succinct_info_async(
+            prover,
+            "multi_test/keccak_union_small",
             env,
             MULTI_TEST_ELF,
             MULTI_TEST_ID,
@@ -2368,6 +2443,14 @@ mod tests {
         let prover = init_prover().await;
         console_log!("browser-prove:keccak_union init_done");
         prove_keccak_union_async(prover.as_ref()).await;
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_keccak_union_small_succinct_receipt_verify() {
+        console_log!("browser-prove:keccak_union_small init_start");
+        let prover = init_prover().await;
+        console_log!("browser-prove:keccak_union_small init_done");
+        prove_keccak_union_small_async(prover.as_ref()).await;
     }
 
     #[wasm_bindgen_test(async)]
@@ -4065,6 +4148,29 @@ mod native_stats_tests {
             .build()
             .unwrap();
         prove_and_print_stats("multi_test/keccak_union", env, MULTI_TEST_ELF, MULTI_TEST_ID);
+    }
+
+    #[test]
+    #[ignore = "manual focused CUDA baseline for a smaller Keccak union accelerator fixture"]
+    fn native_keccak_union_small_stats() {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let mut builder = ExecutorEnv::builder();
+        builder.segment_limit_po2(WEBGPU_BASELINE_SEGMENT_LIMIT_PO2);
+        builder
+            .keccak_max_po2(WEBGPU_BASELINE_KECCAK_MAX_PO2)
+            .unwrap();
+        let env = builder
+            .write(&MultiTestSpec::KeccakUnion(1))
+            .unwrap()
+            .build()
+            .unwrap();
+        prove_and_print_stats(
+            "multi_test/keccak_union_small",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        );
     }
 
     #[test]

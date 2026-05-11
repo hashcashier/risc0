@@ -141,6 +141,94 @@ impl<H: Hal> MerkleTreeProver<H> {
 }
 
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+async fn read_webgpu_buffer_slice<T>(
+    hal: &crate::hal::webgpu::WebGpuHal,
+    buffer: &crate::hal::webgpu::WebGpuBuffer<T>,
+    offset: usize,
+    count: usize,
+) -> anyhow::Result<Vec<T>>
+where
+    T: bytemuck::CheckedBitPattern + Clone,
+{
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    anyhow::ensure!(
+        offset
+            .checked_add(count)
+            .is_some_and(|end| end <= buffer.size()),
+        "WebGPU readback slice is out of bounds"
+    );
+    let Some(gpu) = buffer.raw_buffer() else {
+        anyhow::bail!("cannot read back missing WebGPU buffer {}", buffer.name());
+    };
+
+    let elem_size = core::mem::size_of::<T>();
+    let byte_offset: u64 = offset
+        .checked_mul(elem_size)
+        .and_then(|value| value.try_into().ok())
+        .ok_or_else(|| anyhow::anyhow!("WebGPU readback offset overflow"))?;
+    let byte_len: u64 = count
+        .checked_mul(elem_size)
+        .and_then(|value| value.try_into().ok())
+        .ok_or_else(|| anyhow::anyhow!("WebGPU readback length overflow"))?;
+    let bytes = hal
+        .read_buffer_range(gpu, buffer.byte_offset() + byte_offset, byte_len)
+        .await?;
+    let values = bytemuck::checked::try_cast_slice::<u8, T>(bytes.as_slice())
+        .map_err(|err| anyhow::anyhow!("invalid WebGPU readback slice: {err}"))?;
+    anyhow::ensure!(
+        values.len() == count,
+        "WebGPU readback slice length mismatch: got {}, expected {count}",
+        values.len()
+    );
+    Ok(values.to_vec())
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+async fn read_webgpu_buffer_indices<T>(
+    hal: &crate::hal::webgpu::WebGpuHal,
+    buffer: &crate::hal::webgpu::WebGpuBuffer<T>,
+    indices: &[usize],
+) -> anyhow::Result<Vec<T>>
+where
+    T: bytemuck::CheckedBitPattern + Clone,
+{
+    if indices.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let Some(gpu) = buffer.raw_buffer() else {
+        anyhow::bail!("cannot read back missing WebGPU buffer {}", buffer.name());
+    };
+
+    let elem_size = core::mem::size_of::<T>();
+    let elem_size_u64: u64 = elem_size
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("WebGPU indexed readback element size exceeds u64"))?;
+    for source_idx in indices.iter().copied() {
+        anyhow::ensure!(
+            source_idx < buffer.size(),
+            "WebGPU indexed readback source index is out of bounds"
+        );
+    }
+
+    let bytes = hal
+        .read_buffer_indices(gpu, buffer.byte_offset(), elem_size_u64, indices)
+        .await?;
+    let values = bytemuck::checked::try_cast_slice::<u8, T>(bytes.as_slice())
+        .map_err(|err| anyhow::anyhow!("invalid WebGPU indexed readback: {err}"))?;
+    anyhow::ensure!(
+        values.len() == indices.len(),
+        "WebGPU indexed readback length mismatch: got {}, expected {}",
+        values.len(),
+        indices.len()
+    );
+    Ok(values.to_vec())
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 impl MerkleTreeProver<crate::hal::webgpu::WebGpuHal> {
     /// Async WebGPU variant of [`Self::new`].
     ///
@@ -167,8 +255,11 @@ impl MerkleTreeProver<crate::hal::webgpu::WebGpuHal> {
             }
             Ok::<(), anyhow::Error>(())
         })?;
-        nodes.sync_gpu_to_cpu(hal).await?;
-        let root = nodes.get_at(1);
+        let root = if nodes.cpu_is_current() {
+            nodes.get_at(1)
+        } else {
+            read_webgpu_buffer_slice(hal, &nodes, 1, 1).await?[0]
+        };
         Ok(MerkleTreeProver {
             params,
             matrix: matrix.clone(),
@@ -184,12 +275,16 @@ impl MerkleTreeProver<crate::hal::webgpu::WebGpuHal> {
         iop: &mut WriteIOP<risc0_core::field::baby_bear::BabyBear>,
     ) -> anyhow::Result<()> {
         scope!("commit");
-        self.nodes.sync_gpu_to_cpu(hal).await?;
         let top_size = self.params.top_size;
-        let slice = self.nodes.slice(top_size, top_size);
-        slice.view(|view| {
-            iop.write_pod_slice(view);
-        });
+        if self.nodes.cpu_is_current() {
+            let slice = self.nodes.slice(top_size, top_size);
+            slice.view(|view| {
+                iop.write_pod_slice(view);
+            });
+        } else {
+            let top = read_webgpu_buffer_slice(hal, &self.nodes, top_size, top_size).await?;
+            iop.write_pod_slice(top.as_slice());
+        }
         iop.commit(self.root());
         Ok(())
     }
@@ -201,7 +296,6 @@ impl MerkleTreeProver<crate::hal::webgpu::WebGpuHal> {
         iop: &mut WriteIOP<risc0_core::field::baby_bear::BabyBear>,
         idx: usize,
     ) -> anyhow::Result<Vec<risc0_core::field::baby_bear::BabyBearElem>> {
-        self.nodes.sync_gpu_to_cpu(hal).await?;
         assert!(idx < self.params.row_size);
 
         let sample = hal.alloc_elem("sample", self.params.col_size);
@@ -218,14 +312,102 @@ impl MerkleTreeProver<crate::hal::webgpu::WebGpuHal> {
         iop.write_field_elem_slice::<risc0_core::field::baby_bear::BabyBearElem>(out.as_slice());
 
         let mut idx = idx + self.params.row_size;
+        let mut proof_indices = Vec::new();
         while idx >= 2 * self.params.top_size {
             let low_bit = idx % 2;
             idx /= 2;
             let other_idx = 2 * idx + (1 - low_bit);
-            let other = self.nodes.get_at(other_idx);
+            proof_indices.push(other_idx);
+        }
+        let proof = if self.nodes.cpu_is_current() {
+            proof_indices
+                .iter()
+                .map(|idx| self.nodes.get_at(*idx))
+                .collect::<Vec<_>>()
+        } else {
+            read_webgpu_buffer_indices(hal, &self.nodes, proof_indices.as_slice()).await?
+        };
+        for other in proof {
             iop.write_pod_slice(&[other]);
         }
         Ok(out)
+    }
+
+    /// Batch async WebGPU query openings for this Merkle tree.
+    ///
+    /// This preserves the proof byte order of repeated [`Self::prove_async`]
+    /// calls while reducing browser map/readback latency at the FRI query
+    /// boundary.
+    pub async fn prove_batch_async(
+        &self,
+        hal: &crate::hal::webgpu::WebGpuHal,
+        indices: &[usize],
+    ) -> anyhow::Result<Vec<WebGpuMerkleProof>> {
+        if indices.is_empty() {
+            return Ok(Vec::new());
+        }
+        for idx in indices {
+            assert!(*idx < self.params.row_size);
+        }
+
+        let mut sample_indices = Vec::with_capacity(indices.len() * self.params.col_size);
+        for idx in indices {
+            for col in 0..self.params.col_size {
+                sample_indices.push(idx + col * self.params.row_size);
+            }
+        }
+
+        let samples = if self.matrix.cpu_is_current() {
+            let mut out = Vec::with_capacity(sample_indices.len());
+            self.matrix.view(|view| {
+                for sample_idx in &sample_indices {
+                    out.push(view[*sample_idx]);
+                }
+            });
+            out
+        } else {
+            read_webgpu_buffer_indices(hal, &self.matrix, sample_indices.as_slice()).await?
+        };
+
+        let mut proof_indices = Vec::new();
+        let mut proof_counts = Vec::with_capacity(indices.len());
+        for idx in indices {
+            let mut idx = idx + self.params.row_size;
+            let start_len = proof_indices.len();
+            while idx >= 2 * self.params.top_size {
+                let low_bit = idx % 2;
+                idx /= 2;
+                let other_idx = 2 * idx + (1 - low_bit);
+                proof_indices.push(other_idx);
+            }
+            proof_counts.push(proof_indices.len() - start_len);
+        }
+
+        let siblings = if proof_indices.is_empty() {
+            Vec::new()
+        } else if self.nodes.cpu_is_current() {
+            proof_indices
+                .iter()
+                .map(|idx| self.nodes.get_at(*idx))
+                .collect::<Vec<_>>()
+        } else {
+            read_webgpu_buffer_indices(hal, &self.nodes, proof_indices.as_slice()).await?
+        };
+
+        let mut proofs = Vec::with_capacity(indices.len());
+        let mut sample_offset = 0;
+        let mut sibling_offset = 0;
+        for proof_count in proof_counts {
+            let next_sample_offset = sample_offset + self.params.col_size;
+            let next_sibling_offset = sibling_offset + proof_count;
+            proofs.push(WebGpuMerkleProof {
+                values: samples[sample_offset..next_sample_offset].to_vec(),
+                siblings: siblings[sibling_offset..next_sibling_offset].to_vec(),
+            });
+            sample_offset = next_sample_offset;
+            sibling_offset = next_sibling_offset;
+        }
+        Ok(proofs)
     }
 
     /// Synchronous WebGPU proof path after async readback has made CPU shadows current.
@@ -252,6 +434,24 @@ impl MerkleTreeProver<crate::hal::webgpu::WebGpuHal> {
             iop.write_pod_slice(&[other]);
         }
         out
+    }
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub struct WebGpuMerkleProof {
+    values: Vec<risc0_core::field::baby_bear::BabyBearElem>,
+    siblings: Vec<Digest>,
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+impl WebGpuMerkleProof {
+    pub fn write_to_iop(&self, iop: &mut WriteIOP<risc0_core::field::baby_bear::BabyBear>) {
+        iop.write_field_elem_slice::<risc0_core::field::baby_bear::BabyBearElem>(
+            self.values.as_slice(),
+        );
+        for sibling in &self.siblings {
+            iop.write_pod_slice(core::slice::from_ref(sibling));
+        }
     }
 }
 
