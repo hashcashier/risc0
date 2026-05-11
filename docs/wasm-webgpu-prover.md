@@ -55,7 +55,13 @@ The implementation adds:
 - WebGPU-backed HAL operations used by the current prover, with CPU-shadow
   synchronization where the synchronous `Hal::Buffer` contract still requires
   it.
-- Portable Rust `eval_check` support through generated `poly_ext` metadata.
+- Async GPU-authoritative ZKP proof hooks for Merkle, PolyGroup, FRI,
+  commit/finalize, rv32im segment proving, recursion lift, and browser server
+  proof orchestration.
+- Portable Rust `eval_check` support through generated `poly_ext` metadata,
+  plus a WebGPU circuit `eval_check` hook with a generated straight-line WGSL
+  prototype path that reuses fixed scratch slots based on generated
+  `poly_ext` liveness.
 - Browser circuit HALs for `rv32im`, `keccak`, and `recursion`, including
   browser-compatible Rust witness/accumulation bridges.
 - Scoped WebGPU HAL bindings so existing prover orchestration can resolve the
@@ -68,8 +74,10 @@ The implementation adds:
   composite-to-succinct compression.
 
 The current HAL keeps a CPU shadow because the existing `Hal::Buffer` trait is
-synchronous while browser readback is asynchronous. This is a correctness bridge,
-not the intended final performance shape.
+synchronous while browser readback is asynchronous. Focused async proving can
+now let successful WebGPU kernels own outputs until an explicit readback
+boundary, but CPU shadows remain the correctness bridge for fallback paths and
+transcript-facing data.
 
 ## Validation
 
@@ -80,7 +88,8 @@ Validated so far:
 
 - wasm release test compilation for `browser-prove`
 - WebGPU HAL readback tests for NTT, inverse NTT, FRI fold, hashing, mixing,
-  copy, gather, scatter, and prefix products
+  copy, gather, scatter, prefix products, and generated `poly_ext`
+  `eval_check`
 - Chrome/WebGPU succinct proofs for the moderate public examples:
   `hello-world`, `json`, `chess`, `composition`, `jwt-validator`, `bevy`,
   `digital-signature`, `prorata`, `wasm`, `password-checker`,
@@ -95,6 +104,13 @@ Validated so far:
 - Chrome/WebGPU accelerator/precompile coverage for libm, Poseidon2,
   SHA-conformance, allocation, random, SHA/Keccak digest/update fixtures,
   BigInt, and raw BigInt fixtures
+- Focused async/GPU-authoritative `multi_test/poseidon2_basic` proving via
+  `WebGpuProver::prove_with_opts_async`: the latest run produced a verified
+  succinct receipt in Chrome in 32.17s after a 510.743182ms native CUDA
+  baseline for the same 1-segment, 3598-user-cycle fixture. This run recorded
+  `eval_check` as 6 WebGPU dispatches and 0 CPU fallbacks. The rv32im check
+  uses the interpreted WebGPU path; recursion uses the same interpreter with
+  bounded chunk uploads for its oversized data group.
 
 Still required before completion:
 
@@ -121,15 +137,26 @@ segment/cycle counts.
 
 ## Performance Debt
 
-Correctness is the v1 gate, but the current CPU-shadow bridge is not the final
+Correctness is the v1 gate, but the current browser proof path is not the final
 performance shape. Proof-critical work should move toward batched WebGPU
 kernels with minimal GPU-to-WASM readback and explicit async boundaries.
 
-The current browser proof path is still CPU-bound because each WebGPU HAL
-operation also updates the CPU mirror to satisfy the synchronous `Hal::Buffer`
-contract. Browser diagnostics assert `cpu_only_ops == 0`, but they also show
-`cpu_mirrors` tracking GPU dispatches. Making HAL buffers GPU-authoritative is
-the next major requirement for practical large-example parity.
+The async browser proof path can now keep STARK commit/finalize buffers
+GPU-authoritative for focused rv32im and recursion proving. The current
+remaining bottlenecks are production-capable WebGPU circuit `eval_check`,
+explicit transcript/Merkle readbacks, and CPU fallbacks for oversized WebGPU
+storage bindings. The `eval_check` hook now exists and a tiny generated WGSL
+`poly_ext` regression passes in Chrome. The generated WGSL path now reuses
+scratch slots instead of emitting one local per `poly_ext` variable, but the
+real generated circuit definitions still exceed the conservative shader-size
+gate and fall back to portable WASM.
+
+A production `gather_sample` chunking experiment showed that chunked binding
+ranges alone are not enough for recursion-sized matrices: a 512 MiB single
+source `GPUBuffer` produced all-zero output in Chrome. The HAL now gates GPU
+allocation with `GPUSupportedLimits.maxBufferSize`, and the proof path keeps
+the known-correct CPU fallback for oversized gather sources until it can
+represent those matrices with tiled or staged WebGPU buffers.
 
 `RunUnconstrained { unconstrained: true }` is a documented native-disabled
 fixture in this checkout because the native syscall table does not register
@@ -139,9 +166,9 @@ The accelerator/precompile CUDA baseline passes end-to-end after fixing the
 Poseidon2 syscall address ABI to use byte addresses at the guest/ecall boundary.
 Chrome/WebGPU proves and verifies the smaller accelerator/precompile fixtures,
 but the group is not complete: `multi_test/rsa_compat` and
-`multi_test/keccak_union` still time out under the CPU-shadow proof path before
-producing succinct receipts. `multi_test/keccak_union` also times out in a
-standalone 7200s browser run, so it is a focused performance blocker.
+`multi_test/keccak_union` still time out under the current browser proof path
+before producing succinct receipts. `multi_test/keccak_union` also times out in
+a standalone 7200s browser run, so it is a focused performance blocker.
 
 ## GPU-Authoritative Work
 
@@ -154,8 +181,6 @@ transcript boundaries:
 - DEEP evaluations: `batch_evaluate_any` outputs copied into `eval_u` and
   `coeff_u`
 - FRI final coefficients: `final_coeffs.view(...)`
-- Default `combos_prepare` and `combos_divide`, unless a backend overrides
-  them
 - Portable circuit HAL bridges that call `to_vec`/`view_mut` for witness and
   check-polynomial work
 

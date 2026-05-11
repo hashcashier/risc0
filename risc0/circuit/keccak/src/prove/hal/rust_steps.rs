@@ -339,7 +339,8 @@ where
     data.buf.view_mut(|data_view| {
         global.buf.view_mut(|global_view| {
             let data = BufferRow::mutable(data_view, data.rows, data.cols, data.checked_reads);
-            let global = BufferRow::global(global_view, global.rows, global.cols, global.checked_reads);
+            let global =
+                BufferRow::global(global_view, global.rows, global.cols, global.checked_reads);
             result = run_witness_steps(mode, preflight, data, global);
         });
     });
@@ -369,12 +370,24 @@ where
     match mode {
         StepMode::Parallel | StepMode::SeqForward => {
             for cycle in 0..preflight.cycle {
-                step_exec(preflight.preimages.as_slice(), preimage_idxs.as_slice(), cycle, data, global)?;
+                step_exec(
+                    preflight.preimages.as_slice(),
+                    preimage_idxs.as_slice(),
+                    cycle,
+                    data,
+                    global,
+                )?;
             }
         }
         StepMode::SeqReverse => {
             for cycle in (0..preflight.cycle).rev() {
-                step_exec(preflight.preimages.as_slice(), preimage_idxs.as_slice(), cycle, data, global)?;
+                step_exec(
+                    preflight.preimages.as_slice(),
+                    preimage_idxs.as_slice(),
+                    cycle,
+                    data,
+                    global,
+                )?;
             }
         }
     }

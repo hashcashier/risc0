@@ -54,6 +54,7 @@ js-sys = { version = "0.3.77", optional = true }
 wasm-bindgen = { version = "0.2.100", optional = true }
 wasm-bindgen-futures = { version = "0.4.50", optional = true }
 web-sys = { version = "0.3.77", optional = true, features = [
+  "console",
   "Gpu",
   "GpuAdapter",
   "GpuBindGroup",
@@ -80,6 +81,7 @@ web-sys = { version = "0.3.77", optional = true, features = [
   "GpuRequestAdapterOptions",
   "GpuShaderModule",
   "GpuShaderModuleDescriptor",
+  "GpuSupportedLimits",
 ] }
 
 [dev-dependencies]

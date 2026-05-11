@@ -47,6 +47,30 @@ fn make_coeffs<H: Hal>(hal: &H, witness: &H::Buffer<H::Elem>, count: usize) -> H
     coeffs
 }
 
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+async fn make_coeffs_async(
+    hal: &crate::hal::webgpu::WebGpuHal,
+    witness: &crate::hal::webgpu::WebGpuBuffer<risc0_core::field::baby_bear::BabyBearElem>,
+    count: usize,
+) -> anyhow::Result<crate::hal::webgpu::WebGpuBuffer<risc0_core::field::baby_bear::BabyBearElem>> {
+    scope!("make_coeffs");
+    let coeffs = hal.alloc_elem("coeffs", witness.size());
+    if hal.can_dispatch_batch_interpolate_ntt(&coeffs) && hal.can_dispatch_zk_shift(&coeffs) {
+        hal.eltwise_copy_elem(&coeffs, witness);
+    } else {
+        // Large recursion groups can exceed WebGPU's safe storage binding
+        // size. Keep the CPU mirror current for the initial witness copy so
+        // the CPU NTT fallback does not have to read back raw witness cells,
+        // which may still contain invalid sentinels before interpolation.
+        let _cpu_mirror_scope = hal.gpu_authoritative_scope(false);
+        hal.eltwise_copy_elem(&coeffs, witness);
+    }
+    hal.batch_interpolate_ntt_async(&coeffs, count).await?;
+    #[cfg(not(feature = "circuit_debug"))]
+    hal.zk_shift_async(&coeffs, count).await?;
+    Ok(coeffs)
+}
+
 impl<'a, H: Hal> Prover<'a, H> {
     /// Creates a new prover.
     pub fn new(hal: &'a H, taps: &'a TapSet) -> Self {
@@ -390,5 +414,428 @@ impl<'a, H: Hal> Prover<'a, H> {
         let proof = self.iop.proof;
         tracing::debug!("Proof size = {}", proof.len());
         proof
+    }
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
+    /// Async WebGPU variant of [`Self::commit_group`].
+    pub async fn commit_group_async(
+        &mut self,
+        tap_group_index: usize,
+        witness: &crate::hal::webgpu::WebGpuBuffer<risc0_core::field::baby_bear::BabyBearElem>,
+    ) -> anyhow::Result<()> {
+        let authoritative = self.hal.gpu_authoritative();
+        self.commit_group_async_scoped(
+            tap_group_index,
+            witness,
+            authoritative,
+            authoritative,
+            authoritative,
+        )
+        .await
+    }
+
+    /// Async WebGPU variant of [`Self::commit_group`] with diagnostic ownership
+    /// controls for the three commit sub-stages.
+    #[doc(hidden)]
+    pub async fn commit_group_async_scoped(
+        &mut self,
+        tap_group_index: usize,
+        witness: &crate::hal::webgpu::WebGpuBuffer<risc0_core::field::baby_bear::BabyBearElem>,
+        make_coeffs_authoritative: bool,
+        poly_group_authoritative: bool,
+        merkle_authoritative: bool,
+    ) -> anyhow::Result<()> {
+        scope_with!("commit_group({})", witness.name());
+        let group_size = self.taps.group_size(tap_group_index);
+        assert_eq!(witness.size() % group_size, 0);
+        assert_eq!(witness.size() / group_size, self.cycles);
+        assert!(
+            self.groups[tap_group_index].is_none(),
+            "Attempted to commit group {} more than once",
+            self.taps.group_name(tap_group_index)
+        );
+
+        let coeffs = {
+            let _gpu_scope = self.hal.gpu_authoritative_scope(make_coeffs_authoritative);
+            make_coeffs_async(self.hal, witness, group_size).await?
+        };
+        let group = {
+            let _gpu_scope = self.hal.gpu_authoritative_scope(poly_group_authoritative);
+            PolyGroup::new_async(self.hal, coeffs, group_size, self.cycles, witness.name()).await?
+        };
+        let group_ref = self.groups[tap_group_index].insert(group);
+
+        {
+            let _gpu_scope = self.hal.gpu_authoritative_scope(merkle_authoritative);
+            group_ref
+                .merkle
+                .commit_async(self.hal, &mut self.iop)
+                .await?;
+        }
+
+        tracing::debug!(
+            "{} group root: {}",
+            self.taps.group_name(tap_group_index),
+            group_ref.merkle.root()
+        );
+        Ok(())
+    }
+
+    /// Async WebGPU variant of [`Self::finalize`].
+    pub async fn finalize_async<C>(
+        mut self,
+        globals: &[&crate::hal::webgpu::WebGpuBuffer<risc0_core::field::baby_bear::BabyBearElem>],
+        circuit_hal: &C,
+    ) -> anyhow::Result<Vec<u32>>
+    where
+        C: CircuitHal<crate::hal::webgpu::WebGpuHal> + crate::hal::webgpu::WebGpuCircuitEvalCheck,
+    {
+        scope!("finalize");
+
+        let poly_mix = self.iop.random_ext_elem();
+        let domain = self.cycles * INV_RATE;
+        let ext_size = <crate::hal::webgpu::WebGpuHal as Hal>::ExtElem::EXT_SIZE;
+        let check_poly = self.hal.alloc_elem("check_poly", ext_size * domain);
+
+        let groups: Vec<&_> = self
+            .groups
+            .iter()
+            .map(|pg| &pg.as_ref().unwrap().evaluated)
+            .collect();
+
+        let eval_check_on_gpu = self.hal.gpu_authoritative()
+            && circuit_hal.eval_check_webgpu(
+                self.hal,
+                &check_poly,
+                groups.as_slice(),
+                globals,
+                poly_mix,
+                self.po2,
+                self.cycles,
+            )?;
+        if !eval_check_on_gpu {
+            // Current circuit eval_check fallbacks are synchronous CPU portable
+            // code. Keep this as the explicit compatibility barrier when a
+            // circuit-specific WebGPU kernel cannot own this stage yet.
+            for group in &groups {
+                group.sync_gpu_to_cpu(self.hal).await?;
+            }
+            for global in globals {
+                global.sync_gpu_to_cpu(self.hal).await?;
+            }
+
+            circuit_hal.eval_check(
+                &check_poly,
+                groups.as_slice(),
+                globals,
+                poly_mix,
+                self.po2,
+                self.cycles,
+            );
+        }
+
+        #[cfg(feature = "circuit_debug")]
+        let mut bad_z = None;
+
+        #[cfg(feature = "circuit_debug")]
+        {
+            check_poly.sync_gpu_to_cpu(self.hal).await?;
+            check_poly.view(|check_out| {
+                for i in (0..domain).step_by(4) {
+                    if check_out[i] != <crate::hal::webgpu::WebGpuHal as Hal>::Elem::ZERO {
+                        tracing::debug!("check[{i}] = 0x{:08x?}", check_out[i].to_u32_words()[0]);
+                        bad_z.get_or_insert(
+                            <crate::hal::webgpu::WebGpuHal as Hal>::ExtElem::from_subfield(
+                                &<crate::hal::webgpu::WebGpuHal as Hal>::Elem::ROU_FWD[self.po2]
+                                    .pow(i / 4),
+                            ),
+                        );
+                    }
+                }
+            });
+        }
+
+        {
+            let _timer =
+                crate::hal::webgpu::WebGpuStageTimer::new("finalize_async check_interpolate");
+            self.hal
+                .batch_interpolate_ntt_async(&check_poly, ext_size)
+                .await?;
+        }
+        let check_group = {
+            let _timer = crate::hal::webgpu::WebGpuStageTimer::new("finalize_async check_group");
+            PolyGroup::new_async(
+                self.hal,
+                check_poly,
+                <crate::hal::webgpu::WebGpuHal as Hal>::CHECK_SIZE,
+                self.cycles,
+                "check",
+            )
+            .await?
+        };
+        {
+            let _timer = crate::hal::webgpu::WebGpuStageTimer::new("finalize_async check_commit");
+            check_group
+                .merkle
+                .commit_async(self.hal, &mut self.iop)
+                .await?;
+        }
+        tracing::debug!("checkGroup: {}", check_group.merkle.root());
+
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "circuit_debug")] {
+                let z = if let Some(bad_z) = bad_z {
+                    self.iop.write_field_elem_slice(bad_z.subelems());
+                    bad_z
+                } else {
+                    self.iop.random_ext_elem()
+                };
+            } else {
+                let z = self.iop.random_ext_elem();
+            }
+        }
+        tracing::debug!("Z = {z:?}");
+
+        let back_one = <crate::hal::webgpu::WebGpuHal as Hal>::ExtElem::from_subfield(
+            &<crate::hal::webgpu::WebGpuHal as Hal>::Elem::ROU_REV[self.po2],
+        );
+        let mut all_xs = Vec::new();
+        let mut eval_u: Vec<<crate::hal::webgpu::WebGpuHal as Hal>::ExtElem> = Vec::new();
+        {
+            let _timer = crate::hal::webgpu::WebGpuStageTimer::new("finalize_async eval_u_groups");
+            for (id, pg) in self.groups.iter().enumerate() {
+                let pg = pg.as_ref().unwrap();
+
+                let mut which = Vec::new();
+                let mut xs = Vec::new();
+                for tap in self.taps.group_taps(id) {
+                    which.push(tap.offset() as u32);
+                    let x = back_one.pow(tap.back()) * z;
+                    xs.push(x);
+                    all_xs.push(x);
+                }
+                let which = self.hal.copy_from_u32("which", which.as_slice());
+                let xs = self.hal.copy_from_extelem("xs", xs.as_slice());
+                let out = self.hal.alloc_extelem("out", which.size());
+                self.hal
+                    .batch_evaluate_any_async(&pg.coeffs, pg.count, &which, &xs, &out)
+                    .await?;
+                out.sync_gpu_to_cpu(self.hal).await?;
+                out.view(|view| {
+                    eval_u.extend(view);
+                });
+            }
+        }
+
+        let mut coeff_u = vec![<crate::hal::webgpu::WebGpuHal as Hal>::ExtElem::ZERO; eval_u.len()];
+        let _timer = crate::hal::webgpu::WebGpuStageTimer::new("finalize_async poly_interpolate");
+        scope!("poly_interpolate", {
+            let mut pos = 0;
+            for reg in self.taps.regs() {
+                poly_interpolate(
+                    &mut coeff_u[pos..],
+                    &all_xs[pos..],
+                    &eval_u[pos..],
+                    reg.size(),
+                );
+                pos += reg.size();
+            }
+        });
+        drop(_timer);
+
+        let z_pow = z.pow(ext_size);
+        let which = Vec::from_iter(0u32..<crate::hal::webgpu::WebGpuHal as Hal>::CHECK_SIZE as u32);
+        let xs = vec![z_pow; <crate::hal::webgpu::WebGpuHal as Hal>::CHECK_SIZE];
+        let out = self
+            .hal
+            .alloc_extelem("out", <crate::hal::webgpu::WebGpuHal as Hal>::CHECK_SIZE);
+        let which = self.hal.copy_from_u32("which", which.as_slice());
+        let xs = self.hal.copy_from_extelem("xs", xs.as_slice());
+        {
+            let _timer = crate::hal::webgpu::WebGpuStageTimer::new("finalize_async eval_u_check");
+            self.hal
+                .batch_evaluate_any_async(
+                    &check_group.coeffs,
+                    <crate::hal::webgpu::WebGpuHal as Hal>::CHECK_SIZE,
+                    &which,
+                    &xs,
+                    &out,
+                )
+                .await?;
+            out.sync_gpu_to_cpu(self.hal).await?;
+            out.view(|view| {
+                coeff_u.extend(view);
+            });
+        }
+
+        tracing::debug!("Size of U = {}", coeff_u.len());
+        {
+            let _timer = crate::hal::webgpu::WebGpuStageTimer::new("finalize_async write_u_commit");
+            self.iop.write_field_elem_slice(&coeff_u);
+            let hash_u = self
+                .hal
+                .get_hash_suite()
+                .hashfn
+                .hash_ext_elem_slice(coeff_u.as_slice());
+            self.iop.commit(&hash_u);
+        }
+
+        let mix = self.iop.random_ext_elem();
+        tracing::debug!("Mix = {mix:?}");
+        let combo_count = self.taps.combos_size();
+        let combos = scope!(
+            "alloc(combos)",
+            self.hal
+                .alloc_extelem_zeroed("combos", self.cycles * (combo_count + 1))
+        );
+
+        {
+            let _timer = crate::hal::webgpu::WebGpuStageTimer::new("finalize_async coeff_sync");
+            for pg in self.groups.iter() {
+                pg.as_ref()
+                    .unwrap()
+                    .coeffs
+                    .sync_gpu_to_cpu(self.hal)
+                    .await?;
+            }
+            check_group.coeffs.sync_gpu_to_cpu(self.hal).await?;
+        }
+
+        scope!("mix_poly_coeffs", {
+            let _timer =
+                crate::hal::webgpu::WebGpuStageTimer::new("finalize_async mix_poly_coeffs");
+            let mut cur_mix = <crate::hal::webgpu::WebGpuHal as Hal>::ExtElem::ONE;
+
+            for (id, pg) in self.groups.iter().enumerate() {
+                let pg = pg.as_ref().unwrap();
+
+                let group_size = self.taps.group_size(id);
+                let mut which = Vec::with_capacity(group_size);
+                for reg in self.taps.group_regs(id) {
+                    which.push(reg.combo_id() as u32);
+                }
+                let which = self.hal.copy_from_u32("which", which.as_slice());
+                self.hal
+                    .mix_poly_coeffs_async(
+                        &combos,
+                        &cur_mix,
+                        &mix,
+                        &pg.coeffs,
+                        &which,
+                        group_size,
+                        self.cycles,
+                    )
+                    .await?;
+                cur_mix *= mix.pow(group_size);
+            }
+
+            let which =
+                vec![combo_count as u32; <crate::hal::webgpu::WebGpuHal as Hal>::CHECK_SIZE];
+            let which_buf = self.hal.copy_from_u32("which", which.as_slice());
+            self.hal
+                .mix_poly_coeffs_async(
+                    &combos,
+                    &cur_mix,
+                    &mix,
+                    &check_group.coeffs,
+                    &which_buf,
+                    <crate::hal::webgpu::WebGpuHal as Hal>::CHECK_SIZE,
+                    self.cycles,
+                )
+                .await?;
+        });
+
+        scope!("load_combos", {
+            let reg_sizes: Vec<_> = self.taps.regs().map(|x| x.size() as u32).collect();
+            let reg_combo_ids: Vec<_> = self.taps.regs().map(|x| x.combo_id() as u32).collect();
+
+            scope!("prepare", {
+                let _timer =
+                    crate::hal::webgpu::WebGpuStageTimer::new("finalize_async combos_prepare");
+                self.hal
+                    .combos_prepare_async(
+                        &combos,
+                        &coeff_u,
+                        combo_count,
+                        self.cycles,
+                        &reg_sizes,
+                        &reg_combo_ids,
+                        &mix,
+                    )
+                    .await?;
+            });
+
+            scope!("divide", {
+                let _timer =
+                    crate::hal::webgpu::WebGpuStageTimer::new("finalize_async combos_divide");
+                let mut chunks = vec![];
+
+                for i in 0..combo_count {
+                    let mut pows = Vec::new();
+                    for &back in self.taps.get_combo(i).slice() {
+                        pows.push(z * back_one.pow(back.into()));
+                    }
+                    chunks.push((i, pows));
+                }
+
+                chunks.push((combo_count, vec![z_pow]));
+                self.hal
+                    .combos_divide_async(&combos, chunks, self.cycles)
+                    .await?;
+            });
+        });
+
+        let final_poly_coeffs = scope!("sum", {
+            let _timer = crate::hal::webgpu::WebGpuStageTimer::new("finalize_async sum");
+            let final_poly_coeffs = self
+                .hal
+                .alloc_elem("final_poly_coeffs", self.cycles * ext_size);
+            self.hal
+                .eltwise_sum_extelem_async(&final_poly_coeffs, &combos)
+                .await?;
+            final_poly_coeffs
+        });
+
+        scope!("bit_rev", {
+            let _timer = crate::hal::webgpu::WebGpuStageTimer::new("finalize_async bit_rev");
+            self.hal
+                .batch_bit_reverse_async(&final_poly_coeffs, ext_size)
+                .await?;
+        });
+        tracing::debug!("FRI-proof, size = {}", final_poly_coeffs.size() / ext_size);
+
+        let mut inner_merkles = self
+            .groups
+            .iter()
+            .map(|pg| &pg.as_ref().unwrap().merkle)
+            .collect::<Vec<_>>();
+        inner_merkles.push(&check_group.merkle);
+        {
+            let _timer = crate::hal::webgpu::WebGpuStageTimer::new("finalize_async fri_prove");
+            crate::prove::fri::fri_prove_async(
+                self.hal,
+                &mut self.iop,
+                &final_poly_coeffs,
+                inner_merkles.as_slice(),
+            )
+            .await?;
+        }
+
+        let proven_soundness_error = super::soundness::proven::<crate::hal::webgpu::WebGpuHal>(
+            self.taps,
+            final_poly_coeffs.size(),
+        );
+        tracing::debug!("proven_soundness_error: {proven_soundness_error:?}");
+
+        let conjectured_security = super::soundness::toy_model_security::<
+            crate::hal::webgpu::WebGpuHal,
+        >(self.taps, final_poly_coeffs.size());
+        tracing::debug!("conjectured_security: {conjectured_security:?}");
+
+        let proof = self.iop.proof;
+        tracing::debug!("Proof size = {}", proof.len());
+        Ok(proof)
     }
 }

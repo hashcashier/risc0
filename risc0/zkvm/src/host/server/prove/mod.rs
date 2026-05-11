@@ -437,3 +437,37 @@ pub(crate) fn get_webgpu_prover_server(
     );
     Ok(Rc::new(ProverImpl::new_webgpu(opts.clone(), hal)))
 }
+
+/// Prove with the browser WebGPU prover server using its async GPU-authoritative path.
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) async fn prove_webgpu_with_ctx(
+    opts: &ProverOpts,
+    hal: Rc<WebGpuHal>,
+    env: ExecutorEnv<'_>,
+    ctx: &VerifierContext,
+    elf: &[u8],
+) -> Result<ProveInfo> {
+    ensure!(
+        !opts.dev_mode(),
+        "browser WebGPU proving does not support dev-mode"
+    );
+    ProverImpl::new_webgpu(opts.clone(), hal)
+        .prove_with_ctx_async(env, ctx, elf)
+        .await
+}
+
+/// Compress with the browser WebGPU prover server using its async path.
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) async fn compress_webgpu(
+    opts: &ProverOpts,
+    hal: Rc<WebGpuHal>,
+    receipt: &Receipt,
+) -> Result<Receipt> {
+    ensure!(
+        !opts.dev_mode(),
+        "browser WebGPU proving does not support dev-mode"
+    );
+    ProverImpl::new_webgpu(opts.clone(), hal)
+        .compress_async(opts, receipt)
+        .await
+}

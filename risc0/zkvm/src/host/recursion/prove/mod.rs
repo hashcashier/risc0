@@ -14,6 +14,8 @@
 
 pub mod zkr;
 
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+use std::rc::Rc;
 use std::{
     collections::{BTreeMap, VecDeque},
     fmt::Debug,
@@ -83,6 +85,24 @@ pub fn lift(segment_receipt: &SegmentReceipt) -> Result<SuccinctReceipt<ReceiptC
     make_succinct_receipt(prover, receipt, claim)
 }
 
+/// Browser WebGPU async variant of [`lift`].
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub async fn lift_webgpu(
+    segment_receipt: &SegmentReceipt,
+    hal: Rc<risc0_zkp::hal::webgpu::WebGpuHal>,
+) -> Result<SuccinctReceipt<ReceiptClaim>> {
+    tracing::debug!("Proving lift: claim = {:#?}", segment_receipt.claim);
+    let mut prover = Prover::new_lift(segment_receipt, ProverOpts::succinct())?;
+
+    let receipt = prover.run_with_webgpu_hal(hal).await?;
+    let claim_decoded = ReceiptClaim::decode(&mut receipt.out_stream())?;
+    tracing::debug!("Proving lift finished: decoded claim = {claim_decoded:#?}");
+
+    let claim = claim_decoded.merge(&segment_receipt.claim)?;
+
+    make_succinct_receipt(prover, receipt, claim)
+}
+
 /// Run the lift program to create a succinct work claim receipt from a segment receipt.
 ///
 /// Similar to [`lift`], but additionally tracks verifiable work by computing the work value
@@ -127,6 +147,27 @@ pub fn join(
     tracing::debug!("Proving join finished: decoded claim = {claim_decoded:#?}");
 
     // Compute the expected claim and merge it with the decoded claim, checking that they match.
+    let claim = claim_decoded.merge(&a.claim.join(&b.claim)?.value()?)?;
+
+    make_succinct_receipt(prover, receipt, claim)
+}
+
+/// Browser WebGPU async variant of [`join`].
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub async fn join_webgpu(
+    a: &SuccinctReceipt<ReceiptClaim>,
+    b: &SuccinctReceipt<ReceiptClaim>,
+    hal: Rc<risc0_zkp::hal::webgpu::WebGpuHal>,
+) -> Result<SuccinctReceipt<ReceiptClaim>> {
+    tracing::debug!("Proving join: a.claim = {:#?}", a.claim);
+    tracing::debug!("Proving join: b.claim = {:#?}", b.claim);
+
+    let mut prover = Prover::new_join(a, b, ProverOpts::succinct())?;
+    let receipt = prover.run_with_webgpu_hal(hal).await?;
+
+    let claim_decoded = ReceiptClaim::decode(&mut receipt.out_stream())?;
+    tracing::debug!("Proving join finished: decoded claim = {claim_decoded:#?}");
+
     let claim = claim_decoded.merge(&a.claim.join(&b.claim)?.value()?)?;
 
     make_succinct_receipt(prover, receipt, claim)
@@ -212,6 +253,38 @@ pub fn union(
     make_succinct_receipt(prover, receipt, claim)
 }
 
+/// Browser WebGPU async variant of [`union`].
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+#[allow(dead_code)]
+pub async fn union_webgpu(
+    a: &SuccinctReceipt<Unknown>,
+    b: &SuccinctReceipt<Unknown>,
+    hal: Rc<risc0_zkp::hal::webgpu::WebGpuHal>,
+) -> Result<SuccinctReceipt<UnionClaim>> {
+    let a_assumption = a.to_assumption(false)?.digest();
+    let b_assumption = b.to_assumption(false)?.digest();
+
+    let ((left_assumption, left_receipt), (right_assumption, right_receipt)) =
+        if a_assumption <= b_assumption {
+            ((a_assumption, a), (b_assumption, b))
+        } else {
+            ((b_assumption, b), (a_assumption, a))
+        };
+
+    tracing::debug!("Proving union: left assumption = {:#?}", left_assumption);
+    tracing::debug!("Proving union: right assumption = {:#?}", right_assumption);
+
+    let mut prover = Prover::new_union(left_receipt, right_receipt, ProverOpts::succinct())?;
+    let receipt = prover.run_with_webgpu_hal(hal).await?;
+
+    let claim = UnionClaim {
+        left: left_assumption,
+        right: right_assumption,
+    };
+
+    make_succinct_receipt(prover, receipt, claim)
+}
+
 /// Run the resolve program to remove an assumption from a conditional receipt upon verifying a
 /// receipt proving the validity of the assumption.
 ///
@@ -235,6 +308,42 @@ where
 
     let mut prover = Prover::new_resolve(conditional, assumption, ProverOpts::succinct())?;
     let receipt = prover.prover.run()?;
+    let claim_decoded = ReceiptClaim::decode(&mut receipt.out_stream())?;
+    tracing::debug!("Proving resolve finished: decoded claim = {claim_decoded:#?}");
+
+    let claim = conditional
+        .claim
+        .as_value()
+        .context("conditional receipt claim is pruned")?
+        .resolve(&assumption.claim)
+        .context("failed to compute resolved claim")?
+        .merge(&claim_decoded)
+        .context("failed to merge resolved and decoded claims")?;
+
+    make_succinct_receipt(prover, receipt, claim)
+}
+
+/// Browser WebGPU async variant of [`resolve`].
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub async fn resolve_webgpu<Claim>(
+    conditional: &SuccinctReceipt<ReceiptClaim>,
+    assumption: &SuccinctReceipt<Claim>,
+    hal: Rc<risc0_zkp::hal::webgpu::WebGpuHal>,
+) -> Result<SuccinctReceipt<ReceiptClaim>>
+where
+    Claim: risc0_binfmt::Digestible + Debug,
+{
+    tracing::debug!(
+        "Proving resolve: conditional.claim = {:#?}",
+        conditional.claim,
+    );
+    tracing::debug!(
+        "Proving resolve: assumption.claim = {:#?}",
+        assumption.claim,
+    );
+
+    let mut prover = Prover::new_resolve(conditional, assumption, ProverOpts::succinct())?;
+    let receipt = prover.run_with_webgpu_hal(hal).await?;
     let claim_decoded = ReceiptClaim::decode(&mut receipt.out_stream())?;
     tracing::debug!("Proving resolve finished: decoded claim = {claim_decoded:#?}");
 
@@ -961,6 +1070,15 @@ impl Prover {
     /// program and input.
     pub fn run(&mut self) -> Result<RecursionReceipt> {
         self.prover.run()
+    }
+
+    /// Browser WebGPU async variant of [`Self::run`] using a caller-supplied HAL.
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    pub async fn run_with_webgpu_hal(
+        &mut self,
+        hal: Rc<risc0_zkp::hal::webgpu::WebGpuHal>,
+    ) -> Result<RecursionReceipt> {
+        self.prover.run_with_webgpu_hal(hal).await
     }
 }
 

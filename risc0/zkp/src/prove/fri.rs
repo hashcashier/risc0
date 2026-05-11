@@ -124,3 +124,97 @@ pub fn fri_prove<H: Hal, F>(
         }
     }
 }
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+struct WebGpuProveRoundInfo {
+    domain: usize,
+    coeffs: crate::hal::webgpu::WebGpuBuffer<risc0_core::field::baby_bear::BabyBearElem>,
+    merkle: MerkleTreeProver<crate::hal::webgpu::WebGpuHal>,
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+impl WebGpuProveRoundInfo {
+    async fn new(
+        hal: &crate::hal::webgpu::WebGpuHal,
+        iop: &mut WriteIOP<risc0_core::field::baby_bear::BabyBear>,
+        coeffs: &crate::hal::webgpu::WebGpuBuffer<risc0_core::field::baby_bear::BabyBearElem>,
+    ) -> anyhow::Result<Self> {
+        debug!("Doing FRI folding");
+        let ext_size = <crate::hal::webgpu::WebGpuHal as Hal>::ExtElem::EXT_SIZE;
+        let size = coeffs.size() / ext_size;
+        let domain = size * INV_RATE;
+        let evaluated = hal.alloc_elem("evaluated", domain * ext_size);
+        hal.batch_expand_into_evaluate_ntt_async(&evaluated, coeffs, ext_size, log2_ceil(INV_RATE))
+            .await?;
+        let merkle = MerkleTreeProver::new_async(
+            hal,
+            &evaluated,
+            domain / FRI_FOLD,
+            FRI_FOLD * ext_size,
+            QUERIES,
+        )
+        .await?;
+        merkle.commit_async(hal, iop).await?;
+        let fold_mix = iop.random_ext_elem();
+        let out_coeffs = hal.alloc_elem("out_coeffs", size / FRI_FOLD * ext_size);
+        hal.fri_fold_async(&out_coeffs, coeffs, &fold_mix).await?;
+        Ok(WebGpuProveRoundInfo {
+            domain,
+            coeffs: out_coeffs,
+            merkle,
+        })
+    }
+
+    async fn prove_query_async(
+        &mut self,
+        hal: &crate::hal::webgpu::WebGpuHal,
+        iop: &mut WriteIOP<risc0_core::field::baby_bear::BabyBear>,
+        pos: &mut usize,
+    ) -> anyhow::Result<()> {
+        let group = *pos % (self.domain / FRI_FOLD);
+        self.merkle.prove_async(hal, iop, group).await?;
+        *pos = group;
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub async fn fri_prove_async(
+    hal: &crate::hal::webgpu::WebGpuHal,
+    iop: &mut WriteIOP<risc0_core::field::baby_bear::BabyBear>,
+    coeffs: &crate::hal::webgpu::WebGpuBuffer<risc0_core::field::baby_bear::BabyBearElem>,
+    inner_merkles: &[&MerkleTreeProver<crate::hal::webgpu::WebGpuHal>],
+) -> anyhow::Result<()> {
+    scope!("fri_prove");
+    let ext_size = <crate::hal::webgpu::WebGpuHal as Hal>::ExtElem::EXT_SIZE;
+    let orig_domain = coeffs.size() / ext_size * INV_RATE;
+    let mut rounds = Vec::new();
+    let mut coeffs = coeffs.clone();
+    while coeffs.size() / ext_size > FRI_MIN_DEGREE {
+        let round = WebGpuProveRoundInfo::new(hal, iop, &coeffs).await?;
+        coeffs = round.coeffs.clone();
+        rounds.push(round);
+    }
+
+    let final_coeffs = hal.alloc_elem("final_coeffs", coeffs.size());
+    hal.eltwise_copy_elem(&final_coeffs, &coeffs);
+    hal.batch_bit_reverse_async(&final_coeffs, ext_size).await?;
+    final_coeffs.sync_gpu_to_cpu(hal).await?;
+    final_coeffs.view(|view| {
+        iop.write_field_elem_slice::<risc0_core::field::baby_bear::BabyBearElem>(view);
+        let digest = hal.get_hash_suite().hashfn.hash_elem_slice(view);
+        iop.commit(&digest);
+    });
+
+    debug!("Doing Queries");
+    for _ in 0..QUERIES {
+        let mut pos = iop.random_bits(log2_ceil(orig_domain)) as usize;
+        for merkle in inner_merkles {
+            merkle.prove_async(hal, iop, pos).await?;
+        }
+        for round in rounds.iter_mut() {
+            round.prove_query_async(hal, iop, &mut pos).await?;
+        }
+    }
+    Ok(())
+}

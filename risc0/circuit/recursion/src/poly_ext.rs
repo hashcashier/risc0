@@ -15,7 +15,7 @@
 // This code is automatically generated
 
 use risc0_zkp::{
-    adapter::{MixState, PolyExt, PolyExtStep, PolyExtStepDef},
+    adapter::{MixState, PolyExt, PolyExtScratch, PolyExtStep, PolyExtStepDef},
     field::baby_bear::{BabyBear, BabyBearElem, BabyBearExtElem},
 };
 
@@ -12395,5 +12395,19 @@ impl PolyExt<BabyBear> for CircuitImpl {
         args: &[&[BabyBearElem]],
     ) -> MixState<BabyBearExtElem> {
         DEF.step::<BabyBear>(mix, u, args)
+    }
+
+    fn poly_ext_scratch(&self) -> PolyExtScratch<BabyBear> {
+        DEF.scratch()
+    }
+
+    fn poly_ext_with_scratch(
+        &self,
+        scratch: &mut PolyExtScratch<BabyBear>,
+        mix: &BabyBearExtElem,
+        u: &[BabyBearExtElem],
+        args: &[&[BabyBearElem]],
+    ) -> MixState<BabyBearExtElem> {
+        DEF.step_with_scratch(scratch, mix, u, args)
     }
 }

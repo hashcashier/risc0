@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(not(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown")))]
+use std::time::Instant;
 use std::{
     cell::{Cell, RefCell},
     io::Read,
     rc::Rc,
     sync::Arc,
 };
-#[cfg(not(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown")))]
-use std::time::Instant;
 
 use anyhow::{bail, Context as _, Result};
 use risc0_binfmt::{

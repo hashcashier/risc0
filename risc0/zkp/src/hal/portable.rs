@@ -58,7 +58,18 @@ pub fn eval_check<H, C>(
     let exp_po2 = log2_ceil(INV_RATE);
     let rou = H::Elem::ROU_FWD[po2 + exp_po2];
     let three = H::Elem::from_u64(3);
+    let three_to_steps = three.pow(steps);
+    let rou_to_steps = rou.pow(steps);
+    let mut x_to_steps = H::Elem::ONE;
+    let zerofier_invs: Vec<_> = (0..INV_RATE)
+        .map(|_| {
+            let inv = (three_to_steps * x_to_steps - H::Elem::ONE).inv();
+            x_to_steps *= rou_to_steps;
+            inv
+        })
+        .collect();
     let mut tap_values = vec![H::ExtElem::ZERO; taps.tap_size()];
+    let mut poly_ext_scratch = circuit.poly_ext_scratch();
 
     check.view_mut(|check| {
         for cycle in 0..domain {
@@ -71,11 +82,14 @@ pub fn eval_check<H, C>(
             }
 
             let total = circuit
-                .poly_ext(&poly_mix, &tap_values, global_refs.as_slice())
+                .poly_ext_with_scratch(
+                    &mut poly_ext_scratch,
+                    &poly_mix,
+                    &tap_values,
+                    global_refs.as_slice(),
+                )
                 .tot;
-            let x = rou.pow(cycle);
-            let zerofier = (three * x).pow(steps) - H::Elem::ONE;
-            let result = total * zerofier.inv();
+            let result = total * zerofier_invs[cycle % INV_RATE];
             for (idx, elem) in result.subelems().iter().enumerate() {
                 check[idx * domain + cycle] = *elem;
             }

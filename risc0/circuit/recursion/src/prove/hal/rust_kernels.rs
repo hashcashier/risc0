@@ -21,12 +21,7 @@
     unused_variables
 )]
 
-use std::{
-    cmp::Ordering,
-    collections::BTreeMap,
-    marker::PhantomData,
-    slice,
-};
+use std::{cmp::Ordering, collections::BTreeMap, marker::PhantomData, slice};
 
 use anyhow::{ensure, Result};
 use risc0_circuit_recursion_sys::{RawPreflightCycle, RawPreflightTrace, StepMode};
@@ -112,13 +107,7 @@ impl KernelArgs {
                 mix.as_ptr() as *mut Fp,
                 accum.as_mut_ptr(),
             ],
-            lens: [
-                ctrl.len(),
-                global.len(),
-                data.len(),
-                mix.len(),
-                accum.len(),
-            ],
+            lens: [ctrl.len(), global.len(), data.len(), mix.len(), accum.len()],
             marker: PhantomData,
         }
     }
@@ -262,7 +251,10 @@ impl<'a> MachineContext<'a> {
 
     fn read_iop_body(&mut self, cycle: usize, _args: [Fp; 3]) -> Result<[Fp; 4]> {
         let iop_idx = self.cycles[cycle].iop_idx as usize;
-        ensure!(iop_idx < self.iops.len(), "recursion IOP read out of bounds");
+        ensure!(
+            iop_idx < self.iops.len(),
+            "recursion IOP read out of bounds"
+        );
         self.cycles[cycle].iop_idx += 1;
         let elems = self.iops[iop_idx].elems();
         Ok([elems[0], elems[1], elems[2], elems[3]])
@@ -281,7 +273,10 @@ impl<'a> MachineContext<'a> {
 
     fn plonk_write_wom(&mut self, cycle: usize, args: [Fp; 5]) -> Result<()> {
         let idx = self.wom_index[cycle] as usize;
-        ensure!(idx < K_MAX_WOM_ROWS_PER_CYCLE, "too many WOM rows per cycle");
+        ensure!(
+            idx < K_MAX_WOM_ROWS_PER_CYCLE,
+            "too many WOM rows per cycle"
+        );
         self.wom_index[cycle] += 1;
         self.wom_rows[cycle * K_MAX_WOM_ROWS_PER_CYCLE + idx] = WomArgumentRow {
             addr: args[0].as_u32(),

@@ -82,3 +82,30 @@ impl<H: Hal> PolyGroup<H> {
         }
     }
 }
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+impl PolyGroup<crate::hal::webgpu::WebGpuHal> {
+    /// Async WebGPU variant of [`Self::new`].
+    pub async fn new_async(
+        hal: &crate::hal::webgpu::WebGpuHal,
+        coeffs: crate::hal::webgpu::WebGpuBuffer<risc0_core::field::baby_bear::BabyBearElem>,
+        count: usize,
+        size: usize,
+        name: &'static str,
+    ) -> anyhow::Result<Self> {
+        scope_with!("poly_group({})", name);
+        assert_eq!(coeffs.size(), count * size);
+        let domain = size * INV_RATE;
+        let evaluated = hal.alloc_elem("evaluated", count * domain);
+        hal.batch_expand_into_evaluate_ntt_async(&evaluated, &coeffs, count, log2_ceil(INV_RATE))
+            .await?;
+        hal.batch_bit_reverse_async(&coeffs, count).await?;
+        let merkle = MerkleTreeProver::new_async(hal, &evaluated, domain, count, QUERIES).await?;
+        Ok(PolyGroup {
+            coeffs,
+            count,
+            evaluated,
+            merkle,
+        })
+    }
+}

@@ -25,6 +25,8 @@ pub mod zkr;
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 use std::cell::RefCell;
 use std::{collections::VecDeque, fmt::Debug, rc::Rc};
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+use std::{future::Future, pin::Pin};
 
 use anyhow::Result;
 use cfg_if::cfg_if;
@@ -79,6 +81,15 @@ impl RecursionReceipt {
 
 pub trait RecursionProver {
     fn prove(&self, program: Program, input: VecDeque<u32>) -> Result<RecursionReceipt>;
+
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    fn prove_async<'a>(
+        &'a self,
+        program: Program,
+        input: VecDeque<u32>,
+    ) -> Pin<Box<dyn Future<Output = Result<RecursionReceipt>> + 'a>> {
+        Box::pin(async move { self.prove(program, input) })
+    }
 }
 
 pub fn recursion_prover(hashfn: &str) -> Result<Box<dyn RecursionProver>> {
@@ -191,6 +202,18 @@ impl Prover {
     pub fn run(&mut self) -> Result<RecursionReceipt> {
         let prover = recursion_prover(&self.hashfn)?;
         prover.prove(self.program.clone(), self.input.clone())
+    }
+
+    /// Browser WebGPU async variant of [`Self::run`] using a caller-supplied HAL.
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    pub async fn run_with_webgpu_hal(
+        &mut self,
+        hal: Rc<risc0_zkp::hal::webgpu::WebGpuHal>,
+    ) -> Result<RecursionReceipt> {
+        let prover = recursion_prover_with_hal(hal)?;
+        prover
+            .prove_async(self.program.clone(), self.input.clone())
+            .await
     }
 }
 

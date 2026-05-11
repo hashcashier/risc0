@@ -16,9 +16,12 @@ use std::rc::Rc;
 
 use anyhow::Result;
 use risc0_core::scope;
-use risc0_zkp::hal::{
-    webgpu::{WebGpuBuffer, WebGpuHal},
-    AccumPreflight, Buffer, CircuitHal,
+use risc0_zkp::{
+    field::baby_bear::BabyBearExtElem,
+    hal::{
+        webgpu::{WebGpuBuffer, WebGpuCircuitEvalCheck, WebGpuHal, WebGpuStageTimer},
+        AccumPreflight, Buffer, CircuitHal,
+    },
 };
 
 use crate::{
@@ -35,6 +38,30 @@ use super::{
 #[allow(dead_code)]
 pub(crate) struct WebGpuCircuitHal;
 
+impl WebGpuCircuitEvalCheck for WebGpuCircuitHal {
+    fn eval_check_webgpu(
+        &self,
+        hal: &WebGpuHal,
+        check: &WebGpuBuffer<Val>,
+        groups: &[&WebGpuBuffer<Val>],
+        globals: &[&WebGpuBuffer<Val>],
+        poly_mix: BabyBearExtElem,
+        po2: usize,
+        steps: usize,
+    ) -> Result<bool> {
+        hal.dispatch_eval_check_poly_ext(
+            check,
+            groups,
+            globals,
+            crate::zirgen::taps::TAPSET,
+            &crate::zirgen::poly_ext::DEF,
+            poly_mix,
+            po2,
+            steps,
+        )
+    }
+}
+
 impl CircuitWitnessGenerator<WebGpuHal> for WebGpuCircuitHal {
     type PreferredPreflightOrder = ForwardPreflightOrder;
 
@@ -45,6 +72,13 @@ impl CircuitWitnessGenerator<WebGpuHal> for WebGpuCircuitHal {
         data: &[u32],
     ) -> Result<()> {
         scope!("scatter");
+        let _timer = WebGpuStageTimer::new(format!(
+            "keccak_scatter_preflight rows={} cols={} scatter={} data_words={}",
+            into.rows,
+            into.cols,
+            infos.len(),
+            data.len()
+        ));
         into.buf.view_mut(|into_slice| {
             for info in infos {
                 let inner_count = 32 / info.bits;
@@ -70,6 +104,14 @@ impl CircuitWitnessGenerator<WebGpuHal> for WebGpuCircuitHal {
         global: &MetaBuffer<WebGpuHal>,
         data: &MetaBuffer<WebGpuHal>,
     ) -> Result<()> {
+        let _timer = WebGpuStageTimer::new(format!(
+            "keccak_witgen mode={} cycle={} preimages={} data_words={} cycles={}",
+            step_mode_label(mode),
+            preflight.cycle,
+            preflight.preimages.len(),
+            preflight.data.len(),
+            preflight.cycles.len()
+        ));
         super::rust_steps::generate_witness(mode, preflight, global, data)
     }
 }
@@ -96,6 +138,12 @@ impl CircuitHal<WebGpuHal> for WebGpuCircuitHal {
         po2: usize,
         steps: usize,
     ) {
+        let _timer = WebGpuStageTimer::new(format!(
+            "keccak_eval_check po2={} steps={} domain={}",
+            po2,
+            steps,
+            steps * risc0_zkp::INV_RATE
+        ));
         risc0_zkp::hal::portable::eval_check::<WebGpuHal, CircuitImpl>(
             &CircuitImpl,
             check,
@@ -113,4 +161,12 @@ pub fn keccak_prover(hal: Rc<WebGpuHal>) -> Result<Box<dyn KeccakProver>> {
         hal,
         circuit_hal: Rc::new(WebGpuCircuitHal),
     }))
+}
+
+fn step_mode_label(mode: StepMode) -> &'static str {
+    match mode {
+        StepMode::Parallel => "parallel",
+        StepMode::SeqForward => "seq_forward",
+        StepMode::SeqReverse => "seq_reverse",
+    }
 }

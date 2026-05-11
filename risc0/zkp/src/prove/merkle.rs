@@ -140,6 +140,121 @@ impl<H: Hal> MerkleTreeProver<H> {
     }
 }
 
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+impl MerkleTreeProver<crate::hal::webgpu::WebGpuHal> {
+    /// Async WebGPU variant of [`Self::new`].
+    ///
+    /// WebGPU readback is asynchronous, so roots and top-layer transcript
+    /// writes must explicitly synchronize the GPU-owned node buffer before the
+    /// normal synchronous IOP code reads it.
+    pub async fn new_async(
+        hal: &crate::hal::webgpu::WebGpuHal,
+        matrix: &crate::hal::webgpu::WebGpuBuffer<risc0_core::field::baby_bear::BabyBearElem>,
+        rows: usize,
+        cols: usize,
+        queries: usize,
+    ) -> anyhow::Result<Self> {
+        assert_eq!(matrix.size(), rows * cols);
+        let params = MerkleTreeParams::new(rows, cols, queries);
+        let nodes = hal.alloc_digest("nodes", rows * 2);
+        hal.hash_rows_async(&nodes.slice(rows, rows), matrix)
+            .await?;
+        scope!("hash_fold", {
+            for i in (0..params.layers).rev() {
+                let layer_size = 1 << i;
+                hal.hash_fold_async(&nodes, layer_size * 2, layer_size)
+                    .await?;
+            }
+            Ok::<(), anyhow::Error>(())
+        })?;
+        nodes.sync_gpu_to_cpu(hal).await?;
+        let root = nodes.get_at(1);
+        Ok(MerkleTreeProver {
+            params,
+            matrix: matrix.clone(),
+            nodes,
+            root,
+        })
+    }
+
+    /// Async WebGPU variant of [`Self::commit`].
+    pub async fn commit_async(
+        &self,
+        hal: &crate::hal::webgpu::WebGpuHal,
+        iop: &mut WriteIOP<risc0_core::field::baby_bear::BabyBear>,
+    ) -> anyhow::Result<()> {
+        scope!("commit");
+        self.nodes.sync_gpu_to_cpu(hal).await?;
+        let top_size = self.params.top_size;
+        let slice = self.nodes.slice(top_size, top_size);
+        slice.view(|view| {
+            iop.write_pod_slice(view);
+        });
+        iop.commit(self.root());
+        Ok(())
+    }
+
+    /// Async WebGPU variant of [`Self::prove`].
+    pub async fn prove_async(
+        &self,
+        hal: &crate::hal::webgpu::WebGpuHal,
+        iop: &mut WriteIOP<risc0_core::field::baby_bear::BabyBear>,
+        idx: usize,
+    ) -> anyhow::Result<Vec<risc0_core::field::baby_bear::BabyBearElem>> {
+        self.nodes.sync_gpu_to_cpu(hal).await?;
+        assert!(idx < self.params.row_size);
+
+        let sample = hal.alloc_elem("sample", self.params.col_size);
+        hal.gather_sample_async(
+            &sample,
+            &self.matrix,
+            idx,
+            self.params.col_size,
+            self.params.row_size,
+        )
+        .await?;
+        sample.sync_gpu_to_cpu(hal).await?;
+        let out = sample.to_vec();
+        iop.write_field_elem_slice::<risc0_core::field::baby_bear::BabyBearElem>(out.as_slice());
+
+        let mut idx = idx + self.params.row_size;
+        while idx >= 2 * self.params.top_size {
+            let low_bit = idx % 2;
+            idx /= 2;
+            let other_idx = 2 * idx + (1 - low_bit);
+            let other = self.nodes.get_at(other_idx);
+            iop.write_pod_slice(&[other]);
+        }
+        Ok(out)
+    }
+
+    /// Synchronous WebGPU proof path after async readback has made CPU shadows current.
+    pub fn prove_current(
+        &self,
+        iop: &mut WriteIOP<risc0_core::field::baby_bear::BabyBear>,
+        idx: usize,
+    ) -> Vec<risc0_core::field::baby_bear::BabyBearElem> {
+        assert!(idx < self.params.row_size);
+        let mut out = Vec::with_capacity(self.params.col_size);
+        self.matrix.view(|view| {
+            for i in 0..self.params.col_size {
+                out.push(view[idx + i * self.params.row_size]);
+            }
+        });
+        iop.write_field_elem_slice::<risc0_core::field::baby_bear::BabyBearElem>(out.as_slice());
+
+        let mut idx = idx + self.params.row_size;
+        while idx >= 2 * self.params.top_size {
+            let low_bit = idx % 2;
+            idx /= 2;
+            let other_idx = 2 * idx + (1 - low_bit);
+            let other = self.nodes.get_at(other_idx);
+            iop.write_pod_slice(&[other]);
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rand::Rng;

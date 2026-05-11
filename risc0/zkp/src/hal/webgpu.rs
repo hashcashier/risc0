@@ -17,7 +17,7 @@
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, HashSet},
-    fmt::Debug,
+    fmt::{Debug, Write as _},
     marker::PhantomData,
     mem,
     rc::Rc,
@@ -38,6 +38,12 @@ use super::{
 use crate::core::{
     digest::{Digest, DIGEST_WORDS},
     hash::{poseidon2, HashSuite},
+    log2_ceil,
+};
+use crate::{
+    adapter::{PolyExtStep, PolyExtStepDef},
+    taps::TapSet,
+    INV_RATE,
 };
 
 /// `GPUBufferUsage.MAP_READ`.
@@ -58,6 +64,1953 @@ pub const WEBGPU_SHADER_STAGE_COMPUTE: u32 = 0x0004;
 pub const WEBGPU_MAP_MODE_READ: u32 = 0x0001;
 
 const MAX_EXACT_JS_INTEGER: u64 = 1 << 53;
+const WEBGPU_WORKGROUP_SIZE: u32 = 256;
+const WEBGPU_MAX_WORKGROUPS_PER_DIMENSION: u32 = 65_535;
+const WEBGPU_SAFE_STORAGE_BINDING_BYTES: u64 = 120 * 1024 * 1024;
+const WEBGPU_SAFE_QUEUE_WRITE_BYTES: usize = 16 * 1024 * 1024;
+const WEBGPU_STORAGE_BUFFER_OFFSET_ALIGNMENT: u64 = 256;
+const WEBGPU_EVAL_CHECK_MAX_POLY_EXT_STEPS: usize = 4096;
+const WEBGPU_EVAL_CHECK_ENABLE_SPLIT: bool = false;
+const WEBGPU_EVAL_CHECK_SPLIT_TERMS_PER_SHADER: usize = 64;
+const WEBGPU_EVAL_CHECK_SPLIT_FP_OPS_PER_SHADER: usize = 2048;
+const WEBGPU_EVAL_CHECK_MAX_FP_SLOTS: usize = 1536;
+const WEBGPU_EVAL_CHECK_MAX_MIX_SLOTS: usize = 64;
+const WEBGPU_EVAL_CHECK_INTERPRETER_WORKGROUP_SIZE: u32 = 32;
+const WEBGPU_EVAL_CHECK_INSTRUCTION_WORDS: usize = 8;
+
+const WEBGPU_EVAL_OP_CONST: u32 = 0;
+const WEBGPU_EVAL_OP_CONST_EXT: u32 = 1;
+const WEBGPU_EVAL_OP_GET: u32 = 2;
+const WEBGPU_EVAL_OP_GET_GLOBAL: u32 = 3;
+const WEBGPU_EVAL_OP_ADD: u32 = 4;
+const WEBGPU_EVAL_OP_SUB: u32 = 5;
+const WEBGPU_EVAL_OP_MUL: u32 = 6;
+const WEBGPU_EVAL_OP_TRUE: u32 = 7;
+const WEBGPU_EVAL_OP_AND_EQZ: u32 = 8;
+const WEBGPU_EVAL_OP_AND_COND: u32 = 9;
+
+/// Browser console timer for proof-stage telemetry.
+///
+/// This is intentionally scoped to the browser WebGPU HAL so circuit crates can
+/// add wasm-only timing probes without depending directly on JS bindings.
+pub struct WebGpuStageTimer {
+    label: String,
+    start_ms: f64,
+}
+
+/// Optional circuit-specific WebGPU implementation of the check-polynomial
+/// evaluation stage.
+///
+/// Returning `Ok(false)` means the circuit cannot handle the current buffers on
+/// GPU and the prover should use the portable CPU-compatible fallback.
+pub trait WebGpuCircuitEvalCheck {
+    fn eval_check_webgpu(
+        &self,
+        _hal: &WebGpuHal,
+        _check: &WebGpuBuffer<BabyBearElem>,
+        _groups: &[&WebGpuBuffer<BabyBearElem>],
+        _globals: &[&WebGpuBuffer<BabyBearElem>],
+        _poly_mix: BabyBearExtElem,
+        _po2: usize,
+        _steps: usize,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+}
+
+impl WebGpuStageTimer {
+    pub fn new(label: impl Into<String>) -> Self {
+        let label = label.into();
+        log_webgpu_stage(&format!("browser-prove:stage start {label}"));
+        Self {
+            label,
+            start_ms: js_sys::Date::now(),
+        }
+    }
+}
+
+impl Drop for WebGpuStageTimer {
+    fn drop(&mut self) {
+        let elapsed_ms = js_sys::Date::now() - self.start_ms;
+        log_webgpu_stage(&format!(
+            "browser-prove:stage done {} elapsed_ms={elapsed_ms:.3}",
+            self.label
+        ));
+    }
+}
+
+fn log_webgpu_stage(message: &str) {
+    web_sys::console::log_1(&JsValue::from_str(message));
+}
+
+#[derive(Clone, Copy)]
+struct EvalCheckTap {
+    group: usize,
+    offset: usize,
+    back: usize,
+}
+
+#[derive(Clone, Copy)]
+enum EvalCheckFpOp {
+    Const(u32),
+    ConstExt(u32, u32, u32, u32),
+    Get(usize),
+    GetGlobal(usize, usize),
+    Add(usize, usize),
+    Sub(usize, usize),
+    Mul(usize, usize),
+}
+
+#[derive(Clone, Copy)]
+enum EvalCheckMixOp {
+    True,
+    AndEqz {
+        chain: usize,
+        inner: usize,
+    },
+    AndCond {
+        chain: usize,
+        cond: usize,
+        inner: usize,
+    },
+}
+
+#[derive(Clone)]
+struct EvalCheckTerm {
+    mix_exp: usize,
+    conds: Vec<usize>,
+    inner: usize,
+}
+
+struct EvalCheckProgram {
+    fp_ops: Vec<EvalCheckFpOp>,
+    mix_ops: Vec<EvalCheckMixOp>,
+    mix_exps: Vec<usize>,
+}
+
+fn elem_word(value: BabyBearElem) -> u32 {
+    value.to_u32_words()[0]
+}
+
+fn elem_const_word(value: u32) -> u32 {
+    elem_word(BabyBearElem::from_u64(value as u64))
+}
+
+fn ext_words(value: BabyBearExtElem) -> [u32; 4] {
+    let elems = value.subelems();
+    [
+        elem_word(elems[0]),
+        elem_word(elems[1]),
+        elem_word(elems[2]),
+        elem_word(elems[3]),
+    ]
+}
+
+fn eval_check_mix_exponents(def: &PolyExtStepDef) -> Result<Vec<usize>> {
+    let mut exponents = Vec::new();
+    for op in def.block {
+        match op {
+            PolyExtStep::True => exponents.push(0),
+            PolyExtStep::AndEqz(chain, _) => {
+                let exponent = exponents.get(*chain).ok_or_else(|| {
+                    anyhow!("poly_ext AndEqz chain index {chain} is out of range")
+                })? + 1;
+                exponents.push(exponent);
+            }
+            PolyExtStep::AndCond(chain, _, inner) => {
+                let chain_exp = exponents.get(*chain).ok_or_else(|| {
+                    anyhow!("poly_ext AndCond chain index {chain} is out of range")
+                })?;
+                let inner_exp = exponents.get(*inner).ok_or_else(|| {
+                    anyhow!("poly_ext AndCond inner index {inner} is out of range")
+                })?;
+                exponents.push(chain_exp + inner_exp);
+            }
+            _ => {}
+        }
+    }
+
+    ensure!(
+        def.ret < exponents.len(),
+        "poly_ext return mix index {} exceeds mix count {}",
+        def.ret,
+        exponents.len()
+    );
+    Ok(exponents)
+}
+
+fn eval_check_mix_pows(
+    def: &PolyExtStepDef,
+    poly_mix: BabyBearExtElem,
+) -> Result<Vec<BabyBearExtElem>> {
+    let exponents = eval_check_mix_exponents(def)?;
+    let max_exp = exponents.iter().copied().max().unwrap_or(0);
+    let mut powers = Vec::with_capacity(max_exp + 1);
+    let mut cur = BabyBearExtElem::ONE;
+    for _ in 0..=max_exp {
+        powers.push(cur);
+        cur *= poly_mix;
+    }
+    Ok(exponents.into_iter().map(|exp| powers[exp]).collect())
+}
+
+fn eval_check_all_mix_pows(
+    def: &PolyExtStepDef,
+    poly_mix: BabyBearExtElem,
+) -> Result<Vec<BabyBearExtElem>> {
+    let max_exp = eval_check_mix_exponents(def)?
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+    let mut powers = Vec::with_capacity(max_exp + 1);
+    let mut cur = BabyBearExtElem::ONE;
+    for _ in 0..=max_exp {
+        powers.push(cur);
+        cur *= poly_mix;
+    }
+    Ok(powers)
+}
+
+fn eval_check_program(def: &PolyExtStepDef) -> Result<EvalCheckProgram> {
+    let mut fp_ops = Vec::new();
+    let mut mix_ops = Vec::new();
+    let mut mix_exps = Vec::new();
+    for op in def.block {
+        match op {
+            PolyExtStep::Const(value) => fp_ops.push(EvalCheckFpOp::Const(*value)),
+            PolyExtStep::ConstExt(x0, x1, x2, x3) => {
+                fp_ops.push(EvalCheckFpOp::ConstExt(*x0, *x1, *x2, *x3));
+            }
+            PolyExtStep::Get(tap) => fp_ops.push(EvalCheckFpOp::Get(*tap)),
+            PolyExtStep::GetGlobal(arg, offset) => {
+                fp_ops.push(EvalCheckFpOp::GetGlobal(*arg, *offset));
+            }
+            PolyExtStep::Add(lhs, rhs) => fp_ops.push(EvalCheckFpOp::Add(*lhs, *rhs)),
+            PolyExtStep::Sub(lhs, rhs) => fp_ops.push(EvalCheckFpOp::Sub(*lhs, *rhs)),
+            PolyExtStep::Mul(lhs, rhs) => fp_ops.push(EvalCheckFpOp::Mul(*lhs, *rhs)),
+            PolyExtStep::True => {
+                mix_ops.push(EvalCheckMixOp::True);
+                mix_exps.push(0);
+            }
+            PolyExtStep::AndEqz(chain, inner) => {
+                let chain_exp = *mix_exps.get(*chain).ok_or_else(|| {
+                    anyhow!("poly_ext AndEqz chain index {chain} is out of range")
+                })?;
+                ensure!(
+                    *inner < fp_ops.len(),
+                    "poly_ext AndEqz inner index {inner} is out of range"
+                );
+                mix_ops.push(EvalCheckMixOp::AndEqz {
+                    chain: *chain,
+                    inner: *inner,
+                });
+                mix_exps.push(chain_exp + 1);
+            }
+            PolyExtStep::AndCond(chain, cond, inner) => {
+                let chain_exp = *mix_exps.get(*chain).ok_or_else(|| {
+                    anyhow!("poly_ext AndCond chain index {chain} is out of range")
+                })?;
+                let inner_exp = *mix_exps.get(*inner).ok_or_else(|| {
+                    anyhow!("poly_ext AndCond inner index {inner} is out of range")
+                })?;
+                ensure!(
+                    *cond < fp_ops.len(),
+                    "poly_ext AndCond cond index {cond} is out of range"
+                );
+                mix_ops.push(EvalCheckMixOp::AndCond {
+                    chain: *chain,
+                    cond: *cond,
+                    inner: *inner,
+                });
+                mix_exps.push(chain_exp + inner_exp);
+            }
+        }
+    }
+
+    ensure!(
+        def.ret < mix_ops.len(),
+        "poly_ext return mix index {} exceeds mix count {}",
+        def.ret,
+        mix_ops.len()
+    );
+    Ok(EvalCheckProgram {
+        fp_ops,
+        mix_ops,
+        mix_exps,
+    })
+}
+
+fn eval_check_flatten_terms(program: &EvalCheckProgram, ret: usize) -> Result<Vec<EvalCheckTerm>> {
+    ensure!(
+        ret < program.mix_ops.len(),
+        "poly_ext return mix index {ret} exceeds mix count {}",
+        program.mix_ops.len()
+    );
+
+    let mut terms = Vec::new();
+    let mut stack = vec![(ret, 0usize, Vec::new())];
+    while let Some((mix_idx, extra_exp, conds)) = stack.pop() {
+        match program.mix_ops[mix_idx] {
+            EvalCheckMixOp::True => {}
+            EvalCheckMixOp::AndEqz { chain, inner } => {
+                stack.push((chain, extra_exp, conds.clone()));
+                terms.push(EvalCheckTerm {
+                    mix_exp: extra_exp + program.mix_exps[chain],
+                    conds,
+                    inner,
+                });
+            }
+            EvalCheckMixOp::AndCond { chain, cond, inner } => {
+                stack.push((chain, extra_exp, conds.clone()));
+                let mut inner_conds = conds;
+                inner_conds.push(cond);
+                stack.push((inner, extra_exp + program.mix_exps[chain], inner_conds));
+            }
+        }
+    }
+    Ok(terms)
+}
+
+fn eval_check_fp_dependencies(op: EvalCheckFpOp) -> &'static [usize] {
+    match op {
+        EvalCheckFpOp::Add(_, _) | EvalCheckFpOp::Sub(_, _) | EvalCheckFpOp::Mul(_, _) => {
+            // Handled by `eval_check_note_fp_dependencies`.
+            &[]
+        }
+        _ => &[],
+    }
+}
+
+fn eval_check_note_fp_dependencies(op: EvalCheckFpOp, stack: &mut Vec<usize>) {
+    match op {
+        EvalCheckFpOp::Add(lhs, rhs)
+        | EvalCheckFpOp::Sub(lhs, rhs)
+        | EvalCheckFpOp::Mul(lhs, rhs) => {
+            stack.push(lhs);
+            stack.push(rhs);
+        }
+        _ => {}
+    }
+}
+
+fn eval_check_needed_fp_vars(
+    program: &EvalCheckProgram,
+    terms: &[EvalCheckTerm],
+) -> Result<Vec<usize>> {
+    let mut needed = HashSet::new();
+    let mut stack = Vec::new();
+    for term in terms {
+        stack.push(term.inner);
+        stack.extend(term.conds.iter().copied());
+    }
+
+    while let Some(var) = stack.pop() {
+        if !needed.insert(var) {
+            continue;
+        }
+        let op = *program
+            .fp_ops
+            .get(var)
+            .ok_or_else(|| anyhow!("poly_ext fp var {var} is out of range"))?;
+        let _ = eval_check_fp_dependencies(op);
+        eval_check_note_fp_dependencies(op, &mut stack);
+    }
+
+    let mut needed: Vec<_> = needed.into_iter().collect();
+    needed.sort_unstable();
+    Ok(needed)
+}
+
+fn eval_check_split_term_chunks(
+    program: &EvalCheckProgram,
+    terms: &[EvalCheckTerm],
+) -> Result<Vec<Vec<EvalCheckTerm>>> {
+    let mut chunks = Vec::new();
+    let mut cur_terms = Vec::new();
+    let mut cur_needed = HashSet::new();
+
+    for term in terms {
+        let term_needed = eval_check_needed_fp_vars(program, std::slice::from_ref(term))?;
+        ensure!(
+            term_needed.len() <= WEBGPU_EVAL_CHECK_SPLIT_FP_OPS_PER_SHADER,
+            "single split eval_check term needs {} FP ops, max is {}",
+            term_needed.len(),
+            WEBGPU_EVAL_CHECK_SPLIT_FP_OPS_PER_SHADER
+        );
+
+        let mut next_needed_len = cur_needed.len();
+        for var in &term_needed {
+            if !cur_needed.contains(var) {
+                next_needed_len += 1;
+            }
+        }
+
+        if !cur_terms.is_empty()
+            && (cur_terms.len() >= WEBGPU_EVAL_CHECK_SPLIT_TERMS_PER_SHADER
+                || next_needed_len > WEBGPU_EVAL_CHECK_SPLIT_FP_OPS_PER_SHADER)
+        {
+            chunks.push(std::mem::take(&mut cur_terms));
+            cur_needed.clear();
+        }
+
+        for var in term_needed {
+            cur_needed.insert(var);
+        }
+        cur_terms.push(term.clone());
+    }
+
+    if !cur_terms.is_empty() {
+        chunks.push(cur_terms);
+    }
+
+    Ok(chunks)
+}
+
+fn eval_check_zerofier_inv_words(po2: usize, steps: usize) -> [u32; 4] {
+    let exp_po2 = log2_ceil(INV_RATE);
+    let rou = BabyBearElem::ROU_FWD[po2 + exp_po2];
+    let three = BabyBearElem::from_u64(3);
+    let three_to_steps = three.pow(steps);
+    let rou_to_steps = rou.pow(steps);
+    let mut x_to_steps = BabyBearElem::ONE;
+    let mut invs = [0; 4];
+    for inv in invs.iter_mut().take(INV_RATE) {
+        *inv = elem_word((three_to_steps * x_to_steps - BabyBearElem::ONE).inv());
+        x_to_steps *= rou_to_steps;
+    }
+    invs
+}
+
+fn eval_check_ext_const(words: [u32; 4]) -> String {
+    format!(
+        "vec4<u32>({}u, {}u, {}u, {}u)",
+        words[0], words[1], words[2], words[3]
+    )
+}
+
+#[derive(Default)]
+struct EvalCheckSlotAllocator {
+    free: Vec<usize>,
+    next: usize,
+    max: usize,
+}
+
+impl EvalCheckSlotAllocator {
+    fn alloc(&mut self) -> usize {
+        let slot = self.free.pop().unwrap_or_else(|| {
+            let slot = self.next;
+            self.next += 1;
+            self.max = self.max.max(self.next);
+            slot
+        });
+        self.max = self.max.max(slot + 1);
+        slot
+    }
+
+    fn free(&mut self, slot: usize) {
+        self.free.push(slot);
+    }
+}
+
+fn eval_check_note_last(last_uses: &mut Vec<Option<usize>>, var: usize, op_idx: usize) {
+    if var >= last_uses.len() {
+        last_uses.resize(var + 1, None);
+    }
+    last_uses[var] = Some(op_idx);
+}
+
+fn eval_check_last_uses(
+    def: &PolyExtStepDef,
+) -> Result<(Vec<Option<usize>>, Vec<Option<usize>>, usize, usize)> {
+    let mut last_fp = Vec::new();
+    let mut last_mix = Vec::new();
+    let mut fp_count = 0usize;
+    let mut mix_count = 0usize;
+
+    for (op_idx, op) in def.block.iter().enumerate() {
+        match op {
+            PolyExtStep::Const(_)
+            | PolyExtStep::ConstExt(_, _, _, _)
+            | PolyExtStep::Get(_)
+            | PolyExtStep::GetGlobal(_, _) => {
+                fp_count += 1;
+                last_fp.resize(last_fp.len().max(fp_count), None);
+            }
+            PolyExtStep::Add(lhs, rhs)
+            | PolyExtStep::Sub(lhs, rhs)
+            | PolyExtStep::Mul(lhs, rhs) => {
+                eval_check_note_last(&mut last_fp, *lhs, op_idx);
+                eval_check_note_last(&mut last_fp, *rhs, op_idx);
+                fp_count += 1;
+                last_fp.resize(last_fp.len().max(fp_count), None);
+            }
+            PolyExtStep::True => {
+                mix_count += 1;
+                last_mix.resize(last_mix.len().max(mix_count), None);
+            }
+            PolyExtStep::AndEqz(chain, inner) => {
+                eval_check_note_last(&mut last_mix, *chain, op_idx);
+                eval_check_note_last(&mut last_fp, *inner, op_idx);
+                mix_count += 1;
+                last_mix.resize(last_mix.len().max(mix_count), None);
+            }
+            PolyExtStep::AndCond(chain, cond, inner) => {
+                eval_check_note_last(&mut last_mix, *chain, op_idx);
+                eval_check_note_last(&mut last_fp, *cond, op_idx);
+                eval_check_note_last(&mut last_mix, *inner, op_idx);
+                mix_count += 1;
+                last_mix.resize(last_mix.len().max(mix_count), None);
+            }
+        }
+    }
+
+    ensure!(
+        def.ret < mix_count,
+        "poly_ext return mix index {} exceeds generated mix count {}",
+        def.ret,
+        mix_count
+    );
+    last_mix[def.ret] = Some(usize::MAX);
+    Ok((last_fp, last_mix, fp_count, mix_count))
+}
+
+fn eval_check_fp_slot(slots: &[Option<usize>], var: usize) -> Result<usize> {
+    slots
+        .get(var)
+        .and_then(|slot| *slot)
+        .ok_or_else(|| anyhow!("poly_ext fp var {var} is not live"))
+}
+
+fn eval_check_mix_slot(slots: &[Option<usize>], var: usize) -> Result<usize> {
+    slots
+        .get(var)
+        .and_then(|slot| *slot)
+        .ok_or_else(|| anyhow!("poly_ext mix var {var} is not live"))
+}
+
+fn eval_check_interpreter_instructions(
+    taps: &TapSet<'_>,
+    def: &PolyExtStepDef,
+) -> Result<(Vec<u32>, usize, usize, usize)> {
+    let tap_info: Vec<_> = taps
+        .taps()
+        .map(|tap| EvalCheckTap {
+            group: tap.group(),
+            offset: tap.offset(),
+            back: tap.back(),
+        })
+        .collect();
+    let (last_fp, last_mix, _fp_count, _mix_count) = eval_check_last_uses(def)?;
+    let mut fp_alloc = EvalCheckSlotAllocator::default();
+    let mut mix_alloc = EvalCheckSlotAllocator::default();
+    let mut fp_slots: Vec<Option<usize>> = Vec::new();
+    let mut mix_slots: Vec<Option<usize>> = Vec::new();
+    let mut instructions = Vec::new();
+
+    let mut push_instr = |words: [u32; WEBGPU_EVAL_CHECK_INSTRUCTION_WORDS]| {
+        instructions.extend(words);
+    };
+
+    for (op_idx, op) in def.block.iter().enumerate() {
+        let mut used_fp = Vec::new();
+        let mut used_mix = Vec::new();
+        match op {
+            PolyExtStep::Const(value) => {
+                let out_idx = fp_slots.len();
+                let out_slot = fp_alloc.alloc();
+                fp_slots.push(Some(out_slot));
+                push_instr([
+                    WEBGPU_EVAL_OP_CONST,
+                    u32::try_from(out_slot).expect("eval_check fp slot exceeds u32"),
+                    elem_const_word(*value),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ]);
+                if last_fp.get(out_idx).copied().flatten().is_none() {
+                    fp_slots[out_idx] = None;
+                    fp_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::ConstExt(x0, x1, x2, x3) => {
+                let out_idx = fp_slots.len();
+                let out_slot = fp_alloc.alloc();
+                fp_slots.push(Some(out_slot));
+                push_instr([
+                    WEBGPU_EVAL_OP_CONST_EXT,
+                    u32::try_from(out_slot).expect("eval_check fp slot exceeds u32"),
+                    elem_const_word(*x0),
+                    elem_const_word(*x1),
+                    elem_const_word(*x2),
+                    elem_const_word(*x3),
+                    0,
+                    0,
+                ]);
+                if last_fp.get(out_idx).copied().flatten().is_none() {
+                    fp_slots[out_idx] = None;
+                    fp_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::Get(tap_idx) => {
+                let tap = tap_info
+                    .get(*tap_idx)
+                    .ok_or_else(|| anyhow!("poly_ext tap index {tap_idx} is out of range"))?;
+                ensure!(tap.group < 3, "WebGPU eval_check only supports 3 groups");
+                let out_idx = fp_slots.len();
+                let out_slot = fp_alloc.alloc();
+                fp_slots.push(Some(out_slot));
+                push_instr([
+                    WEBGPU_EVAL_OP_GET,
+                    u32::try_from(out_slot).expect("eval_check fp slot exceeds u32"),
+                    u32::try_from(tap.group).expect("eval_check tap group exceeds u32"),
+                    u32::try_from(tap.offset).expect("eval_check tap offset exceeds u32"),
+                    u32::try_from(tap.back * INV_RATE).expect("eval_check tap back exceeds u32"),
+                    0,
+                    0,
+                    0,
+                ]);
+                if last_fp.get(out_idx).copied().flatten().is_none() {
+                    fp_slots[out_idx] = None;
+                    fp_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::GetGlobal(arg, offset) => {
+                ensure!(*arg < 2, "WebGPU eval_check only supports 2 global buffers");
+                let out_idx = fp_slots.len();
+                let out_slot = fp_alloc.alloc();
+                fp_slots.push(Some(out_slot));
+                push_instr([
+                    WEBGPU_EVAL_OP_GET_GLOBAL,
+                    u32::try_from(out_slot).expect("eval_check fp slot exceeds u32"),
+                    u32::try_from(*arg).expect("eval_check global arg exceeds u32"),
+                    u32::try_from(*offset).expect("eval_check global offset exceeds u32"),
+                    0,
+                    0,
+                    0,
+                    0,
+                ]);
+                if last_fp.get(out_idx).copied().flatten().is_none() {
+                    fp_slots[out_idx] = None;
+                    fp_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::Add(lhs, rhs) => {
+                let lhs_slot = eval_check_fp_slot(&fp_slots, *lhs)?;
+                let rhs_slot = eval_check_fp_slot(&fp_slots, *rhs)?;
+                used_fp.extend([*lhs, *rhs]);
+                let out_idx = fp_slots.len();
+                let out_slot = fp_alloc.alloc();
+                fp_slots.push(Some(out_slot));
+                push_instr([
+                    WEBGPU_EVAL_OP_ADD,
+                    u32::try_from(out_slot).expect("eval_check fp slot exceeds u32"),
+                    u32::try_from(lhs_slot).expect("eval_check fp slot exceeds u32"),
+                    u32::try_from(rhs_slot).expect("eval_check fp slot exceeds u32"),
+                    0,
+                    0,
+                    0,
+                    0,
+                ]);
+                if last_fp.get(out_idx).copied().flatten().is_none() {
+                    fp_slots[out_idx] = None;
+                    fp_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::Sub(lhs, rhs) => {
+                let lhs_slot = eval_check_fp_slot(&fp_slots, *lhs)?;
+                let rhs_slot = eval_check_fp_slot(&fp_slots, *rhs)?;
+                used_fp.extend([*lhs, *rhs]);
+                let out_idx = fp_slots.len();
+                let out_slot = fp_alloc.alloc();
+                fp_slots.push(Some(out_slot));
+                push_instr([
+                    WEBGPU_EVAL_OP_SUB,
+                    u32::try_from(out_slot).expect("eval_check fp slot exceeds u32"),
+                    u32::try_from(lhs_slot).expect("eval_check fp slot exceeds u32"),
+                    u32::try_from(rhs_slot).expect("eval_check fp slot exceeds u32"),
+                    0,
+                    0,
+                    0,
+                    0,
+                ]);
+                if last_fp.get(out_idx).copied().flatten().is_none() {
+                    fp_slots[out_idx] = None;
+                    fp_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::Mul(lhs, rhs) => {
+                let lhs_slot = eval_check_fp_slot(&fp_slots, *lhs)?;
+                let rhs_slot = eval_check_fp_slot(&fp_slots, *rhs)?;
+                used_fp.extend([*lhs, *rhs]);
+                let out_idx = fp_slots.len();
+                let out_slot = fp_alloc.alloc();
+                fp_slots.push(Some(out_slot));
+                push_instr([
+                    WEBGPU_EVAL_OP_MUL,
+                    u32::try_from(out_slot).expect("eval_check fp slot exceeds u32"),
+                    u32::try_from(lhs_slot).expect("eval_check fp slot exceeds u32"),
+                    u32::try_from(rhs_slot).expect("eval_check fp slot exceeds u32"),
+                    0,
+                    0,
+                    0,
+                    0,
+                ]);
+                if last_fp.get(out_idx).copied().flatten().is_none() {
+                    fp_slots[out_idx] = None;
+                    fp_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::True => {
+                let out_idx = mix_slots.len();
+                let out_slot = mix_alloc.alloc();
+                mix_slots.push(Some(out_slot));
+                push_instr([
+                    WEBGPU_EVAL_OP_TRUE,
+                    u32::try_from(out_slot).expect("eval_check mix slot exceeds u32"),
+                    u32::try_from(out_idx).expect("eval_check mix index exceeds u32"),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ]);
+                if last_mix.get(out_idx).copied().flatten().is_none() {
+                    mix_slots[out_idx] = None;
+                    mix_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::AndEqz(chain, inner) => {
+                let chain_slot = eval_check_mix_slot(&mix_slots, *chain)?;
+                let inner_slot = eval_check_fp_slot(&fp_slots, *inner)?;
+                used_mix.push(*chain);
+                used_fp.push(*inner);
+                let out_idx = mix_slots.len();
+                let out_slot = mix_alloc.alloc();
+                mix_slots.push(Some(out_slot));
+                push_instr([
+                    WEBGPU_EVAL_OP_AND_EQZ,
+                    u32::try_from(out_slot).expect("eval_check mix slot exceeds u32"),
+                    u32::try_from(chain_slot).expect("eval_check mix slot exceeds u32"),
+                    u32::try_from(inner_slot).expect("eval_check fp slot exceeds u32"),
+                    u32::try_from(out_idx).expect("eval_check mix index exceeds u32"),
+                    0,
+                    0,
+                    0,
+                ]);
+                if last_mix.get(out_idx).copied().flatten().is_none() {
+                    mix_slots[out_idx] = None;
+                    mix_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::AndCond(chain, cond, inner) => {
+                let chain_slot = eval_check_mix_slot(&mix_slots, *chain)?;
+                let cond_slot = eval_check_fp_slot(&fp_slots, *cond)?;
+                let inner_slot = eval_check_mix_slot(&mix_slots, *inner)?;
+                used_mix.extend([*chain, *inner]);
+                used_fp.push(*cond);
+                let out_idx = mix_slots.len();
+                let out_slot = mix_alloc.alloc();
+                mix_slots.push(Some(out_slot));
+                push_instr([
+                    WEBGPU_EVAL_OP_AND_COND,
+                    u32::try_from(out_slot).expect("eval_check mix slot exceeds u32"),
+                    u32::try_from(chain_slot).expect("eval_check mix slot exceeds u32"),
+                    u32::try_from(cond_slot).expect("eval_check fp slot exceeds u32"),
+                    u32::try_from(inner_slot).expect("eval_check mix slot exceeds u32"),
+                    u32::try_from(out_idx).expect("eval_check mix index exceeds u32"),
+                    0,
+                    0,
+                ]);
+                if last_mix.get(out_idx).copied().flatten().is_none() {
+                    mix_slots[out_idx] = None;
+                    mix_alloc.free(out_slot);
+                }
+            }
+        }
+
+        used_fp.sort_unstable();
+        used_fp.dedup();
+        used_mix.sort_unstable();
+        used_mix.dedup();
+
+        for var in used_fp {
+            if last_fp.get(var).copied().flatten() == Some(op_idx) {
+                let slot = eval_check_fp_slot(&fp_slots, var)?;
+                fp_slots[var] = None;
+                fp_alloc.free(slot);
+            }
+        }
+        for var in used_mix {
+            if last_mix.get(var).copied().flatten() == Some(op_idx) {
+                let slot = eval_check_mix_slot(&mix_slots, var)?;
+                mix_slots[var] = None;
+                mix_alloc.free(slot);
+            }
+        }
+    }
+
+    let ret_slot = eval_check_mix_slot(&mix_slots, def.ret)?;
+    ensure!(
+        fp_alloc.max <= WEBGPU_EVAL_CHECK_MAX_FP_SLOTS,
+        "WebGPU interpreted eval_check needs {} FP slots, max is {}",
+        fp_alloc.max,
+        WEBGPU_EVAL_CHECK_MAX_FP_SLOTS
+    );
+    ensure!(
+        mix_alloc.max <= WEBGPU_EVAL_CHECK_MAX_MIX_SLOTS,
+        "WebGPU interpreted eval_check needs {} mix slots, max is {}",
+        mix_alloc.max,
+        WEBGPU_EVAL_CHECK_MAX_MIX_SLOTS
+    );
+
+    Ok((instructions, fp_alloc.max, mix_alloc.max, ret_slot))
+}
+
+const EVAL_CHECK_WGSL_PREFIX: &str = r#"
+const P: u32 = 2013265921u;
+const M: u32 = 2281701377u;
+const NBETA: u32 = 1073741848u;
+
+struct ElemBuffer {
+    data: array<u32>,
+};
+
+struct Params {
+    check_base: u32,
+    group0_base: u32,
+    group1_base: u32,
+    group2_base: u32,
+    global0_base: u32,
+    global1_base: u32,
+    domain: u32,
+    _pad0: u32,
+    invs: vec4<u32>,
+};
+
+@group(0) @binding(0) var<storage, read_write> check: ElemBuffer;
+@group(0) @binding(1) var<storage, read> group0: ElemBuffer;
+@group(0) @binding(2) var<storage, read> group1: ElemBuffer;
+@group(0) @binding(3) var<storage, read> group2: ElemBuffer;
+@group(0) @binding(4) var<storage, read> global0: ElemBuffer;
+@group(0) @binding(5) var<storage, read> global1: ElemBuffer;
+@group(0) @binding(6) var<storage, read> mix_pows: ElemBuffer;
+@group(0) @binding(7) var<uniform> params: Params;
+
+fn add(lhs: u32, rhs: u32) -> u32 {
+    let sum = lhs + rhs;
+    if (sum >= P) {
+        return sum - P;
+    }
+    return sum;
+}
+
+fn sub(lhs: u32, rhs: u32) -> u32 {
+    if (lhs >= rhs) {
+        return lhs - rhs;
+    }
+    return lhs + P - rhs;
+}
+
+fn mul_wide(lhs: u32, rhs: u32) -> vec2<u32> {
+    let lhs_lo = lhs & 0xffffu;
+    let lhs_hi = lhs >> 16u;
+    let rhs_lo = rhs & 0xffffu;
+    let rhs_hi = rhs >> 16u;
+
+    let p0 = lhs_lo * rhs_lo;
+    let p1 = lhs_hi * rhs_lo;
+    let p2 = lhs_lo * rhs_hi;
+    let p3 = lhs_hi * rhs_hi;
+
+    let carry = (p0 >> 16u) + (p1 & 0xffffu) + (p2 & 0xffffu);
+    let lo = (p0 & 0xffffu) | ((carry & 0xffffu) << 16u);
+    let hi = p3 + (p1 >> 16u) + (p2 >> 16u) + (carry >> 16u);
+    return vec2<u32>(lo, hi);
+}
+
+fn mul(lhs: u32, rhs: u32) -> u32 {
+    let product = mul_wide(lhs, rhs);
+    let low = 0u - product.x;
+    let red = M * low;
+    let red_product = mul_wide(red, P);
+    var ret = product.y + red_product.y;
+    if (product.x + red_product.x < product.x) {
+        ret = ret + 1u;
+    }
+    if (ret >= P) {
+        return ret - P;
+    }
+    return ret;
+}
+
+fn ext_add(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        add(lhs.x, rhs.x),
+        add(lhs.y, rhs.y),
+        add(lhs.z, rhs.z),
+        add(lhs.w, rhs.w),
+    );
+}
+
+fn ext_sub(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        sub(lhs.x, rhs.x),
+        sub(lhs.y, rhs.y),
+        sub(lhs.z, rhs.z),
+        sub(lhs.w, rhs.w),
+    );
+}
+
+fn ext_mul(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        add(
+            mul(lhs.x, rhs.x),
+            mul(NBETA, add(add(mul(lhs.y, rhs.w), mul(lhs.z, rhs.z)), mul(lhs.w, rhs.y))),
+        ),
+        add(
+            add(mul(lhs.x, rhs.y), mul(lhs.y, rhs.x)),
+            mul(NBETA, add(mul(lhs.z, rhs.w), mul(lhs.w, rhs.z))),
+        ),
+        add(
+            add(add(mul(lhs.x, rhs.z), mul(lhs.y, rhs.y)), mul(lhs.z, rhs.x)),
+            mul(NBETA, mul(lhs.w, rhs.w)),
+        ),
+        add(add(add(mul(lhs.x, rhs.w), mul(lhs.y, rhs.z)), mul(lhs.z, rhs.y)), mul(lhs.w, rhs.x)),
+    );
+}
+
+fn load_mix_pow(idx: u32) -> vec4<u32> {
+    let base = idx * 4u;
+    return vec4<u32>(
+        mix_pows.data[base + 0u],
+        mix_pows.data[base + 1u],
+        mix_pows.data[base + 2u],
+        mix_pows.data[base + 3u],
+    );
+}
+
+fn zerofier_inv(idx: u32) -> u32 {
+    switch (idx & 3u) {
+        case 0u: { return params.invs.x; }
+        case 1u: { return params.invs.y; }
+        case 2u: { return params.invs.z; }
+        default: { return params.invs.w; }
+    }
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let cycle = gid.x + gid.y * 16776960u;
+    if (cycle >= params.domain) {
+        return;
+    }
+"#;
+
+const EVAL_CHECK_INTERPRETER_WGSL: &str = r#"
+const P: u32 = 2013265921u;
+const M: u32 = 2281701377u;
+const NBETA: u32 = 1073741848u;
+const INSTRUCTION_WORDS: u32 = 8u;
+const LINEAR_DISPATCH_STRIDE: u32 = 2097120u;
+
+struct ElemBuffer {
+    data: array<u32>,
+};
+
+struct Params {
+    check_base: u32,
+    group0_base: u32,
+    group1_base: u32,
+    group2_base: u32,
+    global0_base: u32,
+    global1_base: u32,
+    domain: u32,
+    instr_count: u32,
+    instr_base: u32,
+    mix_pows_base: u32,
+    ret_mix_slot: u32,
+    dispatch_count: u32,
+    cycle_base: u32,
+    group0_chunk_base: u32,
+    group0_chunk_rows: u32,
+    group1_chunk_base: u32,
+    group1_chunk_rows: u32,
+    group2_chunk_base: u32,
+    group2_chunk_rows: u32,
+    _pad0: u32,
+    invs: vec4<u32>,
+};
+
+@group(0) @binding(0) var<storage, read_write> check: ElemBuffer;
+@group(0) @binding(1) var<storage, read> group0: ElemBuffer;
+@group(0) @binding(2) var<storage, read> group1: ElemBuffer;
+@group(0) @binding(3) var<storage, read> group2: ElemBuffer;
+@group(0) @binding(4) var<storage, read> global0: ElemBuffer;
+@group(0) @binding(5) var<storage, read> global1: ElemBuffer;
+@group(0) @binding(6) var<storage, read> instrs: ElemBuffer;
+@group(0) @binding(7) var<storage, read> mix_pows: ElemBuffer;
+@group(0) @binding(8) var<uniform> params: Params;
+
+fn add(lhs: u32, rhs: u32) -> u32 {
+    let sum = lhs + rhs;
+    if (sum >= P) {
+        return sum - P;
+    }
+    return sum;
+}
+
+fn sub(lhs: u32, rhs: u32) -> u32 {
+    if (lhs >= rhs) {
+        return lhs - rhs;
+    }
+    return lhs + P - rhs;
+}
+
+fn mul_wide(lhs: u32, rhs: u32) -> vec2<u32> {
+    let lhs_lo = lhs & 0xffffu;
+    let lhs_hi = lhs >> 16u;
+    let rhs_lo = rhs & 0xffffu;
+    let rhs_hi = rhs >> 16u;
+
+    let p0 = lhs_lo * rhs_lo;
+    let p1 = lhs_hi * rhs_lo;
+    let p2 = lhs_lo * rhs_hi;
+    let p3 = lhs_hi * rhs_hi;
+
+    let carry = (p0 >> 16u) + (p1 & 0xffffu) + (p2 & 0xffffu);
+    let lo = (p0 & 0xffffu) | ((carry & 0xffffu) << 16u);
+    let hi = p3 + (p1 >> 16u) + (p2 >> 16u) + (carry >> 16u);
+    return vec2<u32>(lo, hi);
+}
+
+fn mul(lhs: u32, rhs: u32) -> u32 {
+    let product = mul_wide(lhs, rhs);
+    let low = 0u - product.x;
+    let red = M * low;
+    let red_product = mul_wide(red, P);
+    var ret = product.y + red_product.y;
+    if (product.x + red_product.x < product.x) {
+        ret = ret + 1u;
+    }
+    if (ret >= P) {
+        return ret - P;
+    }
+    return ret;
+}
+
+fn ext_add(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        add(lhs.x, rhs.x),
+        add(lhs.y, rhs.y),
+        add(lhs.z, rhs.z),
+        add(lhs.w, rhs.w),
+    );
+}
+
+fn ext_sub(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        sub(lhs.x, rhs.x),
+        sub(lhs.y, rhs.y),
+        sub(lhs.z, rhs.z),
+        sub(lhs.w, rhs.w),
+    );
+}
+
+fn ext_mul(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        add(
+            mul(lhs.x, rhs.x),
+            mul(NBETA, add(add(mul(lhs.y, rhs.w), mul(lhs.z, rhs.z)), mul(lhs.w, rhs.y))),
+        ),
+        add(
+            add(mul(lhs.x, rhs.y), mul(lhs.y, rhs.x)),
+            mul(NBETA, add(mul(lhs.z, rhs.w), mul(lhs.w, rhs.z))),
+        ),
+        add(
+            add(add(mul(lhs.x, rhs.z), mul(lhs.y, rhs.y)), mul(lhs.z, rhs.x)),
+            mul(NBETA, mul(lhs.w, rhs.w)),
+        ),
+        add(add(add(mul(lhs.x, rhs.w), mul(lhs.y, rhs.z)), mul(lhs.z, rhs.y)), mul(lhs.w, rhs.x)),
+    );
+}
+
+fn instr_word(op_idx: u32, word_idx: u32) -> u32 {
+    return instrs.data[params.instr_base + op_idx * INSTRUCTION_WORDS + word_idx];
+}
+
+fn load_mix_pow(mix_idx: u32) -> vec4<u32> {
+    let base = params.mix_pows_base + mix_idx * 4u;
+    return vec4<u32>(
+        mix_pows.data[base + 0u],
+        mix_pows.data[base + 1u],
+        mix_pows.data[base + 2u],
+        mix_pows.data[base + 3u],
+    );
+}
+
+fn zerofier_inv(idx: u32) -> u32 {
+    switch (idx & 3u) {
+        case 0u: { return params.invs.x; }
+        case 1u: { return params.invs.y; }
+        case 2u: { return params.invs.z; }
+        default: { return params.invs.w; }
+    }
+}
+
+@compute @workgroup_size(32)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let local_cycle = gid.x + gid.y * LINEAR_DISPATCH_STRIDE;
+    if (local_cycle >= params.dispatch_count) {
+        return;
+    }
+    let cycle = params.cycle_base + local_cycle;
+    if (cycle >= params.domain) {
+        return;
+    }
+
+    var fp: array<vec4<u32>, {FP_SLOTS}>;
+    var mix_tot: array<vec4<u32>, {MIX_SLOTS}>;
+    var mix_mul: array<vec4<u32>, {MIX_SLOTS}>;
+
+    for (var op_idx = 0u; op_idx < params.instr_count; op_idx = op_idx + 1u) {
+        let op = instr_word(op_idx, 0u);
+        switch (op) {
+            case 0u: {
+                fp[instr_word(op_idx, 1u)] =
+                    vec4<u32>(instr_word(op_idx, 2u), 0u, 0u, 0u);
+            }
+            case 1u: {
+                fp[instr_word(op_idx, 1u)] = vec4<u32>(
+                    instr_word(op_idx, 2u),
+                    instr_word(op_idx, 3u),
+                    instr_word(op_idx, 4u),
+                    instr_word(op_idx, 5u),
+                );
+            }
+            case 2u: {
+                let out = instr_word(op_idx, 1u);
+                let group_id = instr_word(op_idx, 2u);
+                let offset = instr_word(op_idx, 3u);
+                let back = instr_word(op_idx, 4u);
+                let row = (cycle + params.domain - (back % params.domain)) % params.domain;
+                var value = 0u;
+                if (group_id == 0u) {
+                    let local_row =
+                        (row + params.domain - (params.group0_chunk_base % params.domain)) %
+                        params.domain;
+                    value = group0.data[
+                        params.group0_base + offset * params.group0_chunk_rows + local_row
+                    ];
+                } else if (group_id == 1u) {
+                    let local_row =
+                        (row + params.domain - (params.group1_chunk_base % params.domain)) %
+                        params.domain;
+                    value = group1.data[
+                        params.group1_base + offset * params.group1_chunk_rows + local_row
+                    ];
+                } else {
+                    let local_row =
+                        (row + params.domain - (params.group2_chunk_base % params.domain)) %
+                        params.domain;
+                    value = group2.data[
+                        params.group2_base + offset * params.group2_chunk_rows + local_row
+                    ];
+                }
+                fp[out] = vec4<u32>(value, 0u, 0u, 0u);
+            }
+            case 3u: {
+                let out = instr_word(op_idx, 1u);
+                let arg = instr_word(op_idx, 2u);
+                let offset = instr_word(op_idx, 3u);
+                var value = 0u;
+                if (arg == 0u) {
+                    value = global0.data[params.global0_base + offset];
+                } else {
+                    value = global1.data[params.global1_base + offset];
+                }
+                fp[out] = vec4<u32>(value, 0u, 0u, 0u);
+            }
+            case 4u: {
+                fp[instr_word(op_idx, 1u)] =
+                    ext_add(fp[instr_word(op_idx, 2u)], fp[instr_word(op_idx, 3u)]);
+            }
+            case 5u: {
+                fp[instr_word(op_idx, 1u)] =
+                    ext_sub(fp[instr_word(op_idx, 2u)], fp[instr_word(op_idx, 3u)]);
+            }
+            case 6u: {
+                fp[instr_word(op_idx, 1u)] =
+                    ext_mul(fp[instr_word(op_idx, 2u)], fp[instr_word(op_idx, 3u)]);
+            }
+            case 7u: {
+                let out = instr_word(op_idx, 1u);
+                mix_tot[out] = vec4<u32>(0u, 0u, 0u, 0u);
+                mix_mul[out] = load_mix_pow(instr_word(op_idx, 2u));
+            }
+            case 8u: {
+                let out = instr_word(op_idx, 1u);
+                let chain = instr_word(op_idx, 2u);
+                let inner = instr_word(op_idx, 3u);
+                mix_tot[out] = ext_add(mix_tot[chain], ext_mul(mix_mul[chain], fp[inner]));
+                mix_mul[out] = load_mix_pow(instr_word(op_idx, 4u));
+            }
+            case 9u: {
+                let out = instr_word(op_idx, 1u);
+                let chain = instr_word(op_idx, 2u);
+                let cond = instr_word(op_idx, 3u);
+                let inner = instr_word(op_idx, 4u);
+                mix_tot[out] =
+                    ext_add(mix_tot[chain], ext_mul(ext_mul(fp[cond], mix_tot[inner]), mix_mul[chain]));
+                mix_mul[out] = load_mix_pow(instr_word(op_idx, 5u));
+            }
+            default: {}
+        }
+    }
+
+    let result = ext_mul(
+        mix_tot[params.ret_mix_slot],
+        vec4<u32>(zerofier_inv(cycle), 0u, 0u, 0u),
+    );
+    check.data[params.check_base + 0u * params.domain + cycle] = result.x;
+    check.data[params.check_base + 1u * params.domain + cycle] = result.y;
+    check.data[params.check_base + 2u * params.domain + cycle] = result.z;
+    check.data[params.check_base + 3u * params.domain + cycle] = result.w;
+}
+"#;
+
+fn build_eval_check_interpreter_wgsl(fp_slots: usize, mix_slots: usize) -> String {
+    EVAL_CHECK_INTERPRETER_WGSL
+        .replace("{FP_SLOTS}", &fp_slots.max(1).to_string())
+        .replace("{MIX_SLOTS}", &mix_slots.max(1).to_string())
+}
+
+#[allow(dead_code)]
+fn build_eval_check_wgsl_unrolled(taps: &TapSet<'_>, def: &PolyExtStepDef) -> Result<String> {
+    let tap_info: Vec<_> = taps
+        .taps()
+        .map(|tap| EvalCheckTap {
+            group: tap.group(),
+            offset: tap.offset(),
+            back: tap.back(),
+        })
+        .collect();
+    let mut wgsl = String::from(
+        r#"
+const P: u32 = 2013265921u;
+const M: u32 = 2281701377u;
+const NBETA: u32 = 1073741848u;
+
+struct ElemBuffer {
+    data: array<u32>,
+};
+
+struct Params {
+    check_base: u32,
+    group0_base: u32,
+    group1_base: u32,
+    group2_base: u32,
+    global0_base: u32,
+    global1_base: u32,
+    domain: u32,
+    _pad0: u32,
+    invs: vec4<u32>,
+};
+
+@group(0) @binding(0) var<storage, read_write> check: ElemBuffer;
+@group(0) @binding(1) var<storage, read> group0: ElemBuffer;
+@group(0) @binding(2) var<storage, read> group1: ElemBuffer;
+@group(0) @binding(3) var<storage, read> group2: ElemBuffer;
+@group(0) @binding(4) var<storage, read> global0: ElemBuffer;
+@group(0) @binding(5) var<storage, read> global1: ElemBuffer;
+@group(0) @binding(6) var<storage, read> mix_pows: ElemBuffer;
+@group(0) @binding(7) var<uniform> params: Params;
+
+fn add(lhs: u32, rhs: u32) -> u32 {
+    let sum = lhs + rhs;
+    if (sum >= P) {
+        return sum - P;
+    }
+    return sum;
+}
+
+fn sub(lhs: u32, rhs: u32) -> u32 {
+    if (lhs >= rhs) {
+        return lhs - rhs;
+    }
+    return lhs + P - rhs;
+}
+
+fn mul_wide(lhs: u32, rhs: u32) -> vec2<u32> {
+    let lhs_lo = lhs & 0xffffu;
+    let lhs_hi = lhs >> 16u;
+    let rhs_lo = rhs & 0xffffu;
+    let rhs_hi = rhs >> 16u;
+
+    let p0 = lhs_lo * rhs_lo;
+    let p1 = lhs_hi * rhs_lo;
+    let p2 = lhs_lo * rhs_hi;
+    let p3 = lhs_hi * rhs_hi;
+
+    let carry = (p0 >> 16u) + (p1 & 0xffffu) + (p2 & 0xffffu);
+    let lo = (p0 & 0xffffu) | ((carry & 0xffffu) << 16u);
+    let hi = p3 + (p1 >> 16u) + (p2 >> 16u) + (carry >> 16u);
+    return vec2<u32>(lo, hi);
+}
+
+fn mul(lhs: u32, rhs: u32) -> u32 {
+    let product = mul_wide(lhs, rhs);
+    let low = 0u - product.x;
+    let red = M * low;
+    let red_product = mul_wide(red, P);
+    var ret = product.y + red_product.y;
+    if (product.x + red_product.x < product.x) {
+        ret = ret + 1u;
+    }
+    if (ret >= P) {
+        return ret - P;
+    }
+    return ret;
+}
+
+fn ext_add(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        add(lhs.x, rhs.x),
+        add(lhs.y, rhs.y),
+        add(lhs.z, rhs.z),
+        add(lhs.w, rhs.w),
+    );
+}
+
+fn ext_sub(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        sub(lhs.x, rhs.x),
+        sub(lhs.y, rhs.y),
+        sub(lhs.z, rhs.z),
+        sub(lhs.w, rhs.w),
+    );
+}
+
+fn ext_mul(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        add(
+            mul(lhs.x, rhs.x),
+            mul(NBETA, add(add(mul(lhs.y, rhs.w), mul(lhs.z, rhs.z)), mul(lhs.w, rhs.y))),
+        ),
+        add(
+            add(mul(lhs.x, rhs.y), mul(lhs.y, rhs.x)),
+            mul(NBETA, add(mul(lhs.z, rhs.w), mul(lhs.w, rhs.z))),
+        ),
+        add(
+            add(add(mul(lhs.x, rhs.z), mul(lhs.y, rhs.y)), mul(lhs.z, rhs.x)),
+            mul(NBETA, mul(lhs.w, rhs.w)),
+        ),
+        add(add(add(mul(lhs.x, rhs.w), mul(lhs.y, rhs.z)), mul(lhs.z, rhs.y)), mul(lhs.w, rhs.x)),
+    );
+}
+
+fn load_mix_pow(idx: u32) -> vec4<u32> {
+    let base = idx * 4u;
+    return vec4<u32>(
+        mix_pows.data[base + 0u],
+        mix_pows.data[base + 1u],
+        mix_pows.data[base + 2u],
+        mix_pows.data[base + 3u],
+    );
+}
+
+fn zerofier_inv(idx: u32) -> u32 {
+    switch (idx & 3u) {
+        case 0u: { return params.invs.x; }
+        case 1u: { return params.invs.y; }
+        case 2u: { return params.invs.z; }
+        default: { return params.invs.w; }
+    }
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let cycle = gid.x + gid.y * 16776960u;
+    if (cycle >= params.domain) {
+        return;
+    }
+"#,
+    );
+
+    let mut fp_count = 0usize;
+    let mut mix_count = 0usize;
+    for op in def.block {
+        match op {
+            PolyExtStep::Const(value) => {
+                let word = elem_const_word(*value);
+                let _ = writeln!(
+                    wgsl,
+                    "    let f{fp_count} = vec4<u32>({word}u, 0u, 0u, 0u);"
+                );
+                fp_count += 1;
+            }
+            PolyExtStep::ConstExt(x0, x1, x2, x3) => {
+                let value = eval_check_ext_const([
+                    elem_const_word(*x0),
+                    elem_const_word(*x1),
+                    elem_const_word(*x2),
+                    elem_const_word(*x3),
+                ]);
+                let _ = writeln!(wgsl, "    let f{fp_count} = {value};");
+                fp_count += 1;
+            }
+            PolyExtStep::Get(tap_idx) => {
+                let tap = tap_info
+                    .get(*tap_idx)
+                    .ok_or_else(|| anyhow!("poly_ext tap index {tap_idx} is out of range"))?;
+                ensure!(tap.group < 3, "WebGPU eval_check only supports 3 groups");
+                let back = tap.back * INV_RATE;
+                let _ = writeln!(
+                    wgsl,
+                    "    let f{fp_count}_row = (cycle + params.domain - ({back}u % params.domain)) % params.domain;"
+                );
+                let _ = writeln!(
+                    wgsl,
+                    "    let f{fp_count} = vec4<u32>(group{}.data[params.group{}_base + {}u * params.domain + f{fp_count}_row], 0u, 0u, 0u);",
+                    tap.group, tap.group, tap.offset
+                );
+                fp_count += 1;
+            }
+            PolyExtStep::GetGlobal(arg, offset) => {
+                ensure!(*arg < 2, "WebGPU eval_check only supports 2 global buffers");
+                let _ = writeln!(
+                    wgsl,
+                    "    let f{fp_count} = vec4<u32>(global{arg}.data[params.global{arg}_base + {offset}u], 0u, 0u, 0u);"
+                );
+                fp_count += 1;
+            }
+            PolyExtStep::Add(lhs, rhs) => {
+                let _ = writeln!(wgsl, "    let f{fp_count} = ext_add(f{lhs}, f{rhs});");
+                fp_count += 1;
+            }
+            PolyExtStep::Sub(lhs, rhs) => {
+                let _ = writeln!(wgsl, "    let f{fp_count} = ext_sub(f{lhs}, f{rhs});");
+                fp_count += 1;
+            }
+            PolyExtStep::Mul(lhs, rhs) => {
+                let _ = writeln!(wgsl, "    let f{fp_count} = ext_mul(f{lhs}, f{rhs});");
+                fp_count += 1;
+            }
+            PolyExtStep::True => {
+                let _ = writeln!(
+                    wgsl,
+                    "    let m{mix_count}_tot = vec4<u32>(0u, 0u, 0u, 0u);"
+                );
+                let _ = writeln!(
+                    wgsl,
+                    "    let m{mix_count}_mul = load_mix_pow({mix_count}u);"
+                );
+                mix_count += 1;
+            }
+            PolyExtStep::AndEqz(chain, inner) => {
+                let _ = writeln!(
+                    wgsl,
+                    "    let m{mix_count}_tot = ext_add(m{chain}_tot, ext_mul(m{chain}_mul, f{inner}));"
+                );
+                let _ = writeln!(
+                    wgsl,
+                    "    let m{mix_count}_mul = load_mix_pow({mix_count}u);"
+                );
+                mix_count += 1;
+            }
+            PolyExtStep::AndCond(chain, cond, inner) => {
+                let _ = writeln!(
+                    wgsl,
+                    "    let m{mix_count}_tot = ext_add(m{chain}_tot, ext_mul(ext_mul(f{cond}, m{inner}_tot), m{chain}_mul));"
+                );
+                let _ = writeln!(
+                    wgsl,
+                    "    let m{mix_count}_mul = load_mix_pow({mix_count}u);"
+                );
+                mix_count += 1;
+            }
+        }
+    }
+
+    ensure!(
+        def.ret < mix_count,
+        "poly_ext return mix index {} exceeds generated mix count {}",
+        def.ret,
+        mix_count
+    );
+    let _ = writeln!(
+        wgsl,
+        "    let result = ext_mul(m{}_tot, vec4<u32>(zerofier_inv(cycle), 0u, 0u, 0u));",
+        def.ret
+    );
+    wgsl.push_str(
+        r#"
+    check.data[params.check_base + 0u * params.domain + cycle] = result.x;
+    check.data[params.check_base + 1u * params.domain + cycle] = result.y;
+    check.data[params.check_base + 2u * params.domain + cycle] = result.z;
+    check.data[params.check_base + 3u * params.domain + cycle] = result.w;
+}
+"#,
+    );
+    Ok(wgsl)
+}
+
+fn build_eval_check_wgsl(taps: &TapSet<'_>, def: &PolyExtStepDef) -> Result<String> {
+    let tap_info: Vec<_> = taps
+        .taps()
+        .map(|tap| EvalCheckTap {
+            group: tap.group(),
+            offset: tap.offset(),
+            back: tap.back(),
+        })
+        .collect();
+    let (last_fp, last_mix, _fp_count, _mix_count) = eval_check_last_uses(def)?;
+    let mut fp_alloc = EvalCheckSlotAllocator::default();
+    let mut mix_alloc = EvalCheckSlotAllocator::default();
+    let mut fp_slots: Vec<Option<usize>> = Vec::new();
+    let mut mix_slots: Vec<Option<usize>> = Vec::new();
+    let mut body = String::new();
+
+    for (op_idx, op) in def.block.iter().enumerate() {
+        let mut used_fp = Vec::new();
+        let mut used_mix = Vec::new();
+        match op {
+            PolyExtStep::Const(value) => {
+                let word = elem_const_word(*value);
+                let out_idx = fp_slots.len();
+                let out_slot = fp_alloc.alloc();
+                fp_slots.push(Some(out_slot));
+                let _ = writeln!(body, "    f{out_slot} = vec4<u32>({word}u, 0u, 0u, 0u);");
+                if last_fp.get(out_idx).copied().flatten().is_none() {
+                    fp_slots[out_idx] = None;
+                    fp_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::ConstExt(x0, x1, x2, x3) => {
+                let value = eval_check_ext_const([
+                    elem_const_word(*x0),
+                    elem_const_word(*x1),
+                    elem_const_word(*x2),
+                    elem_const_word(*x3),
+                ]);
+                let out_idx = fp_slots.len();
+                let out_slot = fp_alloc.alloc();
+                fp_slots.push(Some(out_slot));
+                let _ = writeln!(body, "    f{out_slot} = {value};");
+                if last_fp.get(out_idx).copied().flatten().is_none() {
+                    fp_slots[out_idx] = None;
+                    fp_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::Get(tap_idx) => {
+                let tap = tap_info
+                    .get(*tap_idx)
+                    .ok_or_else(|| anyhow!("poly_ext tap index {tap_idx} is out of range"))?;
+                ensure!(tap.group < 3, "WebGPU eval_check only supports 3 groups");
+                let back = tap.back * INV_RATE;
+                let out_idx = fp_slots.len();
+                let out_slot = fp_alloc.alloc();
+                fp_slots.push(Some(out_slot));
+                let _ = writeln!(
+                    body,
+                    "    let f{out_idx}_row = (cycle + params.domain - ({back}u % params.domain)) % params.domain;"
+                );
+                let _ = writeln!(
+                    body,
+                    "    f{out_slot} = vec4<u32>(group{}.data[params.group{}_base + {}u * params.domain + f{out_idx}_row], 0u, 0u, 0u);",
+                    tap.group, tap.group, tap.offset
+                );
+                if last_fp.get(out_idx).copied().flatten().is_none() {
+                    fp_slots[out_idx] = None;
+                    fp_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::GetGlobal(arg, offset) => {
+                ensure!(*arg < 2, "WebGPU eval_check only supports 2 global buffers");
+                let out_idx = fp_slots.len();
+                let out_slot = fp_alloc.alloc();
+                fp_slots.push(Some(out_slot));
+                let _ = writeln!(
+                    body,
+                    "    f{out_slot} = vec4<u32>(global{arg}.data[params.global{arg}_base + {offset}u], 0u, 0u, 0u);"
+                );
+                if last_fp.get(out_idx).copied().flatten().is_none() {
+                    fp_slots[out_idx] = None;
+                    fp_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::Add(lhs, rhs) => {
+                let lhs_slot = eval_check_fp_slot(&fp_slots, *lhs)?;
+                let rhs_slot = eval_check_fp_slot(&fp_slots, *rhs)?;
+                used_fp.extend([*lhs, *rhs]);
+                let out_idx = fp_slots.len();
+                let out_slot = fp_alloc.alloc();
+                fp_slots.push(Some(out_slot));
+                let _ = writeln!(body, "    f{out_slot} = ext_add(f{lhs_slot}, f{rhs_slot});");
+                if last_fp.get(out_idx).copied().flatten().is_none() {
+                    fp_slots[out_idx] = None;
+                    fp_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::Sub(lhs, rhs) => {
+                let lhs_slot = eval_check_fp_slot(&fp_slots, *lhs)?;
+                let rhs_slot = eval_check_fp_slot(&fp_slots, *rhs)?;
+                used_fp.extend([*lhs, *rhs]);
+                let out_idx = fp_slots.len();
+                let out_slot = fp_alloc.alloc();
+                fp_slots.push(Some(out_slot));
+                let _ = writeln!(body, "    f{out_slot} = ext_sub(f{lhs_slot}, f{rhs_slot});");
+                if last_fp.get(out_idx).copied().flatten().is_none() {
+                    fp_slots[out_idx] = None;
+                    fp_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::Mul(lhs, rhs) => {
+                let lhs_slot = eval_check_fp_slot(&fp_slots, *lhs)?;
+                let rhs_slot = eval_check_fp_slot(&fp_slots, *rhs)?;
+                used_fp.extend([*lhs, *rhs]);
+                let out_idx = fp_slots.len();
+                let out_slot = fp_alloc.alloc();
+                fp_slots.push(Some(out_slot));
+                let _ = writeln!(body, "    f{out_slot} = ext_mul(f{lhs_slot}, f{rhs_slot});");
+                if last_fp.get(out_idx).copied().flatten().is_none() {
+                    fp_slots[out_idx] = None;
+                    fp_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::True => {
+                let out_idx = mix_slots.len();
+                let out_slot = mix_alloc.alloc();
+                mix_slots.push(Some(out_slot));
+                let _ = writeln!(body, "    m{out_slot}_tot = vec4<u32>(0u, 0u, 0u, 0u);");
+                let _ = writeln!(body, "    m{out_slot}_mul = load_mix_pow({out_idx}u);");
+                if last_mix.get(out_idx).copied().flatten().is_none() {
+                    mix_slots[out_idx] = None;
+                    mix_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::AndEqz(chain, inner) => {
+                let chain_slot = eval_check_mix_slot(&mix_slots, *chain)?;
+                let inner_slot = eval_check_fp_slot(&fp_slots, *inner)?;
+                used_mix.push(*chain);
+                used_fp.push(*inner);
+                let out_idx = mix_slots.len();
+                let out_slot = mix_alloc.alloc();
+                mix_slots.push(Some(out_slot));
+                let _ = writeln!(
+                    body,
+                    "    m{out_slot}_tot = ext_add(m{chain_slot}_tot, ext_mul(m{chain_slot}_mul, f{inner_slot}));"
+                );
+                let _ = writeln!(body, "    m{out_slot}_mul = load_mix_pow({out_idx}u);");
+                if last_mix.get(out_idx).copied().flatten().is_none() {
+                    mix_slots[out_idx] = None;
+                    mix_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::AndCond(chain, cond, inner) => {
+                let chain_slot = eval_check_mix_slot(&mix_slots, *chain)?;
+                let cond_slot = eval_check_fp_slot(&fp_slots, *cond)?;
+                let inner_slot = eval_check_mix_slot(&mix_slots, *inner)?;
+                used_mix.extend([*chain, *inner]);
+                used_fp.push(*cond);
+                let out_idx = mix_slots.len();
+                let out_slot = mix_alloc.alloc();
+                mix_slots.push(Some(out_slot));
+                let _ = writeln!(
+                    body,
+                    "    m{out_slot}_tot = ext_add(m{chain_slot}_tot, ext_mul(ext_mul(f{cond_slot}, m{inner_slot}_tot), m{chain_slot}_mul));"
+                );
+                let _ = writeln!(body, "    m{out_slot}_mul = load_mix_pow({out_idx}u);");
+                if last_mix.get(out_idx).copied().flatten().is_none() {
+                    mix_slots[out_idx] = None;
+                    mix_alloc.free(out_slot);
+                }
+            }
+        }
+
+        used_fp.sort_unstable();
+        used_fp.dedup();
+        used_mix.sort_unstable();
+        used_mix.dedup();
+
+        for var in used_fp {
+            if last_fp.get(var).copied().flatten() == Some(op_idx) {
+                let slot = eval_check_fp_slot(&fp_slots, var)?;
+                fp_slots[var] = None;
+                fp_alloc.free(slot);
+            }
+        }
+        for var in used_mix {
+            if last_mix.get(var).copied().flatten() == Some(op_idx) {
+                let slot = eval_check_mix_slot(&mix_slots, var)?;
+                mix_slots[var] = None;
+                mix_alloc.free(slot);
+            }
+        }
+    }
+
+    let ret_slot = eval_check_mix_slot(&mix_slots, def.ret)?;
+    ensure!(
+        fp_alloc.max <= WEBGPU_EVAL_CHECK_MAX_FP_SLOTS,
+        "WebGPU eval_check needs {} FP slots, max is {}",
+        fp_alloc.max,
+        WEBGPU_EVAL_CHECK_MAX_FP_SLOTS
+    );
+    ensure!(
+        mix_alloc.max <= WEBGPU_EVAL_CHECK_MAX_MIX_SLOTS,
+        "WebGPU eval_check needs {} mix slots, max is {}",
+        mix_alloc.max,
+        WEBGPU_EVAL_CHECK_MAX_MIX_SLOTS
+    );
+
+    let mut wgsl = String::from(EVAL_CHECK_WGSL_PREFIX);
+    let fp_slots = fp_alloc.max.max(1);
+    let mix_slots = mix_alloc.max.max(1);
+    for slot in 0..fp_slots {
+        let _ = writeln!(wgsl, "    var f{slot}: vec4<u32>;");
+    }
+    for slot in 0..mix_slots {
+        let _ = writeln!(wgsl, "    var m{slot}_tot: vec4<u32>;");
+        let _ = writeln!(wgsl, "    var m{slot}_mul: vec4<u32>;");
+    }
+    wgsl.push_str(&body);
+    let _ = writeln!(
+        wgsl,
+        "    let result = ext_mul(m{ret_slot}_tot, vec4<u32>(zerofier_inv(cycle), 0u, 0u, 0u));"
+    );
+    wgsl.push_str(
+        r#"
+    check.data[params.check_base + 0u * params.domain + cycle] = result.x;
+    check.data[params.check_base + 1u * params.domain + cycle] = result.y;
+    check.data[params.check_base + 2u * params.domain + cycle] = result.z;
+    check.data[params.check_base + 3u * params.domain + cycle] = result.w;
+}
+"#,
+    );
+    Ok(wgsl)
+}
+
+fn build_eval_check_split_wgsl(
+    taps: &TapSet<'_>,
+    program: &EvalCheckProgram,
+    terms: &[EvalCheckTerm],
+    reset_check: bool,
+) -> Result<String> {
+    let needed = eval_check_needed_fp_vars(program, terms)?;
+    ensure!(
+        needed.len() <= WEBGPU_EVAL_CHECK_MAX_POLY_EXT_STEPS,
+        "WebGPU split eval_check chunk needs {} FP ops, max is {}",
+        needed.len(),
+        WEBGPU_EVAL_CHECK_MAX_POLY_EXT_STEPS
+    );
+
+    let needed_set: HashSet<_> = needed.iter().copied().collect();
+    let tap_info: Vec<_> = taps
+        .taps()
+        .map(|tap| EvalCheckTap {
+            group: tap.group(),
+            offset: tap.offset(),
+            back: tap.back(),
+        })
+        .collect();
+
+    let mut last_fp = vec![None; program.fp_ops.len()];
+    for (op_pos, var) in needed.iter().copied().enumerate() {
+        match program.fp_ops[var] {
+            EvalCheckFpOp::Add(lhs, rhs)
+            | EvalCheckFpOp::Sub(lhs, rhs)
+            | EvalCheckFpOp::Mul(lhs, rhs) => {
+                ensure!(
+                    needed_set.contains(&lhs) && needed_set.contains(&rhs),
+                    "split eval_check missing FP dependency"
+                );
+                eval_check_note_last(&mut last_fp, lhs, op_pos);
+                eval_check_note_last(&mut last_fp, rhs, op_pos);
+            }
+            _ => {}
+        }
+    }
+    let term_base = needed.len();
+    for (term_idx, term) in terms.iter().enumerate() {
+        let op_pos = term_base + term_idx;
+        eval_check_note_last(&mut last_fp, term.inner, op_pos);
+        for cond in &term.conds {
+            eval_check_note_last(&mut last_fp, *cond, op_pos);
+        }
+    }
+
+    let mut fp_alloc = EvalCheckSlotAllocator::default();
+    let mut fp_slots = vec![None; program.fp_ops.len()];
+    let mut body = String::new();
+
+    for (op_pos, var) in needed.iter().copied().enumerate() {
+        let mut used_fp = Vec::new();
+        match program.fp_ops[var] {
+            EvalCheckFpOp::Const(value) => {
+                let word = elem_const_word(value);
+                let out_slot = fp_alloc.alloc();
+                fp_slots[var] = Some(out_slot);
+                let _ = writeln!(body, "    f{out_slot} = vec4<u32>({word}u, 0u, 0u, 0u);");
+            }
+            EvalCheckFpOp::ConstExt(x0, x1, x2, x3) => {
+                let value = eval_check_ext_const([
+                    elem_const_word(x0),
+                    elem_const_word(x1),
+                    elem_const_word(x2),
+                    elem_const_word(x3),
+                ]);
+                let out_slot = fp_alloc.alloc();
+                fp_slots[var] = Some(out_slot);
+                let _ = writeln!(body, "    f{out_slot} = {value};");
+            }
+            EvalCheckFpOp::Get(tap_idx) => {
+                let tap = tap_info
+                    .get(tap_idx)
+                    .ok_or_else(|| anyhow!("poly_ext tap index {tap_idx} is out of range"))?;
+                ensure!(tap.group < 3, "WebGPU eval_check only supports 3 groups");
+                let back = tap.back * INV_RATE;
+                let out_slot = fp_alloc.alloc();
+                fp_slots[var] = Some(out_slot);
+                let _ = writeln!(
+                    body,
+                    "    let f{var}_row = (cycle + params.domain - ({back}u % params.domain)) % params.domain;"
+                );
+                let _ = writeln!(
+                    body,
+                    "    f{out_slot} = vec4<u32>(group{}.data[params.group{}_base + {}u * params.domain + f{var}_row], 0u, 0u, 0u);",
+                    tap.group, tap.group, tap.offset
+                );
+            }
+            EvalCheckFpOp::GetGlobal(arg, offset) => {
+                ensure!(arg < 2, "WebGPU eval_check only supports 2 global buffers");
+                let out_slot = fp_alloc.alloc();
+                fp_slots[var] = Some(out_slot);
+                let _ = writeln!(
+                    body,
+                    "    f{out_slot} = vec4<u32>(global{arg}.data[params.global{arg}_base + {offset}u], 0u, 0u, 0u);"
+                );
+            }
+            EvalCheckFpOp::Add(lhs, rhs) => {
+                let lhs_slot = eval_check_fp_slot(&fp_slots, lhs)?;
+                let rhs_slot = eval_check_fp_slot(&fp_slots, rhs)?;
+                used_fp.extend([lhs, rhs]);
+                let out_slot = fp_alloc.alloc();
+                fp_slots[var] = Some(out_slot);
+                let _ = writeln!(body, "    f{out_slot} = ext_add(f{lhs_slot}, f{rhs_slot});");
+            }
+            EvalCheckFpOp::Sub(lhs, rhs) => {
+                let lhs_slot = eval_check_fp_slot(&fp_slots, lhs)?;
+                let rhs_slot = eval_check_fp_slot(&fp_slots, rhs)?;
+                used_fp.extend([lhs, rhs]);
+                let out_slot = fp_alloc.alloc();
+                fp_slots[var] = Some(out_slot);
+                let _ = writeln!(body, "    f{out_slot} = ext_sub(f{lhs_slot}, f{rhs_slot});");
+            }
+            EvalCheckFpOp::Mul(lhs, rhs) => {
+                let lhs_slot = eval_check_fp_slot(&fp_slots, lhs)?;
+                let rhs_slot = eval_check_fp_slot(&fp_slots, rhs)?;
+                used_fp.extend([lhs, rhs]);
+                let out_slot = fp_alloc.alloc();
+                fp_slots[var] = Some(out_slot);
+                let _ = writeln!(body, "    f{out_slot} = ext_mul(f{lhs_slot}, f{rhs_slot});");
+            }
+        }
+
+        if last_fp.get(var).copied().flatten().is_none() {
+            let slot = eval_check_fp_slot(&fp_slots, var)?;
+            fp_slots[var] = None;
+            fp_alloc.free(slot);
+        }
+
+        used_fp.sort_unstable();
+        used_fp.dedup();
+        for used in used_fp {
+            if last_fp.get(used).copied().flatten() == Some(op_pos) {
+                let slot = eval_check_fp_slot(&fp_slots, used)?;
+                fp_slots[used] = None;
+                fp_alloc.free(slot);
+            }
+        }
+    }
+
+    body.push_str("    var total = vec4<u32>(0u, 0u, 0u, 0u);\n    var term: vec4<u32>;\n");
+    for (term_idx, term) in terms.iter().enumerate() {
+        ensure!(
+            needed_set.contains(&term.inner),
+            "split eval_check missing term inner"
+        );
+        let mut used_fp = vec![term.inner];
+        let inner_slot = eval_check_fp_slot(&fp_slots, term.inner)?;
+        let _ = writeln!(body, "    term = f{inner_slot};");
+        for cond in &term.conds {
+            ensure!(
+                needed_set.contains(cond),
+                "split eval_check missing term condition"
+            );
+            let cond_slot = eval_check_fp_slot(&fp_slots, *cond)?;
+            used_fp.push(*cond);
+            let _ = writeln!(body, "    term = ext_mul(term, f{cond_slot});");
+        }
+        let _ = writeln!(
+            body,
+            "    total = ext_add(total, ext_mul(load_mix_pow({}u), term));",
+            term.mix_exp
+        );
+
+        let op_pos = term_base + term_idx;
+        used_fp.sort_unstable();
+        used_fp.dedup();
+        for used in used_fp {
+            if last_fp.get(used).copied().flatten() == Some(op_pos) {
+                let slot = eval_check_fp_slot(&fp_slots, used)?;
+                fp_slots[used] = None;
+                fp_alloc.free(slot);
+            }
+        }
+    }
+
+    ensure!(
+        fp_alloc.max <= WEBGPU_EVAL_CHECK_MAX_FP_SLOTS,
+        "WebGPU split eval_check needs {} FP slots, max is {}",
+        fp_alloc.max,
+        WEBGPU_EVAL_CHECK_MAX_FP_SLOTS
+    );
+
+    let mut wgsl = String::from(EVAL_CHECK_WGSL_PREFIX);
+    let fp_slots = fp_alloc.max.max(1);
+    for slot in 0..fp_slots {
+        let _ = writeln!(wgsl, "    var f{slot}: vec4<u32>;");
+    }
+    wgsl.push_str(&body);
+
+    if reset_check {
+        wgsl.push_str("    let prev = vec4<u32>(0u, 0u, 0u, 0u);\n");
+    } else {
+        wgsl.push_str(
+            r#"
+    let prev = vec4<u32>(
+        check.data[params.check_base + 0u * params.domain + cycle],
+        check.data[params.check_base + 1u * params.domain + cycle],
+        check.data[params.check_base + 2u * params.domain + cycle],
+        check.data[params.check_base + 3u * params.domain + cycle],
+    );
+"#,
+        );
+    }
+    wgsl.push_str(
+        r#"
+    let contribution = ext_mul(total, vec4<u32>(zerofier_inv(cycle), 0u, 0u, 0u));
+    let result = ext_add(prev, contribution);
+    check.data[params.check_base + 0u * params.domain + cycle] = result.x;
+    check.data[params.check_base + 1u * params.domain + cycle] = result.y;
+    check.data[params.check_base + 2u * params.domain + cycle] = result.z;
+    check.data[params.check_base + 3u * params.domain + cycle] = result.w;
+}
+"#,
+    );
+    Ok(wgsl)
+}
 
 /// Snapshot of WebGPU HAL backend usage.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -207,19 +2160,24 @@ impl WebGpuDiagnosticsState {
             stats.cpu_fallbacks = stats.cpu_fallbacks.saturating_add(1);
         });
     }
-
 }
 
 const ZEROIZE_ELEM_WGSL: &str = r#"
+const LINEAR_DISPATCH_STRIDE: u32 = 16776960u;
+
 struct ElemBuffer {
     data: array<u32>,
 };
 
 @group(0) @binding(0) var<storage, read_write> elems: ElemBuffer;
 
+fn linear_global_id(gid: vec3<u32>) -> u32 {
+    return gid.x + gid.y * LINEAR_DISPATCH_STRIDE;
+}
+
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let idx = gid.x;
+    let idx = linear_global_id(gid);
     if (idx >= arrayLength(&elems.data)) {
         return;
     }
@@ -233,6 +2191,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 const ELTWISE_ADD_ELEM_WGSL: &str = r#"
 const BABY_BEAR_MODULUS: u32 = 2013265921u;
+const LINEAR_DISPATCH_STRIDE: u32 = 16776960u;
 
 struct ElemBuffer {
     data: array<u32>,
@@ -250,9 +2209,13 @@ fn add(lhs: u32, rhs: u32) -> u32 {
     return sum;
 }
 
+fn linear_global_id(gid: vec3<u32>) -> u32 {
+    return gid.x + gid.y * LINEAR_DISPATCH_STRIDE;
+}
+
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let idx = gid.x;
+    let idx = linear_global_id(gid);
     if (idx >= arrayLength(&out.data)) {
         return;
     }
@@ -645,6 +2608,7 @@ const P: u32 = 2013265921u;
 const M: u32 = 2281701377u;
 const MONT_ONE: u32 = 268435454u;
 const MONT_THREE: u32 = 805306362u;
+const LINEAR_DISPATCH_STRIDE: u32 = 16776960u;
 
 struct ElemBuffer {
     data: array<u32>,
@@ -715,9 +2679,13 @@ fn pow(base: u32, exponent: u32) -> u32 {
     return total;
 }
 
+fn linear_global_id(gid: vec3<u32>) -> u32 {
+    return gid.x + gid.y * LINEAR_DISPATCH_STRIDE;
+}
+
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let idx = gid.x;
+    let idx = linear_global_id(gid);
     if (idx >= params.count) {
         return;
     }
@@ -874,7 +2842,354 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+const COMBOS_PREPARE_WGSL: &str = r#"
+const P: u32 = 2013265921u;
+const M: u32 = 2281701377u;
+const NBETA: u32 = 1073741848u;
+
+struct ElemBuffer {
+    data: array<u32>,
+};
+
+struct U32Buffer {
+    data: array<u32>,
+};
+
+struct Params {
+    total_reg_coeffs: u32,
+    combo_count: u32,
+    cycles: u32,
+    regs_count: u32,
+    combos_base: u32,
+    coeff_u_base: u32,
+    reg_sizes_base: u32,
+    reg_combo_ids_base: u32,
+    mix_pows_base: u32,
+    check_size: u32,
+    _pad0: u32,
+    _pad1: u32,
+};
+
+@group(0) @binding(0) var<storage, read_write> combos: ElemBuffer;
+@group(0) @binding(1) var<storage, read> coeff_u: ElemBuffer;
+@group(0) @binding(2) var<storage, read> reg_sizes: U32Buffer;
+@group(0) @binding(3) var<storage, read> reg_combo_ids: U32Buffer;
+@group(0) @binding(4) var<storage, read> mix_pows: ElemBuffer;
+@group(0) @binding(5) var<uniform> params: Params;
+
+fn add(lhs: u32, rhs: u32) -> u32 {
+    let sum = lhs + rhs;
+    if (sum >= P) {
+        return sum - P;
+    }
+    return sum;
+}
+
+fn sub(lhs: u32, rhs: u32) -> u32 {
+    if (lhs >= rhs) {
+        return lhs - rhs;
+    }
+    return lhs + P - rhs;
+}
+
+fn mul_wide(lhs: u32, rhs: u32) -> vec2<u32> {
+    let lhs_lo = lhs & 0xffffu;
+    let lhs_hi = lhs >> 16u;
+    let rhs_lo = rhs & 0xffffu;
+    let rhs_hi = rhs >> 16u;
+
+    let p0 = lhs_lo * rhs_lo;
+    let p1 = lhs_hi * rhs_lo;
+    let p2 = lhs_lo * rhs_hi;
+    let p3 = lhs_hi * rhs_hi;
+
+    let carry = (p0 >> 16u) + (p1 & 0xffffu) + (p2 & 0xffffu);
+    let lo = (p0 & 0xffffu) | ((carry & 0xffffu) << 16u);
+    let hi = p3 + (p1 >> 16u) + (p2 >> 16u) + (carry >> 16u);
+    return vec2<u32>(lo, hi);
+}
+
+fn mul(lhs: u32, rhs: u32) -> u32 {
+    let product = mul_wide(lhs, rhs);
+    let low = 0u - product.x;
+    let red = M * low;
+    let red_product = mul_wide(red, P);
+    var ret = product.y + red_product.y;
+    if (product.x + red_product.x < product.x) {
+        ret = ret + 1u;
+    }
+    if (ret >= P) {
+        return ret - P;
+    }
+    return ret;
+}
+
+fn ext_add(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        add(lhs.x, rhs.x),
+        add(lhs.y, rhs.y),
+        add(lhs.z, rhs.z),
+        add(lhs.w, rhs.w),
+    );
+}
+
+fn ext_sub(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        sub(lhs.x, rhs.x),
+        sub(lhs.y, rhs.y),
+        sub(lhs.z, rhs.z),
+        sub(lhs.w, rhs.w),
+    );
+}
+
+fn ext_mul(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        add(
+            mul(lhs.x, rhs.x),
+            mul(NBETA, add(add(mul(lhs.y, rhs.w), mul(lhs.z, rhs.z)), mul(lhs.w, rhs.y))),
+        ),
+        add(
+            add(mul(lhs.x, rhs.y), mul(lhs.y, rhs.x)),
+            mul(NBETA, add(mul(lhs.z, rhs.w), mul(lhs.w, rhs.z))),
+        ),
+        add(
+            add(add(mul(lhs.x, rhs.z), mul(lhs.y, rhs.y)), mul(lhs.z, rhs.x)),
+            mul(NBETA, mul(lhs.w, rhs.w)),
+        ),
+        add(add(add(mul(lhs.x, rhs.w), mul(lhs.y, rhs.z)), mul(lhs.z, rhs.y)), mul(lhs.w, rhs.x)),
+    );
+}
+
+fn load_combo(elem_idx: u32) -> vec4<u32> {
+    let base = params.combos_base + elem_idx * 4u;
+    return vec4<u32>(
+        combos.data[base + 0u],
+        combos.data[base + 1u],
+        combos.data[base + 2u],
+        combos.data[base + 3u],
+    );
+}
+
+fn store_combo(elem_idx: u32, value: vec4<u32>) {
+    let base = params.combos_base + elem_idx * 4u;
+    combos.data[base + 0u] = value.x;
+    combos.data[base + 1u] = value.y;
+    combos.data[base + 2u] = value.z;
+    combos.data[base + 3u] = value.w;
+}
+
+fn load_coeff(elem_idx: u32) -> vec4<u32> {
+    let base = params.coeff_u_base + elem_idx * 4u;
+    return vec4<u32>(
+        coeff_u.data[base + 0u],
+        coeff_u.data[base + 1u],
+        coeff_u.data[base + 2u],
+        coeff_u.data[base + 3u],
+    );
+}
+
+fn load_mix_pow(elem_idx: u32) -> vec4<u32> {
+    let base = params.mix_pows_base + elem_idx * 4u;
+    return vec4<u32>(
+        mix_pows.data[base + 0u],
+        mix_pows.data[base + 1u],
+        mix_pows.data[base + 2u],
+        mix_pows.data[base + 3u],
+    );
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if (idx > params.total_reg_coeffs) {
+        return;
+    }
+
+    if (idx == params.total_reg_coeffs) {
+        let check_idx = params.combo_count * params.cycles;
+        var total = load_combo(check_idx);
+        for (var i = 0u; i < params.check_size; i = i + 1u) {
+            total = ext_sub(
+                total,
+                ext_mul(load_mix_pow(params.regs_count + i), load_coeff(params.total_reg_coeffs + i)),
+            );
+        }
+        store_combo(check_idx, total);
+        return;
+    }
+
+    var base = 0u;
+    for (var reg = 0u; reg < params.regs_count; reg = reg + 1u) {
+        let reg_size = reg_sizes.data[params.reg_sizes_base + reg];
+        if (idx < base + reg_size) {
+            let local_idx = idx - base;
+            let combo_id = reg_combo_ids.data[params.reg_combo_ids_base + reg];
+            let combo_idx = combo_id * params.cycles + local_idx;
+            let next = ext_sub(load_combo(combo_idx), ext_mul(load_mix_pow(reg), load_coeff(idx)));
+            store_combo(combo_idx, next);
+            return;
+        }
+        base = base + reg_size;
+    }
+}
+"#;
+
+const COMBOS_DIVIDE_WGSL: &str = r#"
+const P: u32 = 2013265921u;
+const M: u32 = 2281701377u;
+const NBETA: u32 = 1073741848u;
+
+struct ElemBuffer {
+    data: array<u32>,
+};
+
+struct U32Buffer {
+    data: array<u32>,
+};
+
+struct Params {
+    chunk_count: u32,
+    cycles: u32,
+    combos_base: u32,
+    pows_base: u32,
+    chunk_indices_base: u32,
+    chunk_offsets_base: u32,
+    _pad0: u32,
+    _pad1: u32,
+};
+
+@group(0) @binding(0) var<storage, read_write> combos: ElemBuffer;
+@group(0) @binding(1) var<storage, read> pows: ElemBuffer;
+@group(0) @binding(2) var<storage, read> chunk_indices: U32Buffer;
+@group(0) @binding(3) var<storage, read> chunk_offsets: U32Buffer;
+@group(0) @binding(4) var<uniform> params: Params;
+
+fn add(lhs: u32, rhs: u32) -> u32 {
+    let sum = lhs + rhs;
+    if (sum >= P) {
+        return sum - P;
+    }
+    return sum;
+}
+
+fn mul_wide(lhs: u32, rhs: u32) -> vec2<u32> {
+    let lhs_lo = lhs & 0xffffu;
+    let lhs_hi = lhs >> 16u;
+    let rhs_lo = rhs & 0xffffu;
+    let rhs_hi = rhs >> 16u;
+
+    let p0 = lhs_lo * rhs_lo;
+    let p1 = lhs_hi * rhs_lo;
+    let p2 = lhs_lo * rhs_hi;
+    let p3 = lhs_hi * rhs_hi;
+
+    let carry = (p0 >> 16u) + (p1 & 0xffffu) + (p2 & 0xffffu);
+    let lo = (p0 & 0xffffu) | ((carry & 0xffffu) << 16u);
+    let hi = p3 + (p1 >> 16u) + (p2 >> 16u) + (carry >> 16u);
+    return vec2<u32>(lo, hi);
+}
+
+fn mul(lhs: u32, rhs: u32) -> u32 {
+    let product = mul_wide(lhs, rhs);
+    let low = 0u - product.x;
+    let red = M * low;
+    let red_product = mul_wide(red, P);
+    var ret = product.y + red_product.y;
+    if (product.x + red_product.x < product.x) {
+        ret = ret + 1u;
+    }
+    if (ret >= P) {
+        return ret - P;
+    }
+    return ret;
+}
+
+fn ext_add(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        add(lhs.x, rhs.x),
+        add(lhs.y, rhs.y),
+        add(lhs.z, rhs.z),
+        add(lhs.w, rhs.w),
+    );
+}
+
+fn ext_mul(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        add(
+            mul(lhs.x, rhs.x),
+            mul(NBETA, add(add(mul(lhs.y, rhs.w), mul(lhs.z, rhs.z)), mul(lhs.w, rhs.y))),
+        ),
+        add(
+            add(mul(lhs.x, rhs.y), mul(lhs.y, rhs.x)),
+            mul(NBETA, add(mul(lhs.z, rhs.w), mul(lhs.w, rhs.z))),
+        ),
+        add(
+            add(add(mul(lhs.x, rhs.z), mul(lhs.y, rhs.y)), mul(lhs.z, rhs.x)),
+            mul(NBETA, mul(lhs.w, rhs.w)),
+        ),
+        add(add(add(mul(lhs.x, rhs.w), mul(lhs.y, rhs.z)), mul(lhs.z, rhs.y)), mul(lhs.w, rhs.x)),
+    );
+}
+
+fn load_combo(elem_idx: u32) -> vec4<u32> {
+    let base = params.combos_base + elem_idx * 4u;
+    return vec4<u32>(
+        combos.data[base + 0u],
+        combos.data[base + 1u],
+        combos.data[base + 2u],
+        combos.data[base + 3u],
+    );
+}
+
+fn store_combo(elem_idx: u32, value: vec4<u32>) {
+    let base = params.combos_base + elem_idx * 4u;
+    combos.data[base + 0u] = value.x;
+    combos.data[base + 1u] = value.y;
+    combos.data[base + 2u] = value.z;
+    combos.data[base + 3u] = value.w;
+}
+
+fn load_pow(elem_idx: u32) -> vec4<u32> {
+    let base = params.pows_base + elem_idx * 4u;
+    return vec4<u32>(
+        pows.data[base + 0u],
+        pows.data[base + 1u],
+        pows.data[base + 2u],
+        pows.data[base + 3u],
+    );
+}
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let chunk = gid.x;
+    if (chunk >= params.chunk_count) {
+        return;
+    }
+
+    let combo_id = chunk_indices.data[params.chunk_indices_base + chunk];
+    let pow_start = chunk_offsets.data[params.chunk_offsets_base + chunk];
+    let pow_end = chunk_offsets.data[params.chunk_offsets_base + chunk + 1u];
+    for (var pow_idx = pow_start; pow_idx < pow_end; pow_idx = pow_idx + 1u) {
+        let z = load_pow(pow_idx);
+        var cur = vec4<u32>(0u, 0u, 0u, 0u);
+        var i = params.cycles;
+        loop {
+            if (i == 0u) {
+                break;
+            }
+            i = i - 1u;
+            let elem_idx = combo_id * params.cycles + i;
+            let next = ext_add(ext_mul(z, cur), load_combo(elem_idx));
+            store_combo(elem_idx, cur);
+            cur = next;
+        }
+    }
+}
+"#;
+
 const BATCH_BIT_REVERSE_WGSL: &str = r#"
+const LINEAR_DISPATCH_STRIDE: u32 = 16776960u;
+
 struct ElemBuffer {
     data: array<u32>,
 };
@@ -898,9 +3213,13 @@ fn reverse_bits32(value: u32) -> u32 {
     return (v << 16u) | (v >> 16u);
 }
 
+fn linear_global_id(gid: vec3<u32>) -> u32 {
+    return gid.x + gid.y * LINEAR_DISPATCH_STRIDE;
+}
+
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let total_idx = gid.x;
+    let total_idx = linear_global_id(gid);
     if (total_idx >= params.count) {
         return;
     }
@@ -920,6 +3239,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 "#;
 
 const BATCH_EXPAND_WGSL: &str = r#"
+const LINEAR_DISPATCH_STRIDE: u32 = 16776960u;
+
 struct ElemBuffer {
     data: array<u32>,
 };
@@ -939,9 +3260,13 @@ struct Params {
 @group(0) @binding(1) var<storage, read> input: ElemBuffer;
 @group(0) @binding(2) var<uniform> params: Params;
 
+fn linear_global_id(gid: vec3<u32>) -> u32 {
+    return gid.x + gid.y * LINEAR_DISPATCH_STRIDE;
+}
+
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let idx = gid.x;
+    let idx = linear_global_id(gid);
     if (idx >= params.total) {
         return;
     }
@@ -957,6 +3282,7 @@ const NTT_STEP_WGSL: &str = r#"
 const P: u32 = 2013265921u;
 const M: u32 = 2281701377u;
 const MONT_ONE: u32 = 268435454u;
+const LINEAR_DISPATCH_STRIDE: u32 = 16776960u;
 
 struct ElemBuffer {
     data: array<u32>,
@@ -1038,9 +3364,13 @@ fn pow_elem(base: u32, exponent: u32) -> u32 {
     return total;
 }
 
+fn linear_global_id(gid: vec3<u32>) -> u32 {
+    return gid.x + gid.y * LINEAR_DISPATCH_STRIDE;
+}
+
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let idx = gid.x;
+    let idx = linear_global_id(gid);
     if (idx >= params.total_pairs) {
         return;
     }
@@ -1076,6 +3406,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 const NTT_NORMALIZE_WGSL: &str = r#"
 const P: u32 = 2013265921u;
 const M: u32 = 2281701377u;
+const LINEAR_DISPATCH_STRIDE: u32 = 16776960u;
 
 struct ElemBuffer {
     data: array<u32>,
@@ -1123,9 +3454,13 @@ fn mul(lhs: u32, rhs: u32) -> u32 {
     return ret;
 }
 
+fn linear_global_id(gid: vec3<u32>) -> u32 {
+    return gid.x + gid.y * LINEAR_DISPATCH_STRIDE;
+}
+
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let idx = gid.x;
+    let idx = linear_global_id(gid);
     if (idx >= params.total) {
         return;
     }
@@ -1537,9 +3872,12 @@ struct WebGpuPoseidon2Hash {
 
 impl WebGpuPoseidon2Hash {
     fn new(hal: &WebGpuHal) -> Result<Self> {
-        let round_constants =
-            hal.copy_from_elem("webgpu_poseidon2_round_constants", poseidon2::ROUND_CONSTANTS);
-        let m_int_diag = hal.copy_from_elem("webgpu_poseidon2_m_int_diag", poseidon2::M_INT_DIAG_HZN);
+        let round_constants = hal.copy_from_elem(
+            "webgpu_poseidon2_round_constants",
+            poseidon2::ROUND_CONSTANTS,
+        );
+        let m_int_diag =
+            hal.copy_from_elem("webgpu_poseidon2_m_int_diag", poseidon2::M_INT_DIAG_HZN);
 
         let fold_layout = hal.create_bind_group_layout(
             "webgpu_poseidon2_fold_layout",
@@ -1668,17 +4006,26 @@ pub struct WebGpuBuffer<T> {
     cpu: CpuBuffer<T>,
     gpu: Option<web_sys::GpuBuffer>,
     elem_offset: usize,
+    /// CPU-side changes that have not been uploaded to the GPU buffer.
     cpu_dirty: Rc<Cell<bool>>,
+    /// GPU-side changes that have not been read back into the CPU shadow.
+    cpu_stale: Rc<Cell<bool>>,
     marker: PhantomData<T>,
 }
 
 impl<T> WebGpuBuffer<T> {
-    fn new(cpu: CpuBuffer<T>, gpu: Option<web_sys::GpuBuffer>, cpu_dirty: Rc<Cell<bool>>) -> Self {
+    fn new(
+        cpu: CpuBuffer<T>,
+        gpu: Option<web_sys::GpuBuffer>,
+        cpu_dirty: Rc<Cell<bool>>,
+        cpu_stale: Rc<Cell<bool>>,
+    ) -> Self {
         Self {
             cpu,
             gpu,
             elem_offset: 0,
             cpu_dirty,
+            cpu_stale,
             marker: PhantomData,
         }
     }
@@ -1689,6 +4036,28 @@ impl<T> WebGpuBuffer<T> {
 
     fn mark_cpu_dirty(&self) {
         self.cpu_dirty.set(true);
+        self.cpu_stale.set(false);
+    }
+
+    /// Mark the GPU buffer as containing newer data than the CPU shadow.
+    pub fn mark_gpu_dirty(&self) {
+        self.cpu_dirty.set(false);
+        self.cpu_stale.set(true);
+    }
+
+    fn mark_synced(&self) {
+        self.cpu_dirty.set(false);
+        self.cpu_stale.set(false);
+    }
+
+    fn mark_cpu_result(&self, gpu_current: bool) {
+        self.cpu_dirty.set(!gpu_current);
+        self.cpu_stale.set(false);
+    }
+
+    /// Returns true when synchronous CPU views are current.
+    pub fn cpu_is_current(&self) -> bool {
+        !self.cpu_stale.get()
     }
 
     /// Return the underlying browser `GPUBuffer`, when the allocation is non-empty.
@@ -1710,13 +4079,87 @@ impl<T> WebGpuBuffer<T> {
             return Ok(());
         }
 
+        ensure!(
+            !self.cpu_stale.get(),
+            "cannot upload stale CPU shadow for WebGPU buffer {}",
+            self.cpu.name()
+        );
+
         if let Some(gpu) = self.raw_buffer() {
-            let cpu = self.cpu.to_vec();
-            hal.write_buffer(gpu, 0, bytemuck::cast_slice(&cpu))?;
+            let mut upload = Ok(());
+            self.cpu.view(|cpu| {
+                let elems_per_chunk = (WEBGPU_SAFE_QUEUE_WRITE_BYTES / mem::size_of::<T>()).max(1);
+                for (chunk_idx, chunk) in cpu.chunks(elems_per_chunk).enumerate() {
+                    let chunk_offset = chunk_idx
+                        .checked_mul(elems_per_chunk)
+                        .expect("WebGPU upload chunk offset overflow");
+                    upload = hal.write_buffer(
+                        gpu,
+                        self.byte_offset() + byte_len_for::<T>(chunk_offset),
+                        bytemuck::cast_slice(chunk),
+                    );
+                    if upload.is_err() {
+                        break;
+                    }
+                }
+            });
+            upload?;
         }
 
         self.cpu_dirty.set(false);
         Ok(())
+    }
+
+    /// Read the browser `GPUBuffer` back into the CPU shadow when the GPU owns
+    /// newer contents. This is the async boundary WebGPU needs before any
+    /// synchronous transcript, Merkle, or verifier-facing CPU view.
+    pub async fn sync_gpu_to_cpu(&self, hal: &WebGpuHal) -> Result<()>
+    where
+        T: bytemuck::CheckedBitPattern + Clone,
+    {
+        if !self.cpu_stale.get() {
+            return Ok(());
+        }
+
+        let Some(gpu) = self.raw_buffer() else {
+            ensure!(
+                self.cpu.size() == 0,
+                "cannot read back missing GPU buffer {}",
+                self.cpu.name()
+            );
+            self.mark_synced();
+            return Ok(());
+        };
+
+        let byte_len = byte_len_for::<T>(self.cpu.size());
+        let bytes = hal
+            .read_buffer_range(gpu, self.byte_offset(), byte_len)
+            .await?;
+        let values = bytemuck::checked::try_cast_slice::<u8, T>(bytes.as_slice())
+            .map_err(|err| anyhow!("invalid WebGPU readback for {}: {err}", self.cpu.name()))?;
+        ensure!(
+            values.len() == self.cpu.size(),
+            "readback size mismatch for WebGPU buffer {}: got {} elems, expected {}",
+            self.cpu.name(),
+            values.len(),
+            self.cpu.size()
+        );
+        self.cpu.view_mut(|cpu| {
+            cpu.clone_from_slice(values);
+        });
+        self.mark_synced();
+        Ok(())
+    }
+
+    fn assert_cpu_current(&self, op: &str)
+    where
+        T: Clone,
+    {
+        assert!(
+            !self.cpu_stale.get(),
+            "{op} requires a current CPU shadow for WebGPU buffer {}; call sync_gpu_to_cpu(...).await first",
+            self.cpu.name()
+        );
     }
 }
 
@@ -1736,24 +4179,29 @@ impl<T: Clone> super::Buffer<T> for WebGpuBuffer<T> {
             gpu: self.gpu.clone(),
             elem_offset: self.elem_offset + offset,
             cpu_dirty: self.cpu_dirty.clone(),
+            cpu_stale: self.cpu_stale.clone(),
             marker: PhantomData,
         }
     }
 
     fn get_at(&self, idx: usize) -> T {
+        self.assert_cpu_current("get_at");
         self.cpu.get_at(idx)
     }
 
     fn view<F: FnOnce(&[T])>(&self, f: F) {
+        self.assert_cpu_current("view");
         self.cpu.view(f);
     }
 
     fn view_mut<F: FnOnce(&mut [T])>(&self, f: F) {
+        self.assert_cpu_current("view_mut");
         self.cpu.view_mut(f);
         self.mark_cpu_dirty();
     }
 
     fn to_vec(&self) -> Vec<T> {
+        self.assert_cpu_current("to_vec");
         self.cpu.to_vec()
     }
 }
@@ -1770,6 +4218,28 @@ pub struct WebGpuHal {
     cpu: CpuHal<BabyBear>,
     poseidon2: Option<WebGpuPoseidon2Hash>,
     diagnostics: WebGpuDiagnosticsState,
+    gpu_authoritative: Cell<bool>,
+    eval_check_gpu_enabled: Cell<bool>,
+    batch_expand_into_evaluate_ntt_gpu_enabled: Cell<bool>,
+    batch_interpolate_ntt_gpu_enabled: Cell<bool>,
+    batch_bit_reverse_gpu_enabled: Cell<bool>,
+    hash_fold_gpu_enabled: Cell<bool>,
+    hash_rows_gpu_enabled: Cell<bool>,
+    zk_shift_gpu_enabled: Cell<bool>,
+    max_buffer_size: u64,
+    max_storage_buffer_binding_size: u64,
+}
+
+/// Restores the previous GPU-authoritative mode when dropped.
+pub struct WebGpuAuthoritativeScope<'a> {
+    hal: &'a WebGpuHal,
+    previous: bool,
+}
+
+impl Drop for WebGpuAuthoritativeScope<'_> {
+    fn drop(&mut self) {
+        self.hal.set_gpu_authoritative(self.previous);
+    }
 }
 
 impl WebGpuHal {
@@ -1782,6 +4252,7 @@ impl WebGpuHal {
     /// Construct a HAL from a browser `GPUDevice` supplied by the crate consumer.
     pub fn from_device(device: web_sys::GpuDevice, hash_suite: HashSuite<BabyBear>) -> Self {
         let use_poseidon2 = hash_suite.name == "poseidon2";
+        let limits = device.limits();
         let queue = device.queue();
         let mut hal = Self {
             device,
@@ -1789,6 +4260,16 @@ impl WebGpuHal {
             cpu: CpuHal::new(hash_suite),
             poseidon2: None,
             diagnostics: WebGpuDiagnosticsState::default(),
+            gpu_authoritative: Cell::new(false),
+            eval_check_gpu_enabled: Cell::new(true),
+            batch_expand_into_evaluate_ntt_gpu_enabled: Cell::new(true),
+            batch_interpolate_ntt_gpu_enabled: Cell::new(true),
+            batch_bit_reverse_gpu_enabled: Cell::new(true),
+            hash_fold_gpu_enabled: Cell::new(true),
+            hash_rows_gpu_enabled: Cell::new(true),
+            zk_shift_gpu_enabled: Cell::new(true),
+            max_buffer_size: limits.max_buffer_size() as u64,
+            max_storage_buffer_binding_size: limits.max_storage_buffer_binding_size() as u64,
         };
         if use_poseidon2 {
             hal.poseidon2 = Some(
@@ -1809,6 +4290,65 @@ impl WebGpuHal {
         self.diagnostics.reset();
     }
 
+    /// Enable or disable GPU-authoritative HAL outputs.
+    ///
+    /// When enabled, WebGPU kernels that successfully dispatch may skip their
+    /// CPU mirror work and mark output buffers as requiring async readback
+    /// before any synchronous CPU view.
+    pub fn set_gpu_authoritative(&self, enabled: bool) {
+        self.gpu_authoritative.set(enabled);
+    }
+
+    /// Returns whether successful WebGPU kernels are allowed to own outputs
+    /// without an immediate CPU mirror.
+    pub fn gpu_authoritative(&self) -> bool {
+        self.gpu_authoritative.get()
+    }
+
+    /// Enable or disable WebGPU eval_check dispatch.
+    ///
+    /// This is a diagnostic switch used by browser parity tests to isolate
+    /// eval_check-specific correctness failures from the rest of the async
+    /// GPU-authoritative proof path.
+    pub fn set_eval_check_gpu_enabled(&self, enabled: bool) {
+        self.eval_check_gpu_enabled.set(enabled);
+    }
+
+    /// Enable or disable specific WebGPU kernels for diagnostics.
+    #[doc(hidden)]
+    pub fn set_op_gpu_enabled(&self, op: &str, enabled: bool) {
+        match op {
+            "batch_expand_into_evaluate_ntt" => {
+                self.batch_expand_into_evaluate_ntt_gpu_enabled.set(enabled)
+            }
+            "batch_interpolate_ntt" => self.batch_interpolate_ntt_gpu_enabled.set(enabled),
+            "batch_bit_reverse" => self.batch_bit_reverse_gpu_enabled.set(enabled),
+            "hash_fold" => self.hash_fold_gpu_enabled.set(enabled),
+            "hash_rows" => self.hash_rows_gpu_enabled.set(enabled),
+            "zk_shift" => self.zk_shift_gpu_enabled.set(enabled),
+            _ => panic!("unknown WebGPU diagnostic op: {op}"),
+        }
+    }
+
+    /// Temporarily set GPU-authoritative mode for a scoped proof stage.
+    pub fn gpu_authoritative_scope(&self, enabled: bool) -> WebGpuAuthoritativeScope<'_> {
+        let previous = self.gpu_authoritative();
+        self.set_gpu_authoritative(enabled);
+        WebGpuAuthoritativeScope {
+            hal: self,
+            previous,
+        }
+    }
+
+    fn max_storage_binding_bytes(&self) -> u64 {
+        self.max_storage_buffer_binding_size
+            .min(WEBGPU_SAFE_STORAGE_BINDING_BYTES)
+    }
+
+    fn can_allocate_gpu_buffer(&self, byte_len: u64) -> bool {
+        byte_len <= self.max_buffer_size && byte_len <= MAX_EXACT_JS_INTEGER
+    }
+
     fn record_gpu_result_with_cpu_mirror(&self, name: &'static str, gpu_used: bool) {
         if gpu_used {
             self.diagnostics.record_gpu_dispatch(name);
@@ -1818,12 +4358,1383 @@ impl WebGpuHal {
         }
     }
 
+    fn record_gpu_result_authoritative(&self, name: &'static str, gpu_used: bool) {
+        if gpu_used {
+            self.diagnostics.record_gpu_dispatch(name);
+        } else {
+            self.diagnostics.record_cpu_fallback(name);
+        }
+    }
+
+    fn finish_hal_op<T>(
+        &self,
+        name: &'static str,
+        gpu_used: bool,
+        output: &WebGpuBuffer<T>,
+        cpu_mirror: impl FnOnce(),
+    ) {
+        if self.gpu_authoritative() && gpu_used {
+            self.record_gpu_result_authoritative(name, gpu_used);
+            output.mark_gpu_dirty();
+        } else {
+            cpu_mirror();
+            self.record_gpu_result_with_cpu_mirror(name, gpu_used);
+            output.mark_cpu_result(gpu_used);
+        }
+    }
+
+    pub(crate) fn storage_binding_fits<T>(&self, buffer: &WebGpuBuffer<T>) -> bool
+    where
+        T: Clone + Debug + PartialEq,
+    {
+        byte_len_for::<T>(buffer.size()) <= self.max_storage_binding_bytes()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_eval_check_poly_ext_interpreted(
+        &self,
+        check: &WebGpuBuffer<BabyBearElem>,
+        groups: &[&WebGpuBuffer<BabyBearElem>],
+        logical_globals: &[&WebGpuBuffer<BabyBearElem>; 2],
+        taps: &TapSet<'_>,
+        def: &PolyExtStepDef,
+        poly_mix: BabyBearExtElem,
+        domain_u32: u32,
+        params: [u32; 12],
+    ) -> Result<bool> {
+        let (Some(group0_gpu), Some(group1_gpu), Some(group2_gpu)) = (
+            groups[0].raw_buffer(),
+            groups[1].raw_buffer(),
+            groups[2].raw_buffer(),
+        ) else {
+            self.record_gpu_result_authoritative("eval_check", false);
+            return Ok(false);
+        };
+        self.dispatch_eval_check_poly_ext_interpreted_with_groups(
+            check,
+            logical_globals,
+            [group0_gpu, group1_gpu, group2_gpu],
+            [params[1], params[2], params[3]],
+            [0, 0, 0],
+            [domain_u32, domain_u32, domain_u32],
+            domain_u32,
+            0,
+            taps,
+            def,
+            poly_mix,
+            domain_u32,
+            params,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_eval_check_poly_ext_interpreted_with_groups(
+        &self,
+        check: &WebGpuBuffer<BabyBearElem>,
+        logical_globals: &[&WebGpuBuffer<BabyBearElem>; 2],
+        group_gpus: [&web_sys::GpuBuffer; 3],
+        group_bases: [u32; 3],
+        group_chunk_bases: [u32; 3],
+        group_chunk_rows: [u32; 3],
+        dispatch_count: u32,
+        cycle_base: u32,
+        taps: &TapSet<'_>,
+        def: &PolyExtStepDef,
+        poly_mix: BabyBearExtElem,
+        domain_u32: u32,
+        params: [u32; 12],
+    ) -> Result<bool> {
+        let (instructions, fp_slots, mix_slots, ret_mix_slot) =
+            match eval_check_interpreter_instructions(taps, def) {
+                Ok(program) => program,
+                Err(err) => {
+                    log_webgpu_stage(&format!(
+                        "webgpu eval_check interpreter build failed: {err}"
+                    ));
+                    self.record_gpu_result_authoritative("eval_check", false);
+                    return Ok(false);
+                }
+            };
+        if instructions.is_empty() {
+            self.record_gpu_result_authoritative("eval_check", false);
+            return Ok(false);
+        }
+        let instruction_count = instructions.len() / WEBGPU_EVAL_CHECK_INSTRUCTION_WORDS;
+        let _timer = WebGpuStageTimer::new(format!(
+            "eval_check_interpreter_submit domain={} dispatch_count={} cycle_base={} instructions={} fp_slots={} mix_slots={}",
+            domain_u32, dispatch_count, cycle_base, instruction_count, fp_slots, mix_slots
+        ));
+
+        let mix_pows = eval_check_mix_pows(def, poly_mix)?;
+        let mut mix_pow_words = Vec::with_capacity(mix_pows.len() * BabyBearExtElem::EXT_SIZE);
+        for value in mix_pows {
+            mix_pow_words.extend(ext_words(value));
+        }
+
+        let instructions_gpu = self.create_storage_buffer(
+            "webgpu_eval_check_interpreter_instructions",
+            byte_len_for::<u32>(instructions.len()),
+        )?;
+        self.write_buffer(&instructions_gpu, 0, bytemuck::cast_slice(&instructions))?;
+        let mix_pows_gpu = self.create_storage_buffer(
+            "webgpu_eval_check_interpreter_mix_pows",
+            byte_len_for::<u32>(mix_pow_words.len()),
+        )?;
+        self.write_buffer(&mix_pows_gpu, 0, bytemuck::cast_slice(&mix_pow_words))?;
+
+        let params = [
+            params[0],
+            group_bases[0],
+            group_bases[1],
+            group_bases[2],
+            params[4],
+            params[5],
+            domain_u32,
+            u32::try_from(instruction_count)
+                .expect("WebGPU eval_check instruction count exceeds u32"),
+            0,
+            0,
+            u32::try_from(ret_mix_slot).expect("WebGPU eval_check ret slot exceeds u32"),
+            dispatch_count,
+            cycle_base,
+            group_chunk_bases[0],
+            group_chunk_rows[0],
+            group_chunk_bases[1],
+            group_chunk_rows[1],
+            group_chunk_bases[2],
+            group_chunk_rows[2],
+            0,
+            params[8],
+            params[9],
+            params[10],
+            params[11],
+        ];
+        let params = self.create_uniform_buffer(
+            "webgpu_eval_check_interpreter_params",
+            bytemuck::cast_slice(&params),
+        )?;
+
+        let layout = self.create_bind_group_layout(
+            "webgpu_eval_check_interpreter_layout",
+            &[
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::read_only_storage(1, 0),
+                WebGpuBindingLayout::read_only_storage(2, 0),
+                WebGpuBindingLayout::read_only_storage(3, 0),
+                WebGpuBindingLayout::read_only_storage(4, 0),
+                WebGpuBindingLayout::read_only_storage(5, 0),
+                WebGpuBindingLayout::read_only_storage(6, 0),
+                WebGpuBindingLayout::read_only_storage(7, 0),
+                WebGpuBindingLayout::uniform(8, 96),
+            ],
+        )?;
+        let wgsl = build_eval_check_interpreter_wgsl(fp_slots, mix_slots);
+        let kernel = match self.create_compute_kernel(
+            "webgpu_eval_check_interpreter",
+            &wgsl,
+            "main",
+            &[layout.clone()],
+        ) {
+            Ok(kernel) => kernel,
+            Err(err) => {
+                log_webgpu_stage(&format!(
+                    "webgpu eval_check interpreter pipeline failed: {err}"
+                ));
+                self.record_gpu_result_authoritative("eval_check", false);
+                return Ok(false);
+            }
+        };
+
+        let bind_group = self.create_bind_group(
+            "webgpu_eval_check_interpreter_bind_group",
+            &layout,
+            &[
+                WebGpuBufferBinding::new(
+                    0,
+                    check
+                        .raw_buffer()
+                        .ok_or_else(|| anyhow!("missing interpreted eval_check check buffer"))?,
+                ),
+                WebGpuBufferBinding::new(1, group_gpus[0]),
+                WebGpuBufferBinding::new(2, group_gpus[1]),
+                WebGpuBufferBinding::new(3, group_gpus[2]),
+                WebGpuBufferBinding::new(
+                    4,
+                    logical_globals[0]
+                        .raw_buffer()
+                        .ok_or_else(|| anyhow!("missing interpreted eval_check global 0 buffer"))?,
+                ),
+                WebGpuBufferBinding::new(
+                    5,
+                    logical_globals[1]
+                        .raw_buffer()
+                        .ok_or_else(|| anyhow!("missing interpreted eval_check global 1 buffer"))?,
+                ),
+                WebGpuBufferBinding::new(6, &instructions_gpu),
+                WebGpuBufferBinding::new(7, &mix_pows_gpu),
+                WebGpuBufferBinding {
+                    binding: 8,
+                    buffer: &params,
+                    offset: 0,
+                    size: Some(96),
+                },
+            ],
+        )?;
+        let workgroups = dispatch_count.div_ceil(WEBGPU_EVAL_CHECK_INTERPRETER_WORKGROUP_SIZE);
+        self.dispatch_compute_1d(&kernel, &bind_group, workgroups);
+        check.mark_gpu_dirty();
+        self.record_gpu_result_authoritative("eval_check", true);
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_eval_check_poly_ext_interpreted_group_chunks(
+        &self,
+        check: &WebGpuBuffer<BabyBearElem>,
+        groups: &[&WebGpuBuffer<BabyBearElem>],
+        logical_globals: &[&WebGpuBuffer<BabyBearElem>; 2],
+        taps: &TapSet<'_>,
+        def: &PolyExtStepDef,
+        poly_mix: BabyBearExtElem,
+        domain_u32: u32,
+        params: [u32; 12],
+    ) -> Result<bool> {
+        let chunked_groups = [
+            groups[0].raw_buffer().is_none() || !self.storage_binding_fits(groups[0]),
+            groups[1].raw_buffer().is_none() || !self.storage_binding_fits(groups[1]),
+            groups[2].raw_buffer().is_none() || !self.storage_binding_fits(groups[2]),
+        ];
+
+        for (name, buffer) in [
+            ("check", check),
+            ("global0", logical_globals[0]),
+            ("global1", logical_globals[1]),
+        ] {
+            if buffer.raw_buffer().is_none() {
+                log_webgpu_stage(&format!(
+                    "browser-prove:stage eval_check chunked_groups unavailable missing_gpu_buffer name={name}"
+                ));
+                self.record_gpu_result_authoritative("eval_check", false);
+                return Ok(false);
+            }
+            if !self.storage_binding_fits(buffer) {
+                log_webgpu_stage(&format!(
+                    "browser-prove:stage eval_check chunked_groups unavailable storage_binding name={} bytes={} max_binding={}",
+                    name,
+                    byte_len_for::<BabyBearElem>(buffer.size()),
+                    self.max_storage_binding_bytes()
+                ));
+                self.record_gpu_result_authoritative("eval_check", false);
+                return Ok(false);
+            }
+        }
+
+        for group_id in 0..3 {
+            if chunked_groups[group_id] {
+                ensure!(
+                    groups[group_id].cpu_is_current(),
+                    "WebGPU chunked eval_check group {group_id} requires a current CPU shadow"
+                );
+            } else if groups[group_id].raw_buffer().is_none()
+                || !self.storage_binding_fits(groups[group_id])
+            {
+                log_webgpu_stage(&format!(
+                    "browser-prove:stage eval_check chunked_groups unavailable group={group_id}"
+                ));
+                self.record_gpu_result_authoritative("eval_check", false);
+                return Ok(false);
+            }
+        }
+
+        let domain = domain_u32 as usize;
+        if domain == 0 {
+            return Ok(true);
+        }
+        let max_back_rows = taps
+            .taps()
+            .filter(|tap| chunked_groups[tap.group()])
+            .map(|tap| (tap.back() * INV_RATE) % domain)
+            .max()
+            .unwrap_or(0);
+        let max_chunk_elems =
+            (self.max_storage_binding_bytes() / mem::size_of::<BabyBearElem>() as u64) as usize;
+        let mut max_dispatch_rows = domain;
+        for group_id in 0..3 {
+            if !chunked_groups[group_id] {
+                continue;
+            }
+            let cols = taps.group_size(group_id);
+            if cols == 0 {
+                continue;
+            }
+            let max_chunk_rows = max_chunk_elems / cols;
+            if max_chunk_rows <= max_back_rows {
+                log_webgpu_stage(&format!(
+                    "browser-prove:stage eval_check chunked_groups unavailable group={} rows_per_chunk={} max_back_rows={} cols={}",
+                    group_id, max_chunk_rows, max_back_rows, cols
+                ));
+                self.record_gpu_result_authoritative("eval_check", false);
+                return Ok(false);
+            }
+            max_dispatch_rows = max_dispatch_rows.min(max_chunk_rows - max_back_rows);
+        }
+        log_webgpu_stage(&format!(
+            "browser-prove:stage eval_check chunked_groups start domain={} groups={:?} max_back_rows={} dispatch_rows={}",
+            domain, chunked_groups, max_back_rows, max_dispatch_rows
+        ));
+
+        let mut cycle_base = 0usize;
+        while cycle_base < domain {
+            let dispatch_rows = max_dispatch_rows.min(domain - cycle_base);
+            let chunk_rows = dispatch_rows + max_back_rows;
+            let chunk_base = (cycle_base + domain - max_back_rows) % domain;
+            let mut chunk_gpus: [Option<web_sys::GpuBuffer>; 3] = [None, None, None];
+
+            for group_id in 0..3 {
+                if !chunked_groups[group_id] {
+                    continue;
+                }
+                let cols = taps.group_size(group_id);
+                let mut chunk = vec![BabyBearElem::ZERO; cols * chunk_rows];
+                groups[group_id].cpu.view(|source| {
+                    for col in 0..cols {
+                        let src_col = &source[col * domain..(col + 1) * domain];
+                        let dst_col = &mut chunk[col * chunk_rows..(col + 1) * chunk_rows];
+                        for (local_row, dst) in dst_col.iter_mut().enumerate() {
+                            *dst = src_col[(chunk_base + local_row) % domain];
+                        }
+                    }
+                });
+
+                let chunk_gpu = self.create_storage_buffer(
+                    "webgpu_eval_check_interpreter_group_chunk",
+                    byte_len_for::<BabyBearElem>(chunk.len()),
+                )?;
+                self.write_buffer(&chunk_gpu, 0, bytemuck::cast_slice(&chunk))?;
+                chunk_gpus[group_id] = Some(chunk_gpu);
+            }
+
+            let group0_gpu = chunk_gpus[0]
+                .as_ref()
+                .or_else(|| groups[0].raw_buffer())
+                .ok_or_else(|| anyhow!("missing eval_check group 0 chunk buffer"))?;
+            let group1_gpu = chunk_gpus[1]
+                .as_ref()
+                .or_else(|| groups[1].raw_buffer())
+                .ok_or_else(|| anyhow!("missing eval_check group 1 chunk buffer"))?;
+            let group2_gpu = chunk_gpus[2]
+                .as_ref()
+                .or_else(|| groups[2].raw_buffer())
+                .ok_or_else(|| anyhow!("missing eval_check group 2 chunk buffer"))?;
+
+            let group_bases = [
+                if chunked_groups[0] { 0 } else { params[1] },
+                if chunked_groups[1] { 0 } else { params[2] },
+                if chunked_groups[2] { 0 } else { params[3] },
+            ];
+            let group_chunk_bases = [
+                if chunked_groups[0] {
+                    u32::try_from(chunk_base)
+                        .expect("WebGPU eval_check group 0 chunk base exceeds u32")
+                } else {
+                    0
+                },
+                if chunked_groups[1] {
+                    u32::try_from(chunk_base)
+                        .expect("WebGPU eval_check group 1 chunk base exceeds u32")
+                } else {
+                    0
+                },
+                if chunked_groups[2] {
+                    u32::try_from(chunk_base)
+                        .expect("WebGPU eval_check group 2 chunk base exceeds u32")
+                } else {
+                    0
+                },
+            ];
+            let group_chunk_rows = [
+                if chunked_groups[0] {
+                    u32::try_from(chunk_rows)
+                        .expect("WebGPU eval_check group 0 chunk rows exceeds u32")
+                } else {
+                    domain_u32
+                },
+                if chunked_groups[1] {
+                    u32::try_from(chunk_rows)
+                        .expect("WebGPU eval_check group 1 chunk rows exceeds u32")
+                } else {
+                    domain_u32
+                },
+                if chunked_groups[2] {
+                    u32::try_from(chunk_rows)
+                        .expect("WebGPU eval_check group 2 chunk rows exceeds u32")
+                } else {
+                    domain_u32
+                },
+            ];
+
+            let dispatched = self.dispatch_eval_check_poly_ext_interpreted_with_groups(
+                check,
+                logical_globals,
+                [group0_gpu, group1_gpu, group2_gpu],
+                group_bases,
+                group_chunk_bases,
+                group_chunk_rows,
+                u32::try_from(dispatch_rows).expect("WebGPU eval_check dispatch rows exceeds u32"),
+                u32::try_from(cycle_base).expect("WebGPU eval_check cycle base exceeds u32"),
+                taps,
+                def,
+                poly_mix,
+                domain_u32,
+                params,
+            )?;
+            if !dispatched {
+                return Ok(false);
+            }
+            cycle_base += dispatch_rows;
+        }
+
+        log_webgpu_stage("browser-prove:stage eval_check chunked_groups done");
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_eval_check_poly_ext_split(
+        &self,
+        check: &WebGpuBuffer<BabyBearElem>,
+        groups: &[&WebGpuBuffer<BabyBearElem>],
+        logical_globals: &[&WebGpuBuffer<BabyBearElem>; 2],
+        taps: &TapSet<'_>,
+        def: &PolyExtStepDef,
+        poly_mix: BabyBearExtElem,
+        domain_u32: u32,
+        params: [u32; 12],
+    ) -> Result<bool> {
+        let program = eval_check_program(def)?;
+        let terms = eval_check_flatten_terms(&program, def.ret)?;
+        if terms.is_empty() {
+            self.record_gpu_result_authoritative("eval_check", false);
+            return Ok(false);
+        }
+
+        let term_chunks = match eval_check_split_term_chunks(&program, &terms) {
+            Ok(chunks) => chunks,
+            Err(err) => {
+                log_webgpu_stage(&format!("webgpu eval_check split chunking failed: {err}"));
+                self.record_gpu_result_authoritative("eval_check", false);
+                return Ok(false);
+            }
+        };
+
+        let mut wgsl_chunks = Vec::new();
+        for (chunk_idx, terms) in term_chunks.iter().enumerate() {
+            let wgsl = match build_eval_check_split_wgsl(taps, &program, terms, chunk_idx == 0) {
+                Ok(wgsl) => wgsl,
+                Err(err) => {
+                    log_webgpu_stage(&format!(
+                        "webgpu eval_check split WGSL build failed at chunk {chunk_idx}: {err}"
+                    ));
+                    self.record_gpu_result_authoritative("eval_check", false);
+                    return Ok(false);
+                }
+            };
+            wgsl_chunks.push(wgsl);
+        }
+
+        let mix_pows = eval_check_all_mix_pows(def, poly_mix)?;
+        let mut mix_pow_words = Vec::with_capacity(mix_pows.len() * BabyBearExtElem::EXT_SIZE);
+        for value in mix_pows {
+            mix_pow_words.extend(ext_words(value));
+        }
+        let mix_pows_gpu = self.create_storage_buffer(
+            "webgpu_eval_check_split_mix_pows",
+            byte_len_for::<u32>(mix_pow_words.len()),
+        )?;
+        self.write_buffer(&mix_pows_gpu, 0, bytemuck::cast_slice(&mix_pow_words))?;
+
+        let params = self.create_uniform_buffer(
+            "webgpu_eval_check_split_params",
+            bytemuck::cast_slice(&params),
+        )?;
+        let layout = self.create_bind_group_layout(
+            "webgpu_eval_check_split_layout",
+            &[
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::read_only_storage(1, 0),
+                WebGpuBindingLayout::read_only_storage(2, 0),
+                WebGpuBindingLayout::read_only_storage(3, 0),
+                WebGpuBindingLayout::read_only_storage(4, 0),
+                WebGpuBindingLayout::read_only_storage(5, 0),
+                WebGpuBindingLayout::read_only_storage(6, 0),
+                WebGpuBindingLayout::uniform(7, 48),
+            ],
+        )?;
+
+        let mut kernels = Vec::with_capacity(wgsl_chunks.len());
+        for (chunk_idx, wgsl) in wgsl_chunks.iter().enumerate() {
+            let kernel = match self.create_compute_kernel(
+                "webgpu_eval_check_split",
+                wgsl,
+                "main",
+                &[layout.clone()],
+            ) {
+                Ok(kernel) => kernel,
+                Err(err) => {
+                    log_webgpu_stage(&format!(
+                        "webgpu eval_check split pipeline failed at chunk {chunk_idx}: {err}"
+                    ));
+                    self.record_gpu_result_authoritative("eval_check", false);
+                    return Ok(false);
+                }
+            };
+            kernels.push(kernel);
+        }
+
+        let bind_group = self.create_bind_group(
+            "webgpu_eval_check_split_bind_group",
+            &layout,
+            &[
+                WebGpuBufferBinding::new(
+                    0,
+                    check
+                        .raw_buffer()
+                        .ok_or_else(|| anyhow!("missing split eval_check check buffer"))?,
+                ),
+                WebGpuBufferBinding::new(
+                    1,
+                    groups[0]
+                        .raw_buffer()
+                        .ok_or_else(|| anyhow!("missing split eval_check group 0 buffer"))?,
+                ),
+                WebGpuBufferBinding::new(
+                    2,
+                    groups[1]
+                        .raw_buffer()
+                        .ok_or_else(|| anyhow!("missing split eval_check group 1 buffer"))?,
+                ),
+                WebGpuBufferBinding::new(
+                    3,
+                    groups[2]
+                        .raw_buffer()
+                        .ok_or_else(|| anyhow!("missing split eval_check group 2 buffer"))?,
+                ),
+                WebGpuBufferBinding::new(
+                    4,
+                    logical_globals[0]
+                        .raw_buffer()
+                        .ok_or_else(|| anyhow!("missing split eval_check global 0 buffer"))?,
+                ),
+                WebGpuBufferBinding::new(
+                    5,
+                    logical_globals[1]
+                        .raw_buffer()
+                        .ok_or_else(|| anyhow!("missing split eval_check global 1 buffer"))?,
+                ),
+                WebGpuBufferBinding::new(6, &mix_pows_gpu),
+                WebGpuBufferBinding {
+                    binding: 7,
+                    buffer: &params,
+                    offset: 0,
+                    size: Some(48),
+                },
+            ],
+        )?;
+        let workgroups = domain_u32.div_ceil(WEBGPU_WORKGROUP_SIZE);
+        for kernel in &kernels {
+            self.dispatch_compute_1d(kernel, &bind_group, workgroups);
+        }
+        check.mark_gpu_dirty();
+        self.record_gpu_result_authoritative("eval_check", true);
+        Ok(true)
+    }
+
+    /// Dispatch a generated straight-line WebGPU check-polynomial evaluator.
+    ///
+    /// This is intentionally conservative while the full circuit path is being
+    /// moved to GPU-authoritative execution: unsupported shapes return
+    /// `Ok(false)` so callers can use the portable CPU fallback.
+    pub fn dispatch_eval_check_poly_ext(
+        &self,
+        check: &WebGpuBuffer<BabyBearElem>,
+        groups: &[&WebGpuBuffer<BabyBearElem>],
+        globals: &[&WebGpuBuffer<BabyBearElem>],
+        taps: &TapSet<'_>,
+        def: &PolyExtStepDef,
+        poly_mix: BabyBearExtElem,
+        po2: usize,
+        steps: usize,
+    ) -> Result<bool> {
+        if !self.eval_check_gpu_enabled.get() {
+            self.record_gpu_result_authoritative("eval_check", false);
+            return Ok(false);
+        }
+        if INV_RATE != 4 || taps.num_groups() != 3 || groups.len() != 3 || globals.len() != 2 {
+            self.record_gpu_result_authoritative("eval_check", false);
+            return Ok(false);
+        }
+
+        let domain = steps
+            .checked_mul(INV_RATE)
+            .ok_or_else(|| anyhow!("WebGPU eval_check domain overflow"))?;
+        if domain == 0 {
+            return Ok(true);
+        }
+        ensure!(
+            check.size() == BabyBearExtElem::EXT_SIZE * domain,
+            "WebGPU eval_check check size mismatch: got {}, expected {}",
+            check.size(),
+            BabyBearExtElem::EXT_SIZE * domain
+        );
+        for (group_id, group) in groups.iter().enumerate() {
+            let expected = taps.group_size(group_id) * domain;
+            ensure!(
+                group.size() == expected,
+                "WebGPU eval_check group {group_id} size mismatch: got {}, expected {expected}",
+                group.size()
+            );
+        }
+
+        let logical_globals = [globals[1], globals[0]];
+        let mut min_global_sizes = [0usize; 2];
+        for op in def.block {
+            if let PolyExtStep::GetGlobal(arg, offset) = op {
+                if *arg >= min_global_sizes.len() {
+                    self.record_gpu_result_authoritative("eval_check", false);
+                    return Ok(false);
+                }
+                min_global_sizes[*arg] = min_global_sizes[*arg].max(offset + 1);
+            }
+        }
+        for (idx, min_size) in min_global_sizes.into_iter().enumerate() {
+            ensure!(
+                logical_globals[idx].size() >= min_size,
+                "WebGPU eval_check global {idx} too small: got {}, need at least {min_size}",
+                logical_globals[idx].size()
+            );
+        }
+
+        let Some(check_gpu) = check.raw_buffer() else {
+            log_webgpu_stage(
+                "browser-prove:stage eval_check fallback missing_gpu_buffer name=check",
+            );
+            self.record_gpu_result_authoritative("eval_check", false);
+            return Ok(false);
+        };
+        let group_gpus = [
+            groups[0].raw_buffer(),
+            groups[1].raw_buffer(),
+            groups[2].raw_buffer(),
+        ];
+        for group_id in 0..3 {
+            if group_gpus[group_id].is_none() {
+                log_webgpu_stage(&format!(
+                    "browser-prove:stage eval_check chunked_groups candidate missing_gpu_buffer group={group_id}"
+                ));
+            }
+        }
+        let Some(global0_gpu) = logical_globals[0].raw_buffer() else {
+            log_webgpu_stage(
+                "browser-prove:stage eval_check fallback missing_gpu_buffer name=global0",
+            );
+            self.record_gpu_result_authoritative("eval_check", false);
+            return Ok(false);
+        };
+        let Some(global1_gpu) = logical_globals[1].raw_buffer() else {
+            log_webgpu_stage(
+                "browser-prove:stage eval_check fallback missing_gpu_buffer name=global1",
+            );
+            self.record_gpu_result_authoritative("eval_check", false);
+            return Ok(false);
+        };
+        let group_storage_fits = [
+            self.storage_binding_fits(groups[0]),
+            self.storage_binding_fits(groups[1]),
+            self.storage_binding_fits(groups[2]),
+        ];
+        if !self.storage_binding_fits(check)
+            || !self.storage_binding_fits(logical_globals[0])
+            || !self.storage_binding_fits(logical_globals[1])
+        {
+            let max_binding = self.max_storage_binding_bytes();
+            for (name, elem_count) in [
+                ("check", check.size()),
+                ("group0", groups[0].size()),
+                ("group1", groups[1].size()),
+                ("global0", logical_globals[0].size()),
+                ("global1", logical_globals[1].size()),
+            ] {
+                let byte_len = byte_len_for::<BabyBearElem>(elem_count);
+                if byte_len > max_binding {
+                    log_webgpu_stage(&format!(
+                        "browser-prove:stage eval_check fallback storage_binding name={} bytes={} max_binding={}",
+                        name, byte_len, max_binding
+                    ));
+                }
+            }
+            self.record_gpu_result_authoritative("eval_check", false);
+            return Ok(false);
+        }
+        for group_id in 0..3 {
+            if !group_storage_fits[group_id] {
+                log_webgpu_stage(&format!(
+                    "browser-prove:stage eval_check chunked_groups candidate storage_binding group={} bytes={} max_binding={}",
+                    group_id,
+                    byte_len_for::<BabyBearElem>(groups[group_id].size()),
+                    self.max_storage_binding_bytes()
+                ));
+            }
+        }
+        let group_can_bind = [
+            group_gpus[0].is_some() && group_storage_fits[0],
+            group_gpus[1].is_some() && group_storage_fits[1],
+            group_gpus[2].is_some() && group_storage_fits[2],
+        ];
+
+        let check_base =
+            u32::try_from(check.elem_offset).map_err(|_| anyhow!("check offset exceeds u32"))?;
+        let group0_base = u32::try_from(groups[0].elem_offset)
+            .map_err(|_| anyhow!("group 0 offset exceeds u32"))?;
+        let group1_base = u32::try_from(groups[1].elem_offset)
+            .map_err(|_| anyhow!("group 1 offset exceeds u32"))?;
+        let group2_base = u32::try_from(groups[2].elem_offset)
+            .map_err(|_| anyhow!("group 2 offset exceeds u32"))?;
+        let global0_base = u32::try_from(logical_globals[0].elem_offset)
+            .map_err(|_| anyhow!("global 0 offset exceeds u32"))?;
+        let global1_base = u32::try_from(logical_globals[1].elem_offset)
+            .map_err(|_| anyhow!("global 1 offset exceeds u32"))?;
+        let domain_u32 =
+            u32::try_from(domain).map_err(|_| anyhow!("WebGPU eval_check domain exceeds u32"))?;
+
+        let use_chunked_groups = def.block.len() > WEBGPU_EVAL_CHECK_MAX_POLY_EXT_STEPS
+            && !WEBGPU_EVAL_CHECK_ENABLE_SPLIT
+            && !group_can_bind.iter().all(|can_bind| *can_bind);
+
+        for (idx, group) in groups.iter().enumerate() {
+            if !use_chunked_groups || group_can_bind[idx] {
+                group.sync_cpu_to_gpu(self)?;
+            }
+        }
+        for global in &logical_globals {
+            global.sync_cpu_to_gpu(self)?;
+        }
+
+        let invs = eval_check_zerofier_inv_words(po2, steps);
+        let params = [
+            check_base,
+            group0_base,
+            group1_base,
+            group2_base,
+            global0_base,
+            global1_base,
+            domain_u32,
+            0,
+            invs[0],
+            invs[1],
+            invs[2],
+            invs[3],
+        ];
+
+        if def.block.len() > WEBGPU_EVAL_CHECK_MAX_POLY_EXT_STEPS {
+            if WEBGPU_EVAL_CHECK_ENABLE_SPLIT {
+                if !group_can_bind.iter().all(|can_bind| *can_bind) {
+                    self.record_gpu_result_authoritative("eval_check", false);
+                    return Ok(false);
+                }
+                return self.dispatch_eval_check_poly_ext_split(
+                    check,
+                    groups,
+                    &logical_globals,
+                    taps,
+                    def,
+                    poly_mix,
+                    domain_u32,
+                    params,
+                );
+            }
+            if !group_can_bind.iter().all(|can_bind| *can_bind) {
+                return self.dispatch_eval_check_poly_ext_interpreted_group_chunks(
+                    check,
+                    groups,
+                    &logical_globals,
+                    taps,
+                    def,
+                    poly_mix,
+                    domain_u32,
+                    params,
+                );
+            }
+            return self.dispatch_eval_check_poly_ext_interpreted(
+                check,
+                groups,
+                &logical_globals,
+                taps,
+                def,
+                poly_mix,
+                domain_u32,
+                params,
+            );
+        }
+        if !group_can_bind.iter().all(|can_bind| *can_bind) {
+            self.record_gpu_result_authoritative("eval_check", false);
+            return Ok(false);
+        }
+
+        let mix_pows = eval_check_mix_pows(def, poly_mix)?;
+        let mut mix_pow_words = Vec::with_capacity(mix_pows.len() * BabyBearExtElem::EXT_SIZE);
+        for value in mix_pows {
+            mix_pow_words.extend(ext_words(value));
+        }
+        let mix_pows_gpu = self.create_storage_buffer(
+            "webgpu_eval_check_mix_pows",
+            byte_len_for::<u32>(mix_pow_words.len()),
+        )?;
+        self.write_buffer(&mix_pows_gpu, 0, bytemuck::cast_slice(&mix_pow_words))?;
+
+        let params =
+            self.create_uniform_buffer("webgpu_eval_check_params", bytemuck::cast_slice(&params))?;
+
+        let wgsl = build_eval_check_wgsl(taps, def)?;
+        let layout = self.create_bind_group_layout(
+            "webgpu_eval_check_layout",
+            &[
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::read_only_storage(1, 0),
+                WebGpuBindingLayout::read_only_storage(2, 0),
+                WebGpuBindingLayout::read_only_storage(3, 0),
+                WebGpuBindingLayout::read_only_storage(4, 0),
+                WebGpuBindingLayout::read_only_storage(5, 0),
+                WebGpuBindingLayout::read_only_storage(6, 0),
+                WebGpuBindingLayout::uniform(7, 48),
+            ],
+        )?;
+        let kernel =
+            self.create_compute_kernel("webgpu_eval_check", &wgsl, "main", &[layout.clone()])?;
+        let bind_group = self.create_bind_group(
+            "webgpu_eval_check_bind_group",
+            &layout,
+            &[
+                WebGpuBufferBinding::new(0, check_gpu),
+                WebGpuBufferBinding::new(
+                    1,
+                    group_gpus[0].ok_or_else(|| anyhow!("missing eval_check group 0 buffer"))?,
+                ),
+                WebGpuBufferBinding::new(
+                    2,
+                    group_gpus[1].ok_or_else(|| anyhow!("missing eval_check group 1 buffer"))?,
+                ),
+                WebGpuBufferBinding::new(
+                    3,
+                    group_gpus[2].ok_or_else(|| anyhow!("missing eval_check group 2 buffer"))?,
+                ),
+                WebGpuBufferBinding::new(4, global0_gpu),
+                WebGpuBufferBinding::new(5, global1_gpu),
+                WebGpuBufferBinding::new(6, &mix_pows_gpu),
+                WebGpuBufferBinding {
+                    binding: 7,
+                    buffer: &params,
+                    offset: 0,
+                    size: Some(48),
+                },
+            ],
+        )?;
+        let workgroups = domain_u32.div_ceil(WEBGPU_WORKGROUP_SIZE);
+        self.dispatch_compute_1d(&kernel, &bind_group, workgroups);
+        check.mark_gpu_dirty();
+        self.record_gpu_result_authoritative("eval_check", true);
+        Ok(true)
+    }
+
+    pub(crate) fn can_dispatch_batch_interpolate_ntt(
+        &self,
+        io: &WebGpuBuffer<BabyBearElem>,
+    ) -> bool {
+        self.batch_interpolate_ntt_gpu_enabled.get()
+            && (io.size() == 0 || (io.raw_buffer().is_some() && self.storage_binding_fits(io)))
+    }
+
+    pub(crate) fn can_dispatch_zk_shift(&self, io: &WebGpuBuffer<BabyBearElem>) -> bool {
+        self.zk_shift_gpu_enabled.get()
+            && (io.size() == 0 || (io.raw_buffer().is_some() && self.storage_binding_fits(io)))
+    }
+
+    fn can_dispatch_batch_bit_reverse(&self, io: &WebGpuBuffer<BabyBearElem>) -> bool {
+        self.batch_bit_reverse_gpu_enabled.get()
+            && (io.size() == 0 || (io.raw_buffer().is_some() && self.storage_binding_fits(io)))
+    }
+
+    fn can_dispatch_batch_expand_into_evaluate_ntt(
+        &self,
+        output: &WebGpuBuffer<BabyBearElem>,
+        input: &WebGpuBuffer<BabyBearElem>,
+    ) -> bool {
+        if !self.batch_expand_into_evaluate_ntt_gpu_enabled.get() {
+            return false;
+        }
+        if output.size() == 0 {
+            return true;
+        }
+        let (Some(output_gpu), Some(input_gpu)) = (output.raw_buffer(), input.raw_buffer()) else {
+            return false;
+        };
+        output_gpu != input_gpu
+            && self.storage_binding_fits(output)
+            && self.storage_binding_fits(input)
+    }
+
+    fn can_dispatch_batch_evaluate_any(
+        &self,
+        out: &WebGpuBuffer<BabyBearExtElem>,
+        coeffs: &WebGpuBuffer<BabyBearElem>,
+        which: &WebGpuBuffer<u32>,
+        xs: &WebGpuBuffer<BabyBearExtElem>,
+    ) -> bool {
+        if which.size() == 0 {
+            return true;
+        }
+        out.raw_buffer().is_some()
+            && coeffs.raw_buffer().is_some()
+            && which.raw_buffer().is_some()
+            && xs.raw_buffer().is_some()
+            && self.storage_binding_fits(out)
+            && self.storage_binding_fits(coeffs)
+            && self.storage_binding_fits(which)
+            && self.storage_binding_fits(xs)
+    }
+
+    fn can_dispatch_eltwise_sum_extelem(
+        &self,
+        output: &WebGpuBuffer<BabyBearElem>,
+        input: &WebGpuBuffer<BabyBearExtElem>,
+    ) -> bool {
+        if output.size() == 0 {
+            return true;
+        }
+        output.size() % BabyBearExtElem::EXT_SIZE == 0
+            && output.raw_buffer().is_some()
+            && input.raw_buffer().is_some()
+            && self.storage_binding_fits(output)
+            && self.storage_binding_fits(input)
+    }
+
+    fn can_dispatch_fri_fold(
+        &self,
+        output: &WebGpuBuffer<BabyBearElem>,
+        input: &WebGpuBuffer<BabyBearElem>,
+    ) -> bool {
+        let count = output.size() / BabyBearExtElem::EXT_SIZE;
+        count == 0
+            || (output.raw_buffer().is_some()
+                && input.raw_buffer().is_some()
+                && self.storage_binding_fits(output)
+                && self.storage_binding_fits(input))
+    }
+
+    fn can_dispatch_hash_fold(&self, io: &WebGpuBuffer<Digest>, output_size: usize) -> bool {
+        self.hash_fold_gpu_enabled.get()
+            && (output_size == 0
+                || (self.poseidon2.is_some()
+                    && io.raw_buffer().is_some()
+                    && self.storage_binding_fits(io)))
+    }
+
+    fn can_dispatch_hash_rows(
+        &self,
+        output: &WebGpuBuffer<Digest>,
+        matrix: &WebGpuBuffer<BabyBearElem>,
+        row_size: usize,
+    ) -> bool {
+        self.hash_rows_gpu_enabled.get()
+            && (row_size == 0
+                || (self.poseidon2.is_some()
+                    && output.raw_buffer().is_some()
+                    && matrix.raw_buffer().is_some()
+                    && self.storage_binding_fits(output)
+                    && self.storage_binding_fits(matrix)))
+    }
+
+    fn can_dispatch_gather_sample(
+        &self,
+        dst: &WebGpuBuffer<BabyBearElem>,
+        src: &WebGpuBuffer<BabyBearElem>,
+        idx: usize,
+        size: usize,
+        stride: usize,
+    ) -> bool {
+        if size == 0 {
+            return true;
+        }
+        let (Some(dst_gpu), Some(src_gpu)) = (dst.raw_buffer(), src.raw_buffer()) else {
+            return false;
+        };
+        size <= dst.size()
+            && gather_region_in_bounds(src.size(), idx, size, stride)
+            && dst_gpu != src_gpu
+            && self.storage_binding_fits(dst)
+            && self.storage_binding_fits(src)
+    }
+
+    /// Async-safe variant of [`Hal::batch_interpolate_ntt`] for GPU-authoritative
+    /// proof stages. If the WebGPU dispatch would fall back to CPU, make the
+    /// CPU shadow current before running the synchronous HAL method.
+    pub(crate) async fn batch_interpolate_ntt_async(
+        &self,
+        io: &WebGpuBuffer<BabyBearElem>,
+        count: usize,
+    ) -> Result<()> {
+        if !self.gpu_authoritative() || !self.can_dispatch_batch_interpolate_ntt(io) {
+            io.sync_gpu_to_cpu(self).await?;
+        }
+        self.batch_interpolate_ntt(io, count);
+        Ok(())
+    }
+
+    /// Async-safe variant of [`Hal::zk_shift`].
+    pub(crate) async fn zk_shift_async(
+        &self,
+        io: &WebGpuBuffer<BabyBearElem>,
+        count: usize,
+    ) -> Result<()> {
+        if !self.gpu_authoritative() || !self.can_dispatch_zk_shift(io) {
+            io.sync_gpu_to_cpu(self).await?;
+        }
+        self.zk_shift(io, count);
+        Ok(())
+    }
+
+    /// Async-safe variant of [`Hal::batch_bit_reverse`].
+    pub(crate) async fn batch_bit_reverse_async(
+        &self,
+        io: &WebGpuBuffer<BabyBearElem>,
+        count: usize,
+    ) -> Result<()> {
+        if !self.gpu_authoritative() || !self.can_dispatch_batch_bit_reverse(io) {
+            io.sync_gpu_to_cpu(self).await?;
+        }
+        self.batch_bit_reverse(io, count);
+        Ok(())
+    }
+
+    /// Async-safe variant of [`Hal::batch_expand_into_evaluate_ntt`].
+    pub(crate) async fn batch_expand_into_evaluate_ntt_async(
+        &self,
+        output: &WebGpuBuffer<BabyBearElem>,
+        input: &WebGpuBuffer<BabyBearElem>,
+        count: usize,
+        expand_bits: usize,
+    ) -> Result<()> {
+        if !self.gpu_authoritative()
+            || !self.can_dispatch_batch_expand_into_evaluate_ntt(output, input)
+        {
+            input.sync_gpu_to_cpu(self).await?;
+        }
+        self.batch_expand_into_evaluate_ntt(output, input, count, expand_bits);
+        Ok(())
+    }
+
+    /// Async-safe variant of [`Hal::batch_evaluate_any`].
+    pub(crate) async fn batch_evaluate_any_async(
+        &self,
+        coeffs: &WebGpuBuffer<BabyBearElem>,
+        poly_count: usize,
+        which: &WebGpuBuffer<u32>,
+        xs: &WebGpuBuffer<BabyBearExtElem>,
+        out: &WebGpuBuffer<BabyBearExtElem>,
+    ) -> Result<()> {
+        if !self.gpu_authoritative()
+            || !self.can_dispatch_batch_evaluate_any(out, coeffs, which, xs)
+        {
+            coeffs.sync_gpu_to_cpu(self).await?;
+            which.sync_gpu_to_cpu(self).await?;
+            xs.sync_gpu_to_cpu(self).await?;
+        }
+        self.batch_evaluate_any(coeffs, poly_count, which, xs, out);
+        Ok(())
+    }
+
+    /// Async-safe variant of [`Hal::mix_poly_coeffs`].
+    ///
+    /// Unlike most HAL operations, `mix_poly_coeffs` accumulates into `out`
+    /// across several calls. In GPU-authoritative proving a later call can
+    /// legitimately fall back to CPU after an earlier call wrote `out` on the
+    /// GPU, so the fallback path must first materialize the accumulated GPU
+    /// contents into the CPU shadow.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn mix_poly_coeffs_async(
+        &self,
+        out: &WebGpuBuffer<BabyBearExtElem>,
+        mix_start: &BabyBearExtElem,
+        mix: &BabyBearExtElem,
+        input: &WebGpuBuffer<BabyBearElem>,
+        combos: &WebGpuBuffer<u32>,
+        input_size: usize,
+        count: usize,
+    ) -> Result<()> {
+        if !self.gpu_authoritative() {
+            out.sync_gpu_to_cpu(self).await?;
+            input.sync_gpu_to_cpu(self).await?;
+            combos.sync_gpu_to_cpu(self).await?;
+        }
+        let gpu_mixed = self.dispatch_mix_poly_coeffs_inner(
+            out, mix_start, mix, input, combos, input_size, count, true,
+        )?;
+        if self.gpu_authoritative() {
+            if gpu_mixed {
+                self.record_gpu_result_authoritative("mix_poly_coeffs", true);
+                out.mark_gpu_dirty();
+            } else {
+                out.sync_gpu_to_cpu(self).await?;
+                input.sync_gpu_to_cpu(self).await?;
+                combos.sync_gpu_to_cpu(self).await?;
+                self.cpu.mix_poly_coeffs(
+                    out.cpu(),
+                    mix_start,
+                    mix,
+                    input.cpu(),
+                    combos.cpu(),
+                    input_size,
+                    count,
+                );
+                self.record_gpu_result_authoritative("mix_poly_coeffs", false);
+                out.mark_cpu_result(false);
+            }
+        } else {
+            self.finish_hal_op("mix_poly_coeffs", gpu_mixed, out, || {
+                self.cpu.mix_poly_coeffs(
+                    out.cpu(),
+                    mix_start,
+                    mix,
+                    input.cpu(),
+                    combos.cpu(),
+                    input_size,
+                    count,
+                );
+            });
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn combos_prepare_async(
+        &self,
+        combos: &WebGpuBuffer<BabyBearExtElem>,
+        coeff_u: &[BabyBearExtElem],
+        combo_count: usize,
+        cycles: usize,
+        reg_sizes: &[u32],
+        reg_combo_ids: &[u32],
+        mix: &BabyBearExtElem,
+    ) -> Result<()> {
+        if !self.gpu_authoritative() {
+            combos.sync_gpu_to_cpu(self).await?;
+        }
+        let gpu_prepared = self.dispatch_combos_prepare(
+            combos,
+            coeff_u,
+            combo_count,
+            cycles,
+            reg_sizes,
+            reg_combo_ids,
+            mix,
+        )?;
+        if self.gpu_authoritative() {
+            if gpu_prepared {
+                self.record_gpu_result_authoritative("combos_prepare", true);
+                combos.mark_gpu_dirty();
+            } else {
+                combos.sync_gpu_to_cpu(self).await?;
+                self.cpu.combos_prepare(
+                    combos.cpu(),
+                    coeff_u,
+                    combo_count,
+                    cycles,
+                    reg_sizes,
+                    reg_combo_ids,
+                    mix,
+                );
+                self.record_gpu_result_authoritative("combos_prepare", false);
+                combos.mark_cpu_result(false);
+            }
+        } else {
+            self.finish_hal_op("combos_prepare", gpu_prepared, combos, || {
+                self.cpu.combos_prepare(
+                    combos.cpu(),
+                    coeff_u,
+                    combo_count,
+                    cycles,
+                    reg_sizes,
+                    reg_combo_ids,
+                    mix,
+                );
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn combos_divide_async(
+        &self,
+        combos: &WebGpuBuffer<BabyBearExtElem>,
+        chunks: Vec<(usize, Vec<BabyBearExtElem>)>,
+        cycles: usize,
+    ) -> Result<()> {
+        if !self.gpu_authoritative() {
+            combos.sync_gpu_to_cpu(self).await?;
+        }
+        let gpu_divided = self.dispatch_combos_divide(combos, &chunks, cycles)?;
+        if self.gpu_authoritative() {
+            if gpu_divided {
+                self.record_gpu_result_authoritative("combos_divide", true);
+                combos.mark_gpu_dirty();
+            } else {
+                combos.sync_gpu_to_cpu(self).await?;
+                self.cpu.combos_divide(combos.cpu(), chunks, cycles);
+                self.record_gpu_result_authoritative("combos_divide", false);
+                combos.mark_cpu_result(false);
+            }
+        } else {
+            self.finish_hal_op("combos_divide", gpu_divided, combos, || {
+                self.cpu.combos_divide(combos.cpu(), chunks, cycles);
+            });
+        }
+        Ok(())
+    }
+
+    /// Async-safe variant of [`Hal::eltwise_sum_extelem`].
+    pub(crate) async fn eltwise_sum_extelem_async(
+        &self,
+        output: &WebGpuBuffer<BabyBearElem>,
+        input: &WebGpuBuffer<BabyBearExtElem>,
+    ) -> Result<()> {
+        if !self.gpu_authoritative() || !self.can_dispatch_eltwise_sum_extelem(output, input) {
+            input.sync_gpu_to_cpu(self).await?;
+        }
+        self.eltwise_sum_extelem(output, input);
+        Ok(())
+    }
+
+    /// Async-safe variant of [`Hal::fri_fold`].
+    pub(crate) async fn fri_fold_async(
+        &self,
+        output: &WebGpuBuffer<BabyBearElem>,
+        input: &WebGpuBuffer<BabyBearElem>,
+        mix: &BabyBearExtElem,
+    ) -> Result<()> {
+        if !self.gpu_authoritative() || !self.can_dispatch_fri_fold(output, input) {
+            input.sync_gpu_to_cpu(self).await?;
+        }
+        self.fri_fold(output, input, mix);
+        Ok(())
+    }
+
+    /// Async-safe variant of [`Hal::hash_fold`].
+    pub(crate) async fn hash_fold_async(
+        &self,
+        io: &WebGpuBuffer<Digest>,
+        input_size: usize,
+        output_size: usize,
+    ) -> Result<()> {
+        if !self.gpu_authoritative() || !self.can_dispatch_hash_fold(io, output_size) {
+            io.sync_gpu_to_cpu(self).await?;
+        }
+        self.hash_fold(io, input_size, output_size);
+        Ok(())
+    }
+
+    /// Async-safe variant of [`Hal::hash_rows`].
+    pub(crate) async fn hash_rows_async(
+        &self,
+        output: &WebGpuBuffer<Digest>,
+        matrix: &WebGpuBuffer<BabyBearElem>,
+    ) -> Result<()> {
+        let row_size = output.size();
+        if !self.gpu_authoritative() || !self.can_dispatch_hash_rows(output, matrix, row_size) {
+            matrix.sync_gpu_to_cpu(self).await?;
+        }
+        self.hash_rows(output, matrix);
+        Ok(())
+    }
+
+    /// Async-safe variant of [`Hal::gather_sample`].
+    pub(crate) async fn gather_sample_async(
+        &self,
+        dst: &WebGpuBuffer<BabyBearElem>,
+        src: &WebGpuBuffer<BabyBearElem>,
+        idx: usize,
+        size: usize,
+        stride: usize,
+    ) -> Result<()> {
+        if !self.gpu_authoritative()
+            || !self.can_dispatch_gather_sample(dst, src, idx, size, stride)
+        {
+            src.sync_gpu_to_cpu(self).await?;
+        }
+        self.gather_sample(dst, src, idx, size, stride);
+        Ok(())
+    }
+
+    /// Test hook for validating chunked gather bindings without changing the
+    /// normal proving path.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn debug_dispatch_gather_sample_chunked(
+        &self,
+        dst: &WebGpuBuffer<BabyBearElem>,
+        src: &WebGpuBuffer<BabyBearElem>,
+        idx: usize,
+        size: usize,
+        stride: usize,
+        chunk_cols: usize,
+    ) -> Result<()> {
+        if size == 0 {
+            return Ok(());
+        }
+        ensure!(chunk_cols > 0, "WebGPU gather chunk size must be nonzero");
+        ensure!(
+            size <= dst.size() && gather_region_in_bounds(src.size(), idx, size, stride),
+            "WebGPU gather chunk test region is out of bounds"
+        );
+
+        let (Some(dst_gpu), Some(src_gpu)) = (dst.raw_buffer(), src.raw_buffer()) else {
+            return Err(anyhow!("WebGPU gather chunk test requires GPU buffers"));
+        };
+        ensure!(
+            dst_gpu != src_gpu,
+            "WebGPU gather chunk test aliases buffers"
+        );
+
+        src.sync_cpu_to_gpu(self)?;
+        dst.sync_cpu_to_gpu(self)?;
+        self.dispatch_gather_sample_chunked(
+            dst, src, dst_gpu, src_gpu, idx, size, stride, chunk_cols,
+        )?;
+        dst.mark_gpu_dirty();
+        Ok(())
+    }
+
+    /// Test hook for validating `mix_poly_coeffs` under GPU-authoritative state
+    /// without enabling that path in production proving.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn debug_dispatch_mix_poly_coeffs_authoritative(
+        &self,
+        output: &WebGpuBuffer<BabyBearExtElem>,
+        mix_start: &BabyBearExtElem,
+        mix: &BabyBearExtElem,
+        input: &WebGpuBuffer<BabyBearElem>,
+        combos: &WebGpuBuffer<u32>,
+        input_size: usize,
+        count: usize,
+    ) -> Result<bool> {
+        self.dispatch_mix_poly_coeffs_inner(
+            output, mix_start, mix, input, combos, input_size, count, true,
+        )
+    }
+
     fn alloc_shadowed_buffer<T>(&self, name: &'static str, cpu: CpuBuffer<T>) -> WebGpuBuffer<T>
     where
         T: Clone,
     {
         let byte_len = byte_len_for::<T>(cpu.size());
-        let gpu = if byte_len == 0 {
+        let gpu = if byte_len == 0 || !self.can_allocate_gpu_buffer(byte_len) {
             None
         } else {
             Some(
@@ -1831,7 +5742,12 @@ impl WebGpuHal {
                     .unwrap_or_else(|err| panic!("failed to allocate WebGPU buffer {name}: {err}")),
             )
         };
-        WebGpuBuffer::new(cpu, gpu, Rc::new(Cell::new(true)))
+        WebGpuBuffer::new(
+            cpu,
+            gpu,
+            Rc::new(Cell::new(true)),
+            Rc::new(Cell::new(false)),
+        )
     }
 
     fn copy_shadowed_buffer<T>(
@@ -1848,7 +5764,7 @@ impl WebGpuHal {
             self.write_buffer(gpu, 0, bytemuck::cast_slice(slice))
                 .unwrap_or_else(|err| panic!("failed to upload WebGPU buffer {name}: {err}"));
         }
-        buffer.cpu_dirty.set(false);
+        buffer.mark_synced();
         buffer
     }
 
@@ -2017,6 +5933,33 @@ impl WebGpuHal {
         self.submit(encoder.finish());
     }
 
+    /// Dispatch a logical 1D kernel, spilling workgroups into `y` when the
+    /// `x` dimension would exceed WebGPU's portable per-dimension limit.
+    pub fn dispatch_compute_1d(
+        &self,
+        kernel: &WebGpuKernel,
+        bind_group: &web_sys::GpuBindGroup,
+        workgroups: u32,
+    ) {
+        if workgroups <= WEBGPU_MAX_WORKGROUPS_PER_DIMENSION {
+            self.dispatch_compute(kernel, bind_group, workgroups, 1, 1);
+            return;
+        }
+
+        let workgroups_y = workgroups.div_ceil(WEBGPU_MAX_WORKGROUPS_PER_DIMENSION);
+        assert!(
+            workgroups_y <= WEBGPU_MAX_WORKGROUPS_PER_DIMENSION,
+            "WebGPU 1D dispatch exceeds portable 2D workgroup capacity"
+        );
+        self.dispatch_compute(
+            kernel,
+            bind_group,
+            WEBGPU_MAX_WORKGROUPS_PER_DIMENSION,
+            workgroups_y,
+            1,
+        );
+    }
+
     /// Submit a finished command buffer to the WebGPU queue.
     pub fn submit(&self, command_buffer: web_sys::GpuCommandBuffer) {
         let commands = js_sys::Array::new();
@@ -2075,6 +6018,16 @@ impl WebGpuHal {
 
     /// Copy a GPU buffer into WASM memory.
     pub async fn read_buffer(&self, source: &web_sys::GpuBuffer, byte_len: u64) -> Result<Vec<u8>> {
+        self.read_buffer_range(source, 0, byte_len).await
+    }
+
+    /// Copy a byte range from a GPU buffer into WASM memory.
+    pub async fn read_buffer_range(
+        &self,
+        source: &web_sys::GpuBuffer,
+        source_offset: u64,
+        byte_len: u64,
+    ) -> Result<Vec<u8>> {
         let readback = self.create_buffer(
             "webgpu_readback",
             byte_len,
@@ -2082,9 +6035,16 @@ impl WebGpuHal {
         )?;
 
         let encoder = self.device.create_command_encoder();
+        let source_offset = byte_offset_as_f64(source_offset)?;
         let byte_len = byte_len_as_f64(byte_len)?;
         encoder
-            .copy_buffer_to_buffer_with_f64_and_f64_and_f64(source, 0.0, &readback, 0.0, byte_len)
+            .copy_buffer_to_buffer_with_f64_and_f64_and_f64(
+                source,
+                source_offset,
+                &readback,
+                0.0,
+                byte_len,
+            )
             .map_err(js_error)?;
         self.submit(encoder.finish());
 
@@ -2138,8 +6098,8 @@ impl WebGpuHal {
         )?;
         let workgroups = u32::try_from(elems.size())
             .expect("WebGPU zeroize element count exceeds u32")
-            .div_ceil(256);
-        self.dispatch_compute(&kernel, &bind_group, workgroups, 1, 1);
+            .div_ceil(WEBGPU_WORKGROUP_SIZE);
+        self.dispatch_compute_1d(&kernel, &bind_group, workgroups);
         Ok(true)
     }
 
@@ -2215,8 +6175,8 @@ impl WebGpuHal {
         )?;
         let workgroups = u32::try_from(output.size())
             .expect("WebGPU element count exceeds u32")
-            .div_ceil(256);
-        self.dispatch_compute(&kernel, &bind_group, workgroups, 1, 1);
+            .div_ceil(WEBGPU_WORKGROUP_SIZE);
+        self.dispatch_compute_1d(&kernel, &bind_group, workgroups);
         Ok(true)
     }
 
@@ -2238,6 +6198,9 @@ impl WebGpuHal {
         let (Some(output_gpu), Some(input_gpu)) = (output.raw_buffer(), input.raw_buffer()) else {
             return Ok(false);
         };
+        if !self.storage_binding_fits(output) || !self.storage_binding_fits(input) {
+            return Ok(false);
+        }
 
         input.sync_cpu_to_gpu(self)?;
 
@@ -2536,6 +6499,9 @@ impl WebGpuHal {
         if dst_gpu == src_gpu {
             return Ok(false);
         }
+        if !self.storage_binding_fits(dst) || !self.storage_binding_fits(src) {
+            return Ok(false);
+        }
 
         src.sync_cpu_to_gpu(self)?;
         dst.sync_cpu_to_gpu(self)?;
@@ -2588,6 +6554,114 @@ impl WebGpuHal {
         Ok(true)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_gather_sample_chunked(
+        &self,
+        dst: &WebGpuBuffer<BabyBearElem>,
+        src: &WebGpuBuffer<BabyBearElem>,
+        dst_gpu: &web_sys::GpuBuffer,
+        src_gpu: &web_sys::GpuBuffer,
+        idx: usize,
+        size: usize,
+        stride: usize,
+        chunk_cols: usize,
+    ) -> Result<()> {
+        let layout = self.create_bind_group_layout(
+            "webgpu_gather_sample_layout",
+            &[
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::read_only_storage(1, 0),
+                WebGpuBindingLayout::uniform(2, 32),
+            ],
+        )?;
+        let kernel = self.create_compute_kernel(
+            "webgpu_gather_sample",
+            GATHER_SAMPLE_ELEM_WGSL,
+            "main",
+            &[layout.clone()],
+        )?;
+
+        let mut params_buffers = Vec::new();
+        let mut bind_groups = Vec::new();
+        for col_start in (0..size).step_by(chunk_cols) {
+            let cols = chunk_cols.min(size - col_start);
+            let src_elem_offset = src
+                .elem_offset
+                .checked_add(
+                    col_start
+                        .checked_mul(stride)
+                        .ok_or_else(|| anyhow!("WebGPU gather chunk offset overflow"))?,
+                )
+                .ok_or_else(|| anyhow!("WebGPU gather chunk offset overflow"))?;
+            let src_byte_offset = byte_len_for::<BabyBearElem>(src_elem_offset);
+            let src_binding_offset = src_byte_offset / WEBGPU_STORAGE_BUFFER_OFFSET_ALIGNMENT
+                * WEBGPU_STORAGE_BUFFER_OFFSET_ALIGNMENT;
+            let src_binding_base_bytes = src_byte_offset - src_binding_offset;
+            let src_binding_base_elems =
+                usize::try_from(src_binding_base_bytes / mem::size_of::<BabyBearElem>() as u64)
+                    .expect("WebGPU gather chunk binding offset exceeds usize");
+            let src_chunk_elems = cols
+                .checked_sub(1)
+                .and_then(|last_col| last_col.checked_mul(stride))
+                .and_then(|last_col_start| last_col_start.checked_add(idx))
+                .and_then(|last_idx| last_idx.checked_add(1))
+                .ok_or_else(|| anyhow!("WebGPU gather chunk size overflow"))?;
+            let src_chunk_bytes = src_binding_base_bytes
+                .checked_add(byte_len_for::<BabyBearElem>(src_chunk_elems))
+                .ok_or_else(|| anyhow!("WebGPU gather chunk binding size overflow"))?;
+            ensure!(
+                src_chunk_bytes <= WEBGPU_SAFE_STORAGE_BINDING_BYTES,
+                "WebGPU gather chunk binding size exceeds safe WebGPU storage binding limit"
+            );
+
+            let params = [
+                u32::try_from(dst.elem_offset + col_start)
+                    .expect("WebGPU gather dst offset exceeds u32"),
+                u32::try_from(src_binding_base_elems)
+                    .expect("WebGPU gather source base exceeds u32"),
+                u32::try_from(idx).expect("WebGPU gather idx exceeds u32"),
+                u32::try_from(cols).expect("WebGPU gather chunk size exceeds u32"),
+                u32::try_from(stride).expect("WebGPU gather stride exceeds u32"),
+                0,
+                0,
+                0,
+            ];
+            let params = self.create_uniform_buffer(
+                "webgpu_gather_sample_params",
+                bytemuck::cast_slice(&params),
+            )?;
+            let bind_group = self.create_bind_group(
+                "webgpu_gather_sample_bind_group",
+                &layout,
+                &[
+                    WebGpuBufferBinding::new(0, dst_gpu),
+                    WebGpuBufferBinding {
+                        binding: 1,
+                        buffer: src_gpu,
+                        offset: src_binding_offset,
+                        size: Some(src_chunk_bytes),
+                    },
+                    WebGpuBufferBinding {
+                        binding: 2,
+                        buffer: &params,
+                        offset: 0,
+                        size: Some(32),
+                    },
+                ],
+            )?;
+            let workgroups = u32::try_from(cols)
+                .expect("WebGPU gather chunk size exceeds u32")
+                .div_ceil(WEBGPU_WORKGROUP_SIZE);
+            self.dispatch_compute(&kernel, &bind_group, workgroups, 1, 1);
+            params_buffers.push(params);
+            bind_groups.push(bind_group);
+        }
+
+        drop(bind_groups);
+        drop(params_buffers);
+        Ok(())
+    }
+
     fn dispatch_prefix_products(&self, io: &WebGpuBuffer<BabyBearExtElem>) -> Result<bool> {
         if io.size() == 0 {
             return Ok(true);
@@ -2637,6 +6711,9 @@ impl WebGpuHal {
         let (Some(output_gpu), Some(input_gpu)) = (output.raw_buffer(), input.raw_buffer()) else {
             return Ok(false);
         };
+        if !self.storage_binding_fits(output) || !self.storage_binding_fits(input) {
+            return Ok(false);
+        }
 
         let mix = mix.subelems();
         let params = [
@@ -2663,8 +6740,12 @@ impl WebGpuHal {
                 WebGpuBindingLayout::uniform(2, 32),
             ],
         )?;
-        let kernel =
-            self.create_compute_kernel("webgpu_fri_fold", FRI_FOLD_WGSL, "main", &[layout.clone()])?;
+        let kernel = self.create_compute_kernel(
+            "webgpu_fri_fold",
+            FRI_FOLD_WGSL,
+            "main",
+            &[layout.clone()],
+        )?;
         let bind_group = self.create_bind_group(
             "webgpu_fri_fold_bind_group",
             &layout,
@@ -2687,6 +6768,9 @@ impl WebGpuHal {
     }
 
     fn dispatch_zk_shift(&self, io: &WebGpuBuffer<BabyBearElem>, bits: usize) -> Result<bool> {
+        if !self.zk_shift_gpu_enabled.get() {
+            return Ok(false);
+        }
         if io.size() == 0 {
             return Ok(true);
         }
@@ -2694,6 +6778,9 @@ impl WebGpuHal {
         let Some(io_gpu) = io.raw_buffer() else {
             return Ok(false);
         };
+        if !self.storage_binding_fits(io) {
+            return Ok(false);
+        }
 
         let params = [
             u32::try_from(io.size()).expect("WebGPU zk_shift count exceeds u32"),
@@ -2713,8 +6800,12 @@ impl WebGpuHal {
                 WebGpuBindingLayout::uniform(1, 16),
             ],
         )?;
-        let kernel =
-            self.create_compute_kernel("webgpu_zk_shift", ZK_SHIFT_WGSL, "main", &[layout.clone()])?;
+        let kernel = self.create_compute_kernel(
+            "webgpu_zk_shift",
+            ZK_SHIFT_WGSL,
+            "main",
+            &[layout.clone()],
+        )?;
         let bind_group = self.create_bind_group(
             "webgpu_zk_shift_bind_group",
             &layout,
@@ -2731,7 +6822,7 @@ impl WebGpuHal {
         let workgroups = u32::try_from(io.size())
             .expect("WebGPU zk_shift count exceeds u32")
             .div_ceil(256);
-        self.dispatch_compute(&kernel, &bind_group, workgroups, 1, 1);
+        self.dispatch_compute_1d(&kernel, &bind_group, workgroups);
         Ok(true)
     }
 
@@ -2746,8 +6837,28 @@ impl WebGpuHal {
         input_size: usize,
         count: usize,
     ) -> Result<bool> {
+        self.dispatch_mix_poly_coeffs_inner(
+            output, mix_start, mix, input, combos, input_size, count, false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_mix_poly_coeffs_inner(
+        &self,
+        output: &WebGpuBuffer<BabyBearExtElem>,
+        mix_start: &BabyBearExtElem,
+        mix: &BabyBearExtElem,
+        input: &WebGpuBuffer<BabyBearElem>,
+        combos: &WebGpuBuffer<u32>,
+        input_size: usize,
+        count: usize,
+        allow_gpu_authoritative: bool,
+    ) -> Result<bool> {
         if count == 0 {
             return Ok(true);
+        }
+        if self.gpu_authoritative() && !allow_gpu_authoritative {
+            return Ok(false);
         }
 
         let (Some(output_gpu), Some(input_gpu), Some(combos_gpu)) =
@@ -2755,6 +6866,12 @@ impl WebGpuHal {
         else {
             return Ok(false);
         };
+        if !self.storage_binding_fits(output)
+            || !self.storage_binding_fits(input)
+            || !self.storage_binding_fits(combos)
+        {
+            return Ok(false);
+        }
 
         let Some(output_base) = output
             .elem_offset
@@ -2831,6 +6948,293 @@ impl WebGpuHal {
         Ok(true)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_combos_prepare(
+        &self,
+        combos: &WebGpuBuffer<BabyBearExtElem>,
+        coeff_u: &[BabyBearExtElem],
+        combo_count: usize,
+        cycles: usize,
+        reg_sizes: &[u32],
+        reg_combo_ids: &[u32],
+        mix: &BabyBearExtElem,
+    ) -> Result<bool> {
+        if reg_sizes.len() != reg_combo_ids.len() {
+            return Ok(false);
+        }
+        let total_reg_coeffs = reg_sizes
+            .iter()
+            .try_fold(0usize, |acc, size| acc.checked_add(*size as usize))
+            .ok_or_else(|| anyhow!("WebGPU combos_prepare register size overflow"))?;
+        ensure!(
+            coeff_u.len() == total_reg_coeffs + <Self as Hal>::CHECK_SIZE,
+            "WebGPU combos_prepare coeff_u length mismatch: got {}, expected {}",
+            coeff_u.len(),
+            total_reg_coeffs + <Self as Hal>::CHECK_SIZE
+        );
+        if combos.size() == 0 {
+            return Ok(true);
+        }
+
+        let Some(combos_gpu) = combos.raw_buffer() else {
+            return Ok(false);
+        };
+        if !self.storage_binding_fits(combos) {
+            return Ok(false);
+        }
+
+        let coeff_u = self.copy_from_extelem("webgpu_combos_prepare_coeff_u", coeff_u);
+        let reg_sizes = self.copy_from_u32("webgpu_combos_prepare_reg_sizes", reg_sizes);
+        let reg_combo_ids =
+            self.copy_from_u32("webgpu_combos_prepare_reg_combo_ids", reg_combo_ids);
+
+        let mut mix_pows = Vec::with_capacity(reg_sizes.size() + <Self as Hal>::CHECK_SIZE);
+        let mut cur = BabyBearExtElem::ONE;
+        for _ in 0..reg_sizes.size() {
+            mix_pows.push(cur);
+            cur *= *mix;
+        }
+        for _ in 0..<Self as Hal>::CHECK_SIZE {
+            mix_pows.push(cur);
+            cur *= *mix;
+        }
+        let mix_pows = self.copy_from_extelem("webgpu_combos_prepare_mix_pows", &mix_pows);
+
+        let (Some(coeff_u_gpu), Some(reg_sizes_gpu), Some(reg_combo_ids_gpu), Some(mix_pows_gpu)) = (
+            coeff_u.raw_buffer(),
+            reg_sizes.raw_buffer(),
+            reg_combo_ids.raw_buffer(),
+            mix_pows.raw_buffer(),
+        ) else {
+            return Ok(false);
+        };
+        if !self.storage_binding_fits(&coeff_u)
+            || !self.storage_binding_fits(&reg_sizes)
+            || !self.storage_binding_fits(&reg_combo_ids)
+            || !self.storage_binding_fits(&mix_pows)
+        {
+            return Ok(false);
+        }
+
+        let combos_base = combos
+            .elem_offset
+            .checked_mul(BabyBearExtElem::EXT_SIZE)
+            .and_then(|offset| u32::try_from(offset).ok())
+            .ok_or_else(|| anyhow!("WebGPU combos_prepare combos offset exceeds u32"))?;
+        let coeff_u_base = coeff_u
+            .elem_offset
+            .checked_mul(BabyBearExtElem::EXT_SIZE)
+            .and_then(|offset| u32::try_from(offset).ok())
+            .ok_or_else(|| anyhow!("WebGPU combos_prepare coeff_u offset exceeds u32"))?;
+        let mix_pows_base = mix_pows
+            .elem_offset
+            .checked_mul(BabyBearExtElem::EXT_SIZE)
+            .and_then(|offset| u32::try_from(offset).ok())
+            .ok_or_else(|| anyhow!("WebGPU combos_prepare mix_pows offset exceeds u32"))?;
+        let params = [
+            u32::try_from(total_reg_coeffs)
+                .expect("WebGPU combos_prepare total_reg_coeffs exceeds u32"),
+            u32::try_from(combo_count).expect("WebGPU combos_prepare combo_count exceeds u32"),
+            u32::try_from(cycles).expect("WebGPU combos_prepare cycles exceeds u32"),
+            u32::try_from(reg_sizes.size()).expect("WebGPU combos_prepare regs_count exceeds u32"),
+            combos_base,
+            coeff_u_base,
+            u32::try_from(reg_sizes.elem_offset)
+                .expect("WebGPU combos_prepare reg_sizes offset exceeds u32"),
+            u32::try_from(reg_combo_ids.elem_offset)
+                .expect("WebGPU combos_prepare reg_combo_ids offset exceeds u32"),
+            mix_pows_base,
+            u32::try_from(<Self as Hal>::CHECK_SIZE)
+                .expect("WebGPU combos_prepare check size exceeds u32"),
+            0,
+            0,
+        ];
+        let params = self.create_uniform_buffer(
+            "webgpu_combos_prepare_params",
+            bytemuck::cast_slice(&params),
+        )?;
+
+        combos.sync_cpu_to_gpu(self)?;
+        coeff_u.sync_cpu_to_gpu(self)?;
+        reg_sizes.sync_cpu_to_gpu(self)?;
+        reg_combo_ids.sync_cpu_to_gpu(self)?;
+        mix_pows.sync_cpu_to_gpu(self)?;
+
+        let layout = self.create_bind_group_layout(
+            "webgpu_combos_prepare_layout",
+            &[
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::read_only_storage(1, 0),
+                WebGpuBindingLayout::read_only_storage(2, 0),
+                WebGpuBindingLayout::read_only_storage(3, 0),
+                WebGpuBindingLayout::read_only_storage(4, 0),
+                WebGpuBindingLayout::uniform(5, 48),
+            ],
+        )?;
+        let kernel = self.create_compute_kernel(
+            "webgpu_combos_prepare",
+            COMBOS_PREPARE_WGSL,
+            "main",
+            &[layout.clone()],
+        )?;
+        let bind_group = self.create_bind_group(
+            "webgpu_combos_prepare_bind_group",
+            &layout,
+            &[
+                WebGpuBufferBinding::new(0, combos_gpu),
+                WebGpuBufferBinding::new(1, coeff_u_gpu),
+                WebGpuBufferBinding::new(2, reg_sizes_gpu),
+                WebGpuBufferBinding::new(3, reg_combo_ids_gpu),
+                WebGpuBufferBinding::new(4, mix_pows_gpu),
+                WebGpuBufferBinding {
+                    binding: 5,
+                    buffer: &params,
+                    offset: 0,
+                    size: Some(48),
+                },
+            ],
+        )?;
+        let work_items = u32::try_from(total_reg_coeffs + 1)
+            .expect("WebGPU combos_prepare work item count exceeds u32");
+        self.dispatch_compute(
+            &kernel,
+            &bind_group,
+            work_items.div_ceil(WEBGPU_WORKGROUP_SIZE),
+            1,
+            1,
+        );
+        Ok(true)
+    }
+
+    fn dispatch_combos_divide(
+        &self,
+        combos: &WebGpuBuffer<BabyBearExtElem>,
+        chunks: &[(usize, Vec<BabyBearExtElem>)],
+        cycles: usize,
+    ) -> Result<bool> {
+        if chunks.is_empty() || cycles == 0 {
+            return Ok(true);
+        }
+
+        let Some(combos_gpu) = combos.raw_buffer() else {
+            return Ok(false);
+        };
+        if !self.storage_binding_fits(combos) {
+            return Ok(false);
+        }
+
+        let mut chunk_indices = Vec::with_capacity(chunks.len());
+        let mut chunk_offsets = Vec::with_capacity(chunks.len() + 1);
+        let mut pows = Vec::new();
+        chunk_offsets.push(0u32);
+        for (combo_idx, chunk_pows) in chunks {
+            ensure!(
+                combo_idx
+                    .checked_mul(cycles)
+                    .and_then(|start| start.checked_add(cycles))
+                    .is_some_and(|end| end <= combos.size()),
+                "WebGPU combos_divide combo index {combo_idx} is out of range"
+            );
+            chunk_indices.push(
+                u32::try_from(*combo_idx).expect("WebGPU combos_divide combo index exceeds u32"),
+            );
+            pows.extend(chunk_pows.iter().copied());
+            chunk_offsets.push(
+                u32::try_from(pows.len()).expect("WebGPU combos_divide pow count exceeds u32"),
+            );
+        }
+
+        let pows = self.copy_from_extelem("webgpu_combos_divide_pows", &pows);
+        let chunk_indices =
+            self.copy_from_u32("webgpu_combos_divide_chunk_indices", &chunk_indices);
+        let chunk_offsets =
+            self.copy_from_u32("webgpu_combos_divide_chunk_offsets", &chunk_offsets);
+        let (Some(pows_gpu), Some(chunk_indices_gpu), Some(chunk_offsets_gpu)) = (
+            pows.raw_buffer(),
+            chunk_indices.raw_buffer(),
+            chunk_offsets.raw_buffer(),
+        ) else {
+            return Ok(false);
+        };
+        if !self.storage_binding_fits(&pows)
+            || !self.storage_binding_fits(&chunk_indices)
+            || !self.storage_binding_fits(&chunk_offsets)
+        {
+            return Ok(false);
+        }
+
+        let combos_base = combos
+            .elem_offset
+            .checked_mul(BabyBearExtElem::EXT_SIZE)
+            .and_then(|offset| u32::try_from(offset).ok())
+            .ok_or_else(|| anyhow!("WebGPU combos_divide combos offset exceeds u32"))?;
+        let pows_base = pows
+            .elem_offset
+            .checked_mul(BabyBearExtElem::EXT_SIZE)
+            .and_then(|offset| u32::try_from(offset).ok())
+            .ok_or_else(|| anyhow!("WebGPU combos_divide pows offset exceeds u32"))?;
+        let params = [
+            u32::try_from(chunks.len()).expect("WebGPU combos_divide chunk count exceeds u32"),
+            u32::try_from(cycles).expect("WebGPU combos_divide cycles exceeds u32"),
+            combos_base,
+            pows_base,
+            u32::try_from(chunk_indices.elem_offset)
+                .expect("WebGPU combos_divide chunk index offset exceeds u32"),
+            u32::try_from(chunk_offsets.elem_offset)
+                .expect("WebGPU combos_divide chunk offset offset exceeds u32"),
+            0,
+            0,
+        ];
+        let params = self
+            .create_uniform_buffer("webgpu_combos_divide_params", bytemuck::cast_slice(&params))?;
+
+        combos.sync_cpu_to_gpu(self)?;
+        pows.sync_cpu_to_gpu(self)?;
+        chunk_indices.sync_cpu_to_gpu(self)?;
+        chunk_offsets.sync_cpu_to_gpu(self)?;
+
+        let layout = self.create_bind_group_layout(
+            "webgpu_combos_divide_layout",
+            &[
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::read_only_storage(1, 0),
+                WebGpuBindingLayout::read_only_storage(2, 0),
+                WebGpuBindingLayout::read_only_storage(3, 0),
+                WebGpuBindingLayout::uniform(4, 32),
+            ],
+        )?;
+        let kernel = self.create_compute_kernel(
+            "webgpu_combos_divide",
+            COMBOS_DIVIDE_WGSL,
+            "main",
+            &[layout.clone()],
+        )?;
+        let bind_group = self.create_bind_group(
+            "webgpu_combos_divide_bind_group",
+            &layout,
+            &[
+                WebGpuBufferBinding::new(0, combos_gpu),
+                WebGpuBufferBinding::new(1, pows_gpu),
+                WebGpuBufferBinding::new(2, chunk_indices_gpu),
+                WebGpuBufferBinding::new(3, chunk_offsets_gpu),
+                WebGpuBufferBinding {
+                    binding: 4,
+                    buffer: &params,
+                    offset: 0,
+                    size: Some(32),
+                },
+            ],
+        )?;
+        self.dispatch_compute(
+            &kernel,
+            &bind_group,
+            u32::try_from(chunks.len()).expect("WebGPU combos_divide chunk count exceeds u32"),
+            1,
+            1,
+        );
+        Ok(true)
+    }
+
     fn dispatch_batch_expand_into_evaluate_ntt(
         &self,
         output: &WebGpuBuffer<BabyBearElem>,
@@ -2838,6 +7242,9 @@ impl WebGpuHal {
         count: usize,
         expand_bits: usize,
     ) -> Result<bool> {
+        if !self.batch_expand_into_evaluate_ntt_gpu_enabled.get() {
+            return Ok(false);
+        }
         if output.size() == 0 {
             return Ok(true);
         }
@@ -2846,6 +7253,9 @@ impl WebGpuHal {
             return Ok(false);
         };
         if output_gpu == input_gpu {
+            return Ok(false);
+        }
+        if !self.storage_binding_fits(output) || !self.storage_binding_fits(input) {
             return Ok(false);
         }
 
@@ -2862,15 +7272,16 @@ impl WebGpuHal {
             u32::try_from(output.size()).expect("WebGPU NTT expand total exceeds u32"),
             u32::try_from(out_size).expect("WebGPU NTT expand out_size exceeds u32"),
             u32::try_from(in_size).expect("WebGPU NTT expand in_size exceeds u32"),
-            u32::try_from(actual_expand_bits)
-                .expect("WebGPU NTT expand_bits exceeds u32"),
+            u32::try_from(actual_expand_bits).expect("WebGPU NTT expand_bits exceeds u32"),
             u32::try_from(output.elem_offset).expect("WebGPU NTT output offset exceeds u32"),
             u32::try_from(input.elem_offset).expect("WebGPU NTT input offset exceeds u32"),
             0,
             0,
         ];
-        let expand_params =
-            self.create_uniform_buffer("webgpu_batch_expand_params", bytemuck::cast_slice(&expand_params))?;
+        let expand_params = self.create_uniform_buffer(
+            "webgpu_batch_expand_params",
+            bytemuck::cast_slice(&expand_params),
+        )?;
         let expand_layout = self.create_bind_group_layout(
             "webgpu_batch_expand_layout",
             &[
@@ -2901,8 +7312,8 @@ impl WebGpuHal {
         )?;
         let expand_workgroups = u32::try_from(output.size())
             .expect("WebGPU NTT expand total exceeds u32")
-            .div_ceil(256);
-        self.dispatch_compute(&expand_kernel, &expand_bind_group, expand_workgroups, 1, 1);
+            .div_ceil(WEBGPU_WORKGROUP_SIZE);
+        self.dispatch_compute_1d(&expand_kernel, &expand_bind_group, expand_workgroups);
 
         let row_size = output.size() / count;
         assert_eq!(row_size * count, output.size());
@@ -2950,8 +7361,8 @@ impl WebGpuHal {
                 0,
                 0,
             ];
-            let params =
-                self.create_uniform_buffer("webgpu_ntt_step_params", bytemuck::cast_slice(&params))?;
+            let params = self
+                .create_uniform_buffer("webgpu_ntt_step_params", bytemuck::cast_slice(&params))?;
             let bind_group = self.create_bind_group(
                 "webgpu_ntt_step_bind_group",
                 &ntt_layout,
@@ -2966,7 +7377,7 @@ impl WebGpuHal {
                     },
                 ],
             )?;
-            self.dispatch_compute(&ntt_kernel, &bind_group, workgroups, 1, 1);
+            self.dispatch_compute_1d(&ntt_kernel, &bind_group, workgroups);
         }
         Ok(true)
     }
@@ -2976,6 +7387,9 @@ impl WebGpuHal {
         io: &WebGpuBuffer<BabyBearElem>,
         count: usize,
     ) -> Result<bool> {
+        if !self.batch_interpolate_ntt_gpu_enabled.get() {
+            return Ok(false);
+        }
         if io.size() == 0 {
             return Ok(true);
         }
@@ -2983,6 +7397,9 @@ impl WebGpuHal {
         let Some(io_gpu) = io.raw_buffer() else {
             return Ok(false);
         };
+        if !self.storage_binding_fits(io) {
+            return Ok(false);
+        }
 
         let row_size = io.size() / count;
         assert_eq!(row_size * count, io.size());
@@ -3023,16 +7440,18 @@ impl WebGpuHal {
                     u32::try_from(n_bits).expect("WebGPU inverse NTT n_bits exceeds u32"),
                     u32::try_from(s_bits).expect("WebGPU inverse NTT s_bits exceeds u32"),
                     u32::try_from(count).expect("WebGPU inverse NTT row count exceeds u32"),
-                    u32::try_from(total_pairs)
-                        .expect("WebGPU inverse NTT total pairs exceeds u32"),
-                    u32::try_from(io.elem_offset).expect("WebGPU inverse NTT io offset exceeds u32"),
+                    u32::try_from(total_pairs).expect("WebGPU inverse NTT total pairs exceeds u32"),
+                    u32::try_from(io.elem_offset)
+                        .expect("WebGPU inverse NTT io offset exceeds u32"),
                     u32::try_from(roots.elem_offset)
                         .expect("WebGPU inverse NTT roots offset exceeds u32"),
                     1,
                     0,
                 ];
-                let params = self
-                    .create_uniform_buffer("webgpu_ntt_step_params", bytemuck::cast_slice(&params))?;
+                let params = self.create_uniform_buffer(
+                    "webgpu_ntt_step_params",
+                    bytemuck::cast_slice(&params),
+                )?;
                 let bind_group = self.create_bind_group(
                     "webgpu_ntt_step_bind_group",
                     &ntt_layout,
@@ -3047,7 +7466,7 @@ impl WebGpuHal {
                         },
                     ],
                 )?;
-                self.dispatch_compute(&ntt_kernel, &bind_group, workgroups, 1, 1);
+                self.dispatch_compute_1d(&ntt_kernel, &bind_group, workgroups);
             }
         }
 
@@ -3058,8 +7477,8 @@ impl WebGpuHal {
             norm,
             0,
         ];
-        let params =
-            self.create_uniform_buffer("webgpu_ntt_normalize_params", bytemuck::cast_slice(&params))?;
+        let params = self
+            .create_uniform_buffer("webgpu_ntt_normalize_params", bytemuck::cast_slice(&params))?;
         let layout = self.create_bind_group_layout(
             "webgpu_ntt_normalize_layout",
             &[
@@ -3089,7 +7508,7 @@ impl WebGpuHal {
         let workgroups = u32::try_from(io.size())
             .expect("WebGPU inverse NTT size exceeds u32")
             .div_ceil(256);
-        self.dispatch_compute(&kernel, &bind_group, workgroups, 1, 1);
+        self.dispatch_compute_1d(&kernel, &bind_group, workgroups);
         Ok(true)
     }
 
@@ -3098,6 +7517,9 @@ impl WebGpuHal {
         io: &WebGpuBuffer<BabyBearElem>,
         bits: usize,
     ) -> Result<bool> {
+        if !self.batch_bit_reverse_gpu_enabled.get() {
+            return Ok(false);
+        }
         if io.size() == 0 {
             return Ok(true);
         }
@@ -3105,6 +7527,9 @@ impl WebGpuHal {
         let Some(io_gpu) = io.raw_buffer() else {
             return Ok(false);
         };
+        if !self.storage_binding_fits(io) {
+            return Ok(false);
+        }
 
         let params = [
             u32::try_from(io.size()).expect("WebGPU bit_reverse count exceeds u32"),
@@ -3147,8 +7572,8 @@ impl WebGpuHal {
         )?;
         let workgroups = u32::try_from(io.size())
             .expect("WebGPU bit_reverse count exceeds u32")
-            .div_ceil(256);
-        self.dispatch_compute(&kernel, &bind_group, workgroups, 1, 1);
+            .div_ceil(WEBGPU_WORKGROUP_SIZE);
+        self.dispatch_compute_1d(&kernel, &bind_group, workgroups);
         Ok(true)
     }
 
@@ -3173,6 +7598,13 @@ impl WebGpuHal {
         ) else {
             return Ok(false);
         };
+        if !self.storage_binding_fits(out)
+            || !self.storage_binding_fits(coeffs)
+            || !self.storage_binding_fits(which)
+            || !self.storage_binding_fits(xs)
+        {
+            return Ok(false);
+        }
 
         let Some(output_base) = out
             .elem_offset
@@ -3257,6 +7689,9 @@ impl WebGpuHal {
         input_size: usize,
         output_size: usize,
     ) -> Result<bool> {
+        if !self.hash_fold_gpu_enabled.get() {
+            return Ok(false);
+        }
         let Some(hash) = self.poseidon2.as_ref() else {
             return Ok(false);
         };
@@ -3267,6 +7702,9 @@ impl WebGpuHal {
         let Some(io_gpu) = io.raw_buffer() else {
             return Ok(false);
         };
+        if !self.storage_binding_fits(io) {
+            return Ok(false);
+        }
         let (Some(round_constants_gpu), Some(m_int_diag_gpu)) = (
             hash.round_constants.raw_buffer(),
             hash.m_int_diag.raw_buffer(),
@@ -3286,8 +7724,10 @@ impl WebGpuHal {
             0,
             0,
         ];
-        let params =
-            self.create_uniform_buffer("webgpu_poseidon2_fold_params", bytemuck::cast_slice(&params))?;
+        let params = self.create_uniform_buffer(
+            "webgpu_poseidon2_fold_params",
+            bytemuck::cast_slice(&params),
+        )?;
 
         io.sync_cpu_to_gpu(self)?;
 
@@ -3320,6 +7760,9 @@ impl WebGpuHal {
         row_size: usize,
         col_size: usize,
     ) -> Result<bool> {
+        if !self.hash_rows_gpu_enabled.get() {
+            return Ok(false);
+        }
         let Some(hash) = self.poseidon2.as_ref() else {
             return Ok(false);
         };
@@ -3331,6 +7774,9 @@ impl WebGpuHal {
         else {
             return Ok(false);
         };
+        if !self.storage_binding_fits(output) || !self.storage_binding_fits(matrix) {
+            return Ok(false);
+        }
         let (Some(round_constants_gpu), Some(m_int_diag_gpu)) = (
             hash.round_constants.raw_buffer(),
             hash.m_int_diag.raw_buffer(),
@@ -3351,8 +7797,10 @@ impl WebGpuHal {
             matrix_base,
             0,
         ];
-        let params =
-            self.create_uniform_buffer("webgpu_poseidon2_rows_params", bytemuck::cast_slice(&params))?;
+        let params = self.create_uniform_buffer(
+            "webgpu_poseidon2_rows_params",
+            bytemuck::cast_slice(&params),
+        )?;
 
         output.sync_cpu_to_gpu(self)?;
         matrix.sync_cpu_to_gpu(self)?;
@@ -3494,11 +7942,9 @@ async fn request_adapter(
         return Ok(None);
     }
 
-    Ok(Some(
-        value
-            .dyn_into::<web_sys::GpuAdapter>()
-            .map_err(|_| anyhow!("requestAdapter did not return a GPUAdapter"))?,
-    ))
+    Ok(Some(value.dyn_into::<web_sys::GpuAdapter>().map_err(
+        |_| anyhow!("requestAdapter did not return a GPUAdapter"),
+    )?))
 }
 
 fn required_js(name: &'static str) -> impl FnOnce(JsValue) -> Result<JsValue> {
@@ -3587,22 +8033,29 @@ impl Hal for WebGpuHal {
     ) {
         let gpu_evaluated = self
             .dispatch_batch_expand_into_evaluate_ntt(output, input, count, expand_bits)
-            .unwrap_or_else(|err| {
-                panic!("failed to expand and evaluate NTT with WebGPU: {err}")
-            });
-        self.cpu
-            .batch_expand_into_evaluate_ntt(output.cpu(), input.cpu(), count, expand_bits);
-        self.record_gpu_result_with_cpu_mirror("batch_expand_into_evaluate_ntt", gpu_evaluated);
-        output.cpu_dirty.set(!gpu_evaluated);
+            .unwrap_or_else(|err| panic!("failed to expand and evaluate NTT with WebGPU: {err}"));
+        self.finish_hal_op(
+            "batch_expand_into_evaluate_ntt",
+            gpu_evaluated,
+            output,
+            || {
+                self.cpu.batch_expand_into_evaluate_ntt(
+                    output.cpu(),
+                    input.cpu(),
+                    count,
+                    expand_bits,
+                );
+            },
+        );
     }
 
     fn batch_interpolate_ntt(&self, io: &Self::Buffer<Self::Elem>, count: usize) {
         let gpu_interpolated = self
             .dispatch_batch_interpolate_ntt(io, count)
             .unwrap_or_else(|err| panic!("failed to interpolate NTT with WebGPU: {err}"));
-        self.cpu.batch_interpolate_ntt(io.cpu(), count);
-        self.record_gpu_result_with_cpu_mirror("batch_interpolate_ntt", gpu_interpolated);
-        io.cpu_dirty.set(!gpu_interpolated);
+        self.finish_hal_op("batch_interpolate_ntt", gpu_interpolated, io, || {
+            self.cpu.batch_interpolate_ntt(io.cpu(), count);
+        });
     }
 
     fn batch_bit_reverse(&self, io: &Self::Buffer<Self::Elem>, count: usize) {
@@ -3613,9 +8066,9 @@ impl Hal for WebGpuHal {
         let gpu_reversed = self
             .dispatch_batch_bit_reverse(io, bits)
             .unwrap_or_else(|err| panic!("failed to bit-reverse with WebGPU: {err}"));
-        self.cpu.batch_bit_reverse(io.cpu(), count);
-        self.record_gpu_result_with_cpu_mirror("batch_bit_reverse", gpu_reversed);
-        io.cpu_dirty.set(!gpu_reversed);
+        self.finish_hal_op("batch_bit_reverse", gpu_reversed, io, || {
+            self.cpu.batch_bit_reverse(io.cpu(), count);
+        });
     }
 
     fn batch_evaluate_any(
@@ -3635,10 +8088,10 @@ impl Hal for WebGpuHal {
         let gpu_evaluated = self
             .dispatch_batch_evaluate_any(coeffs, which, xs, out, deg)
             .unwrap_or_else(|err| panic!("failed to batch evaluate with WebGPU: {err}"));
-        self.cpu
-            .batch_evaluate_any(coeffs.cpu(), poly_count, which.cpu(), xs.cpu(), out.cpu());
-        self.record_gpu_result_with_cpu_mirror("batch_evaluate_any", gpu_evaluated);
-        out.cpu_dirty.set(!gpu_evaluated);
+        self.finish_hal_op("batch_evaluate_any", gpu_evaluated, out, || {
+            self.cpu
+                .batch_evaluate_any(coeffs.cpu(), poly_count, which.cpu(), xs.cpu(), out.cpu());
+        });
     }
 
     fn zk_shift(&self, io: &Self::Buffer<Self::Elem>, count: usize) {
@@ -3647,9 +8100,9 @@ impl Hal for WebGpuHal {
         let gpu_shifted = self
             .dispatch_zk_shift(io, bits)
             .unwrap_or_else(|err| panic!("failed to zk_shift with WebGPU: {err}"));
-        self.cpu.zk_shift(io.cpu(), count);
-        self.record_gpu_result_with_cpu_mirror("zk_shift", gpu_shifted);
-        io.cpu_dirty.set(!gpu_shifted);
+        self.finish_hal_op("zk_shift", gpu_shifted, io, || {
+            self.cpu.zk_shift(io.cpu(), count);
+        });
     }
 
     fn mix_poly_coeffs(
@@ -3665,17 +8118,65 @@ impl Hal for WebGpuHal {
         let gpu_mixed = self
             .dispatch_mix_poly_coeffs(out, mix_start, mix, input, combos, input_size, count)
             .unwrap_or_else(|err| panic!("failed to mix polynomial coeffs with WebGPU: {err}"));
-        self.cpu.mix_poly_coeffs(
-            out.cpu(),
-            mix_start,
-            mix,
-            input.cpu(),
-            combos.cpu(),
-            input_size,
-            count,
-        );
-        self.record_gpu_result_with_cpu_mirror("mix_poly_coeffs", gpu_mixed);
-        out.cpu_dirty.set(!gpu_mixed);
+        self.finish_hal_op("mix_poly_coeffs", gpu_mixed, out, || {
+            self.cpu.mix_poly_coeffs(
+                out.cpu(),
+                mix_start,
+                mix,
+                input.cpu(),
+                combos.cpu(),
+                input_size,
+                count,
+            );
+        });
+    }
+
+    fn combos_prepare(
+        &self,
+        combos: &Self::Buffer<Self::ExtElem>,
+        coeff_u: &[Self::ExtElem],
+        combo_count: usize,
+        cycles: usize,
+        reg_sizes: &[u32],
+        reg_combo_ids: &[u32],
+        mix: &Self::ExtElem,
+    ) {
+        let gpu_prepared = self
+            .dispatch_combos_prepare(
+                combos,
+                coeff_u,
+                combo_count,
+                cycles,
+                reg_sizes,
+                reg_combo_ids,
+                mix,
+            )
+            .unwrap_or_else(|err| panic!("failed to prepare combos with WebGPU: {err}"));
+        self.finish_hal_op("combos_prepare", gpu_prepared, combos, || {
+            self.cpu.combos_prepare(
+                combos.cpu(),
+                coeff_u,
+                combo_count,
+                cycles,
+                reg_sizes,
+                reg_combo_ids,
+                mix,
+            );
+        });
+    }
+
+    fn combos_divide(
+        &self,
+        combos: &Self::Buffer<Self::ExtElem>,
+        chunks: Vec<(usize, Vec<Self::ExtElem>)>,
+        cycles: usize,
+    ) {
+        let gpu_divided = self
+            .dispatch_combos_divide(combos, &chunks, cycles)
+            .unwrap_or_else(|err| panic!("failed to divide combos with WebGPU: {err}"));
+        self.finish_hal_op("combos_divide", gpu_divided, combos, || {
+            self.cpu.combos_divide(combos.cpu(), chunks, cycles);
+        });
     }
 
     fn eltwise_add_elem(
@@ -3687,10 +8188,10 @@ impl Hal for WebGpuHal {
         let gpu_added = self
             .dispatch_eltwise_add_elem(output, input1, input2)
             .unwrap_or_else(|err| panic!("failed to add WebGPU buffers: {err}"));
-        self.cpu
-            .eltwise_add_elem(output.cpu(), input1.cpu(), input2.cpu());
-        self.record_gpu_result_with_cpu_mirror("eltwise_add_elem", gpu_added);
-        output.cpu_dirty.set(!gpu_added);
+        self.finish_hal_op("eltwise_add_elem", gpu_added, output, || {
+            self.cpu
+                .eltwise_add_elem(output.cpu(), input1.cpu(), input2.cpu());
+        });
     }
 
     fn eltwise_sum_extelem(
@@ -3701,9 +8202,9 @@ impl Hal for WebGpuHal {
         let gpu_summed = self
             .dispatch_eltwise_sum_extelem(output, input)
             .unwrap_or_else(|err| panic!("failed to sum WebGPU extension buffers: {err}"));
-        self.cpu.eltwise_sum_extelem(output.cpu(), input.cpu());
-        self.record_gpu_result_with_cpu_mirror("eltwise_sum_extelem", gpu_summed);
-        output.cpu_dirty.set(!gpu_summed);
+        self.finish_hal_op("eltwise_sum_extelem", gpu_summed, output, || {
+            self.cpu.eltwise_sum_extelem(output.cpu(), input.cpu());
+        });
     }
 
     fn eltwise_copy_elem(
@@ -3736,9 +8237,9 @@ impl Hal for WebGpuHal {
             false
         };
 
-        self.cpu.eltwise_copy_elem(output.cpu(), input.cpu());
-        self.record_gpu_result_with_cpu_mirror("eltwise_copy_elem", gpu_copied);
-        output.cpu_dirty.set(!gpu_copied);
+        self.finish_hal_op("eltwise_copy_elem", gpu_copied, output, || {
+            self.cpu.eltwise_copy_elem(output.cpu(), input.cpu());
+        });
     }
 
     fn eltwise_copy_elem_slice(
@@ -3764,27 +8265,27 @@ impl Hal for WebGpuHal {
                 into_stride,
             )
             .unwrap_or_else(|err| panic!("failed to copy WebGPU element slice: {err}"));
-        self.cpu.eltwise_copy_elem_slice(
-            into.cpu(),
-            from,
-            from_rows,
-            from_cols,
-            from_offset,
-            from_stride,
-            into_offset,
-            into_stride,
-        );
-        self.record_gpu_result_with_cpu_mirror("eltwise_copy_elem_slice", gpu_copied);
-        into.cpu_dirty.set(!gpu_copied);
+        self.finish_hal_op("eltwise_copy_elem_slice", gpu_copied, into, || {
+            self.cpu.eltwise_copy_elem_slice(
+                into.cpu(),
+                from,
+                from_rows,
+                from_cols,
+                from_offset,
+                from_stride,
+                into_offset,
+                into_stride,
+            );
+        });
     }
 
     fn eltwise_zeroize_elem(&self, elems: &Self::Buffer<Self::Elem>) {
         let gpu_zeroized = self
             .dispatch_zeroize_elem(elems)
             .unwrap_or_else(|err| panic!("failed to zeroize WebGPU buffer: {err}"));
-        self.cpu.eltwise_zeroize_elem(elems.cpu());
-        self.record_gpu_result_with_cpu_mirror("eltwise_zeroize_elem", gpu_zeroized);
-        elems.cpu_dirty.set(!gpu_zeroized);
+        self.finish_hal_op("eltwise_zeroize_elem", gpu_zeroized, elems, || {
+            self.cpu.eltwise_zeroize_elem(elems.cpu());
+        });
     }
 
     fn fri_fold(
@@ -3799,9 +8300,9 @@ impl Hal for WebGpuHal {
         let gpu_folded = self
             .dispatch_fri_fold(output, input, mix)
             .unwrap_or_else(|err| panic!("failed to FRI fold with WebGPU: {err}"));
-        self.cpu.fri_fold(output.cpu(), input.cpu(), mix);
-        self.record_gpu_result_with_cpu_mirror("fri_fold", gpu_folded);
-        output.cpu_dirty.set(!gpu_folded);
+        self.finish_hal_op("fri_fold", gpu_folded, output, || {
+            self.cpu.fri_fold(output.cpu(), input.cpu(), mix);
+        });
     }
 
     fn hash_rows(&self, output: &Self::Buffer<Digest>, matrix: &Self::Buffer<Self::Elem>) {
@@ -3811,9 +8312,9 @@ impl Hal for WebGpuHal {
         let gpu_hashed = self
             .dispatch_poseidon2_hash_rows(output, matrix, row_size, col_size)
             .unwrap_or_else(|err| panic!("failed to hash rows with WebGPU Poseidon2: {err}"));
-        self.cpu.hash_rows(output.cpu(), matrix.cpu());
-        self.record_gpu_result_with_cpu_mirror("hash_rows", gpu_hashed);
-        output.cpu_dirty.set(!gpu_hashed);
+        self.finish_hal_op("hash_rows", gpu_hashed, output, || {
+            self.cpu.hash_rows(output.cpu(), matrix.cpu());
+        });
     }
 
     fn hash_fold(&self, io: &Self::Buffer<Digest>, input_size: usize, output_size: usize) {
@@ -3822,9 +8323,9 @@ impl Hal for WebGpuHal {
         let gpu_hashed = self
             .dispatch_poseidon2_hash_fold(io, input_size, output_size)
             .unwrap_or_else(|err| panic!("failed to hash fold with WebGPU Poseidon2: {err}"));
-        self.cpu.hash_fold(io.cpu(), input_size, output_size);
-        self.record_gpu_result_with_cpu_mirror("hash_fold", gpu_hashed);
-        io.cpu_dirty.set(!gpu_hashed);
+        self.finish_hal_op("hash_fold", gpu_hashed, io, || {
+            self.cpu.hash_fold(io.cpu(), input_size, output_size);
+        });
     }
 
     fn gather_sample(
@@ -3838,10 +8339,10 @@ impl Hal for WebGpuHal {
         let gpu_gathered = self
             .dispatch_gather_sample(dst, src, idx, size, stride)
             .unwrap_or_else(|err| panic!("failed to gather WebGPU sample: {err}"));
-        self.cpu
-            .gather_sample(dst.cpu(), src.cpu(), idx, size, stride);
-        self.record_gpu_result_with_cpu_mirror("gather_sample", gpu_gathered);
-        dst.cpu_dirty.set(!gpu_gathered);
+        self.finish_hal_op("gather_sample", gpu_gathered, dst, || {
+            self.cpu
+                .gather_sample(dst.cpu(), src.cpu(), idx, size, stride);
+        });
     }
 
     fn scatter(
@@ -3854,17 +8355,17 @@ impl Hal for WebGpuHal {
         let gpu_scattered = self
             .dispatch_scatter(into, index, offsets, values)
             .unwrap_or_else(|err| panic!("failed to scatter WebGPU buffers: {err}"));
-        self.cpu.scatter(into.cpu(), index, offsets, values);
-        self.record_gpu_result_with_cpu_mirror("scatter", gpu_scattered);
-        into.cpu_dirty.set(!gpu_scattered);
+        self.finish_hal_op("scatter", gpu_scattered, into, || {
+            self.cpu.scatter(into.cpu(), index, offsets, values);
+        });
     }
 
     fn prefix_products(&self, io: &Self::Buffer<Self::ExtElem>) {
         let gpu_computed = self
             .dispatch_prefix_products(io)
             .unwrap_or_else(|err| panic!("failed to compute WebGPU prefix products: {err}"));
-        self.cpu.prefix_products(io.cpu());
-        self.record_gpu_result_with_cpu_mirror("prefix_products", gpu_computed);
-        io.cpu_dirty.set(!gpu_computed);
+        self.finish_hal_op("prefix_products", gpu_computed, io, || {
+            self.cpu.prefix_products(io.cpu());
+        });
     }
 }

@@ -86,6 +86,26 @@ pub mod testutil {
 
     use crate::{CircuitImpl, REGISTER_GROUP_ACCUM, REGISTER_GROUP_CODE, REGISTER_GROUP_DATA};
 
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    fn deterministic_fp(seed: usize) -> BabyBearElem {
+        BabyBearElem::new((seed as u32).wrapping_mul(0x1f12bb5).wrapping_add(0x12345))
+    }
+
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    fn deterministic_ext(seed: usize) -> BabyBearExtElem {
+        BabyBearExtElem::new(
+            deterministic_fp(seed),
+            deterministic_fp(seed + 1),
+            deterministic_fp(seed + 2),
+            deterministic_fp(seed + 3),
+        )
+    }
+
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    fn deterministic_fps(size: usize, seed: usize) -> Vec<BabyBearElem> {
+        (0..size).map(|idx| deterministic_fp(seed + idx)).collect()
+    }
+
     pub struct EvalCheckParams {
         pub po2: usize,
         pub steps: usize,
@@ -179,5 +199,91 @@ pub mod testutil {
             ret.clone_from_slice(view);
         });
         ret
+    }
+
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    pub async fn eval_check_webgpu_matches_portable(
+        hal: &risc0_zkp::hal::webgpu::WebGpuHal,
+    ) -> anyhow::Result<()> {
+        use anyhow::ensure;
+        use risc0_zkp::hal::webgpu::WebGpuHal;
+
+        let po2 = 0;
+        let steps = 1 << po2;
+        let domain = steps * INV_RATE;
+        let circuit = CircuitImpl::new();
+        let taps = circuit.get_taps();
+        let accum = hal.copy_from_elem(
+            "recursion_eval_check_accum",
+            &deterministic_fps(taps.group_size(REGISTER_GROUP_ACCUM) * domain, 1000),
+        );
+        let code = hal.copy_from_elem(
+            "recursion_eval_check_code",
+            &deterministic_fps(taps.group_size(REGISTER_GROUP_CODE) * domain, 2000),
+        );
+        let data = hal.copy_from_elem(
+            "recursion_eval_check_data",
+            &deterministic_fps(taps.group_size(REGISTER_GROUP_DATA) * domain, 3000),
+        );
+        let mix = hal.copy_from_elem(
+            "recursion_eval_check_mix",
+            &deterministic_fps(CircuitImpl::MIX_SIZE, 4000),
+        );
+        let out = hal.copy_from_elem(
+            "recursion_eval_check_out",
+            &deterministic_fps(CircuitImpl::OUTPUT_SIZE, 5000),
+        );
+        let poly_mix = deterministic_ext(6000);
+
+        let expected = hal.alloc_elem(
+            "recursion_eval_check_expected",
+            BabyBearExtElem::EXT_SIZE * domain,
+        );
+        risc0_zkp::hal::portable::eval_check::<WebGpuHal, CircuitImpl>(
+            &CircuitImpl::new(),
+            &expected,
+            &[&accum, &code, &data],
+            &[&mix, &out],
+            poly_mix,
+            po2,
+            steps,
+        );
+
+        let actual = hal.alloc_elem(
+            "recursion_eval_check_actual",
+            BabyBearExtElem::EXT_SIZE * domain,
+        );
+        let dispatched = hal.dispatch_eval_check_poly_ext(
+            &actual,
+            &[&accum, &code, &data],
+            &[&mix, &out],
+            crate::taps::TAPSET,
+            &crate::poly_ext::DEF,
+            poly_mix,
+            po2,
+            steps,
+        )?;
+        ensure!(
+            dispatched,
+            "recursion eval_check did not dispatch on WebGPU"
+        );
+        actual.sync_gpu_to_cpu(hal).await?;
+        let actual_values = actual.to_vec();
+        let expected_values = expected.to_vec();
+        if let Some((idx, (actual, expected))) = actual_values
+            .iter()
+            .zip(expected_values.iter())
+            .enumerate()
+            .find(|(_, (actual, expected))| actual != expected)
+        {
+            anyhow::bail!(
+                "recursion eval_check WebGPU output differed from portable output at index {idx}: actual={actual:?} expected={expected:?}"
+            );
+        }
+        ensure!(
+            actual_values == expected_values,
+            "recursion eval_check WebGPU output differed from portable output"
+        );
+        Ok(())
     }
 }

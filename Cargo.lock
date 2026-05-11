@@ -7374,6 +7374,7 @@ dependencies = [
  "hex",
  "hotbench",
  "human-repr",
+ "js-sys",
  "keccak",
  "lazy-regex",
  "mini-redis",
@@ -7422,6 +7423,8 @@ dependencies = [
  "tracing-forest",
  "tracing-subscriber 0.3.19",
  "typetag",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]

@@ -18,7 +18,12 @@ mod tests;
 mod witgen;
 
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    future::Future,
+    pin::Pin,
+    rc::Rc,
+};
 
 use anyhow::Result;
 use cfg_if::cfg_if;
@@ -45,6 +50,14 @@ pub trait SegmentProver {
     fn preflight(&self, segment: &Segment) -> Result<PreflightResults>;
 
     fn prove_core(&self, preflight_results: PreflightResults) -> Result<Seal>;
+
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    fn prove_core_async<'a>(
+        &'a self,
+        preflight_results: PreflightResults,
+    ) -> Pin<Box<dyn Future<Output = Result<Seal>> + 'a>> {
+        Box::pin(async move { self.prove_core(preflight_results) })
+    }
 }
 
 pub fn segment_prover() -> Result<Box<dyn SegmentProver>> {
@@ -73,6 +86,69 @@ pub fn segment_prover_with_hal(hal: Rc<WebGpuHal>) -> Result<Box<dyn SegmentProv
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 thread_local! {
     static WEBGPU_HAL: RefCell<Option<Rc<WebGpuHal>>> = RefCell::new(None);
+    static WEBGPU_ASYNC_AUTHORITATIVE_SCOPES: Cell<WebGpuAsyncAuthoritativeScopes> =
+        Cell::new(WebGpuAsyncAuthoritativeScopes::all_enabled());
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+#[derive(Clone, Copy)]
+pub(crate) struct WebGpuAsyncAuthoritativeScopes {
+    pub(crate) code_data: bool,
+    pub(crate) accum_make_coeffs: bool,
+    pub(crate) accum_poly_group: bool,
+    pub(crate) accum_merkle: bool,
+    pub(crate) finalize: bool,
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+impl WebGpuAsyncAuthoritativeScopes {
+    const fn all_enabled() -> Self {
+        Self {
+            code_data: true,
+            accum_make_coeffs: true,
+            accum_poly_group: true,
+            accum_merkle: true,
+            finalize: true,
+        }
+    }
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn set_webgpu_async_authoritative_scopes(code_data: bool, accum_finalize: bool) {
+    set_webgpu_async_authoritative_stages(code_data, accum_finalize, accum_finalize);
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn set_webgpu_async_authoritative_stages(code_data: bool, accum_commit: bool, finalize: bool) {
+    WEBGPU_ASYNC_AUTHORITATIVE_SCOPES.with(|scopes| {
+        scopes.set(WebGpuAsyncAuthoritativeScopes {
+            code_data,
+            accum_make_coeffs: accum_commit,
+            accum_poly_group: accum_commit,
+            accum_merkle: accum_commit,
+            finalize,
+        });
+    });
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn set_webgpu_accum_commit_authoritative_stages(
+    make_coeffs: bool,
+    poly_group: bool,
+    merkle: bool,
+) {
+    WEBGPU_ASYNC_AUTHORITATIVE_SCOPES.with(|scopes| {
+        let mut current = scopes.get();
+        current.accum_make_coeffs = make_coeffs;
+        current.accum_poly_group = poly_group;
+        current.accum_merkle = merkle;
+        scopes.set(current);
+    });
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) fn webgpu_async_authoritative_scopes() -> WebGpuAsyncAuthoritativeScopes {
+    WEBGPU_ASYNC_AUTHORITATIVE_SCOPES.with(Cell::get)
 }
 
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]

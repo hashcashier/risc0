@@ -5,6 +5,8 @@ Status: active validation; complete parity is not yet achieved.
 This file records the current correctness matrix for the browser WebGPU prover.
 Native baselines are measured first with the local CUDA prover and the same
 browser-oriented segment and Keccak caps used by the wasm harness.
+The native CUDA and browser WebGPU proving paths are compared in
+`docs/wasm-webgpu-cuda-comparison.md`.
 
 ## Commands
 
@@ -16,29 +18,36 @@ RISC0_PROVER=local RISC0_EXECUTOR=local RISC0_INFO=1 RUST_LOG=info RISC0_PRINT_S
   <native_stats_test> -- --ignored --nocapture
 ```
 
-Browser Chrome/WebGPU harness:
+Browser Chrome/WebGPU harness, run from `examples/browser-prove` so the
+checked-in `webdriver.json` is discovered:
 
 ```bash
 WASM_BINDGEN_TEST_TIMEOUT=7200 \
-WASM_BINDGEN_TEST_WEBDRIVER_JSON=webdriver.json \
 CHROMEDRIVER=/home/rami/.cache/.wasm-pack/chromedriver-75649e7ca5ae435b/chromedriver \
 /home/rami/.cache/.wasm-pack/wasm-bindgen-c59d5019a2b42393/wasm-bindgen-test-runner \
   --nocapture \
-  /home/rami/repos/risc0/examples/target/wasm32-unknown-unknown/release/deps/browser_prove-a7fada4366bfd68d.wasm \
+  /home/rami/repos/risc0/examples/target/wasm32-unknown-unknown/release/deps/browser_prove-8c2262f18ea48db8.wasm \
   <browser_test_filter>
 ```
 
-Build check:
+Targeted browser harness build check:
 
 ```bash
-cargo test --manifest-path Cargo.toml --target wasm32-unknown-unknown --release --no-run
+cargo test --manifest-path examples/browser-prove/Cargo.toml \
+  --target wasm32-unknown-unknown --release --no-run
 ```
 
-The current build check passes and produces:
+The current targeted browser harness build check passes. The latest focused
+release test-artifact rebuild after adding the interpreted WebGPU `eval_check`
+telemetry took 4m19s and produces:
 
 ```text
-/home/rami/repos/risc0/examples/target/wasm32-unknown-unknown/release/deps/browser_prove-a7fada4366bfd68d.wasm
+/home/rami/repos/risc0/examples/target/wasm32-unknown-unknown/release/deps/browser_prove-8c2262f18ea48db8.wasm
 ```
+
+The broader examples workspace wasm build is not treated as the browser prover
+gate; it currently reaches a native-terminal dependency path through
+`crossterm` when built wholesale for `wasm32-unknown-unknown`.
 
 ## Public Example Matrix
 
@@ -72,15 +81,15 @@ zero CPU-only HAL operations.
 | `waldo` | 1 segment, 56825 user cycles, 131072 total cycles, 450.70735ms | Passed, same cycles |
 | `ecdsa/k256` | 2 segments, 343611 user cycles, 524288 total cycles, 1.08389501s | Passed, same cycles |
 | `ecdsa/p256` | 2 segments, 232373 user cycles, 327680 total cycles, 978.112464ms | Passed, same cycles |
-| `groth16-verifier` | 914 segments, 180291710 user cycles, 239370240 total cycles, 462.439128141s | Browser run deferred until GPU-authoritative HAL work |
-| `xgboost` | 11 segments, 2294908 user cycles, 2883584 total cycles, 5.702544275s | Browser run deferred until GPU-authoritative HAL work |
-| `bn254` | 189 segments, 37989643 user cycles, 49348608 total cycles, 100.237964323s | Browser run deferred until GPU-authoritative HAL work |
+| `groth16-verifier` | 914 segments, 180291710 user cycles, 239370240 total cycles, 462.439128141s | Browser run deferred until remaining eval_check/readback and oversized-buffer bottlenecks are addressed |
+| `xgboost` | 11 segments, 2294908 user cycles, 2883584 total cycles, 5.702544275s | Browser run deferred until remaining eval_check/readback and oversized-buffer bottlenecks are addressed |
+| `bn254` | 189 segments, 37989643 user cycles, 49348608 total cycles, 100.237964323s | Browser run deferred until remaining eval_check/readback and oversized-buffer bottlenecks are addressed |
 
 ## Internal Parity Matrix
 
 | Fixture | Native CUDA baseline | Chrome/WebGPU status |
 | --- | --- | --- |
-| WebGPU HAL readback tests | CPU reference | Passed for NTT, inverse NTT, FRI fold, hashing, mixing, copy, gather, scatter, and prefix products |
+| WebGPU HAL readback tests | CPU reference | Passed for NTT, inverse NTT, FRI fold, hashing, mixing, copy, gather, scatter, prefix products, proof-shaped hash/NTT/bit-reverse dimensions, generated `poly_ext` `eval_check`, and GPU-authoritative async readback |
 | `multi_test/do_nothing` composite plus compress | Composite: 1 segment, 3290 user cycles, 32768 total cycles, 263.060284ms; compress: 144.935682ms | Passed in API/compression group |
 | `multi_test/echo` | 1 segment, 5784 user cycles, 32768 total cycles, 237.884784ms | Passed, same cycles |
 | `multi_test/sha_cycle_count` | 1 segment, 3752 user cycles, 32768 total cycles, 234.860164ms | Passed, same cycles |
@@ -92,8 +101,8 @@ zero CPU-only HAL operations.
 | `multi_test/sys_read` | 1 segment, 8471 user cycles, 65536 total cycles, 258.619384ms | Passed, same cycles |
 | `multi_test/echo_stdout` | 1 segment, 4203 user cycles, 32768 total cycles, 236.010871ms | Passed, same cycles |
 | `multi_test/echo_words` | 1 segment, 3996 user cycles, 32768 total cycles, 236.157902ms | Passed, same cycles |
-| `multi_test/libm` | 1 segment, 3373 user cycles, 32768 total cycles, 413.333083ms | Passed in timed accelerator group, same cycles |
-| `multi_test/poseidon2_basic` | 1 segment, 3598 user cycles, 32768 total cycles, 243.110394ms | Passed in timed accelerator group, same cycles |
+| `multi_test/libm` | 1 segment, 3373 user cycles, 32768 total cycles, 436.441617ms | Passed standalone in 214.08s with succinct receipt; `rv32im_eval_check` 32.546s, `segment_prove_core` 43.592s, `recursion_eval_check` 119.937s, `lift_prove` 170.293s |
+| `multi_test/poseidon2_basic` | 1 segment, 3598 user cycles, 32768 total cycles, 510.743182ms in the latest focused CUDA run | Passed via `prove_with_opts_async` with a succinct receipt in Chrome in 32.17s, same cycles; rv32im and recursion STARK commit/finalize plus combo prepare/divide ran in GPU-authoritative mode; `eval_check` recorded 6 WebGPU dispatches and 0 CPU fallbacks |
 | `multi_test/poseidon2_short` | 1 segment, 3596 user cycles, 32768 total cycles, 235.5053ms | Passed in timed accelerator group, same cycles |
 | `multi_test/poseidon2_long` | 1 segment, 3800 user cycles, 32768 total cycles, 238.775893ms | Passed in timed accelerator group, same cycles |
 | `multi_test/poseidon2_continue` | 1 segment, 3835 user cycles, 32768 total cycles, 237.068497ms | Passed in timed accelerator group, same cycles |
@@ -113,8 +122,8 @@ zero CPU-only HAL operations.
 | `multi_test/keccak_union` | 11 segments, 2230730 user cycles, 2752512 total cycles, 20.549581894s | Browser standalone run timed out after 7200s at fixture start; no succinct receipt yet |
 | `risc0-zkvm-methods/bench/simple_loop` | 1 segment, 3300 user cycles, 32768 total cycles, 444.669138ms | Passed, same cycles |
 | `risc0-zkvm-methods/test_feature` | 1 segment, 2933 user cycles, 32768 total cycles, 396.733057ms | Passed, same cycles |
-| `risc0-zkvm-methods/blst` | 1028 segments, 229848040 user cycles, 269287424 total cycles, 523.487318958s | Browser run deferred until GPU-authoritative HAL work |
-| `risc0-zkvm-methods/verify` | 1290 segments, 281347188 user cycles, 338034688 total cycles, 676.456094923s | Browser run deferred until GPU-authoritative HAL work |
+| `risc0-zkvm-methods/blst` | 1028 segments, 229848040 user cycles, 269287424 total cycles, 523.487318958s | Browser run deferred until remaining eval_check/readback and oversized-buffer bottlenecks are addressed |
+| `risc0-zkvm-methods/verify` | 1290 segments, 281347188 user cycles, 338034688 total cycles, 676.456094923s | Browser run deferred until remaining eval_check/readback and oversized-buffer bottlenecks are addressed |
 
 ## Accelerator/Precompile Run Notes
 
@@ -136,23 +145,84 @@ fixtures in the combined test.
 
 ## Current Performance Blocker
 
-The WebGPU HAL currently dispatches GPU kernels and validates GPU output in
-readback tests, but the proof path still keeps a CPU mirror for every HAL
-buffer. Normal browser proofs therefore run the proof-critical operations twice:
-once on WebGPU and once in WASM/CPU to satisfy the synchronous `Hal::Buffer`
-contract. The resulting proof is correct and WebGPU-dispatched, but practical
-runtime is CPU-bound.
+The public async proof path now uses GPU-authoritative ZKP commit/finalize for
+rv32im segment proving and recursion lift. The focused Chrome test
+`native_poseidon2_basic_async_succinct_receipt_verify` passed with a verified
+succinct receipt in 32.17s after a 510.743182ms native CUDA baseline and
+recorded:
 
-This is why moderate examples pass while very large examples and internal
-fixtures are deferred. The next parity blocker is making proof buffers
-GPU-authoritative and materializing CPU data only at explicit readback or
-receipt-construction boundaries.
+```text
+gpu_dispatches=903 cpu_mirrors=12 cpu_fallbacks=58 cpu_only_ops=0
+uploads=1925 upload_bytes=1042284340
+device_copies=8 device_copy_bytes=212208640
+readbacks=630 readback_bytes=429205056
+buffers=2607 buffer_bytes=2169444556
+```
+
+This is a material reduction from the earlier CPU-mirrored recursion fallback,
+but the browser path remains CPU-bound. The dominant costs are still portable
+temporary chunk uploads for oversized recursion data, explicit readbacks for
+transcript and Merkle query materialization, and remaining oversized-buffer
+fallbacks outside `eval_check`. The same focused run spent 1.880s in
+`segment_prove_core_async` and 30.087s in `lift_prove_async`.
+
+Large examples and internal fixtures remain deferred until the remaining CPU
+fallbacks and portable circuit checks are replaced by WebGPU-authoritative
+paths or bounded chunked GPU kernels. A WebGPU circuit `eval_check` hook now
+runs before fallback. The tiny generated `poly_ext` regression passes in
+Chrome, and the new interpreted WebGPU `eval_check` prototype passes the
+recursion CPU-equivalence smoke test. The latest focused proof verifies with
+`eval_check` recorded as 6 GPU dispatches and 0 CPU fallbacks, so the interpreter
+is correctness-positive for the focused rv32im and recursion paths. The rv32im path now
+dispatches through the interpreter with
+`domain=131072`, `instructions=20202`, `fp_slots=927`, and `mix_slots=29`. The
+recursion data group is `536870912` bytes, above the `125829120` byte
+conservative storage-binding cap, so the current prototype uploads it through
+five bounded chunks and dispatches the interpreter for each chunk.
+
+A split recursion `eval_check` prototype was tried after that. Naive 64-term
+chunks lost the WebGPU device; a dependency-budgeted variant showed that one
+recursion contribution still needs 1603 FP dependencies; and a slot-reusing
+split shader still lost the device after 486.20s in Chrome on a `po2 = 0`
+portable-reference smoke test. The split path is disabled, and the next
+recursion-sized `eval_check` proof attempt needs the recursion data group to
+stay GPU-resident instead of relying on larger generated straight-line
+shaders.
+
+`mix_poly_coeffs` now has an async GPU-authoritative path for STARK finalize.
+The earlier one-line enablement failed because a later CPU fallback could read
+a stale CPU shadow after an earlier GPU accumulation. The async path reads the
+accumulated output back before CPU fallback. A dedicated forced-dispatch HAL
+regression passes in Chrome, and the focused proof now records
+`mix_poly_coeffs` as 7 GPU dispatches and 1 CPU fallback.
+
+`combos_prepare` and `combos_divide` now have WebGPU kernels and async
+GPU-authoritative wrappers. A focused Chrome HAL regression passes, and the
+focused proof records 2 `combos_prepare` and 2 `combos_divide` GPU dispatches
+with no CPU mirrors or fallbacks. This removes the explicit readback between
+GPU-authoritative combo mixing and combo division, reducing the focused proof
+from 637 readbacks / 768943680 readback bytes to 630 readbacks /
+429205056 readback bytes in the latest focused run.
+
+A production `gather_sample` chunking attempt was tested with aligned source
+bindings, a conservative chunk-width cap, per-chunk command submission, sliced
+dirty-buffer uploads, and an oversized proof-shaped gather. It passed those
+focused HAL regressions, but failed the full proof at `verify_lift`. A
+recursion-sized production regression with `rows = 2^20` and `cols = 128`
+then showed all-zero GPU output for the 512 MiB source matrix, indicating that
+chunked bindings are not sufficient when the underlying single `GPUBuffer`
+itself exceeds the browser/device's usable buffer size. The HAL now gates GPU
+allocation with `GPUSupportedLimits.maxBufferSize`, and the normal proof path
+therefore still uses the known-correct async CPU fallback for oversized
+`gather_sample` sources. The chunked helper remains available for smaller
+single-buffer diagnosis, and
+`webgpu_hal_recursion_sized_gather_sample_falls_back_to_cpu` locks the current
+correct fallback behavior until a tiled multi-buffer implementation exists.
 
 Additional hidden CPU work remains in the generic prover shape:
 
-- `Hal::combos_prepare` and `Hal::combos_divide` are default CPU
-  implementations unless the backend overrides them.
-- Merkle, DEEP, and FRI transcript steps synchronously read buffer contents.
+- Merkle, DEEP, and FRI transcript steps still force explicit readbacks for
+  transcript materialization and sampled query openings.
 - The current browser circuit HALs use generated Rust/WASM bridges for
   correctness and still materialize witness/check data on CPU.
 
@@ -175,4 +245,14 @@ previous `multi_test/poseidon2_basic` CUDA failure was a byte-address versus
 word-address ABI mismatch in the Poseidon2 syscall path. Browser execution has
 proved and verified every accelerator/precompile fixture except
 `multi_test/rsa_compat` and `multi_test/keccak_union`, which remain
-performance-blocked under the CPU-shadow proof path.
+performance-blocked under the current browser proof path.
+
+The latest focused `multi_test/poseidon2_basic` async browser run shows the
+immediate blocker more precisely: browser witness generation and accumulation
+are sub-second for both `rv32im` and recursion, and rv32im `eval_check` now
+uses the interpreted WebGPU path. Recursion `eval_check` also runs on WebGPU
+by chunk-uploading the oversized data group, cutting the focused proof to
+32.17 seconds. The next optimization targets are replacing temporary chunk
+uploads with proof-correct tiled GPU-resident buffers, expanding this path to
+larger examples and Keccak-heavy fixtures, and reducing transcript-driven
+readbacks.

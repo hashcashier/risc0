@@ -23,7 +23,9 @@ use risc0_zkp::{
 use super::{Executor, Prover, ProverOpts};
 use crate::{
     host::server::{
-        exec::executor::ExecutorImpl, prove::get_webgpu_prover_server, session::NullSegmentRef,
+        exec::executor::ExecutorImpl,
+        prove::{compress_webgpu, get_webgpu_prover_server, prove_webgpu_with_ctx},
+        session::NullSegmentRef,
     },
     ExecutorEnv, ProveInfo, Receipt, SegmentInfo, SessionInfo, VerifierContext,
 };
@@ -64,12 +66,97 @@ impl WebGpuProver {
         self.hal.reset_diagnostics();
     }
 
+    /// Enable or disable WebGPU eval_check dispatch for diagnostics.
+    #[doc(hidden)]
+    pub fn set_eval_check_gpu_enabled(&self, enabled: bool) {
+        self.hal.set_eval_check_gpu_enabled(enabled);
+    }
+
+    /// Enable or disable a specific WebGPU HAL kernel for diagnostics.
+    #[doc(hidden)]
+    pub fn set_webgpu_op_gpu_enabled(&self, op: &str, enabled: bool) {
+        self.hal.set_op_gpu_enabled(op, enabled);
+    }
+
+    /// Enable or disable RV32IM async GPU-authoritative proof stages for diagnostics.
+    #[doc(hidden)]
+    pub fn set_rv32im_async_gpu_authoritative_scopes(&self, code_data: bool, accum_finalize: bool) {
+        risc0_circuit_rv32im::prove::set_webgpu_async_authoritative_scopes(
+            code_data,
+            accum_finalize,
+        );
+    }
+
+    /// Enable or disable individual RV32IM async GPU-authoritative proof stages for diagnostics.
+    #[doc(hidden)]
+    pub fn set_rv32im_async_gpu_authoritative_stages(
+        &self,
+        code_data: bool,
+        accum_commit: bool,
+        finalize: bool,
+    ) {
+        risc0_circuit_rv32im::prove::set_webgpu_async_authoritative_stages(
+            code_data,
+            accum_commit,
+            finalize,
+        );
+    }
+
+    /// Enable or disable individual RV32IM ACCUM commit sub-stages for diagnostics.
+    #[doc(hidden)]
+    pub fn set_rv32im_accum_commit_gpu_authoritative_stages(
+        &self,
+        make_coeffs: bool,
+        poly_group: bool,
+        merkle: bool,
+    ) {
+        risc0_circuit_rv32im::prove::set_webgpu_accum_commit_authoritative_stages(
+            make_coeffs,
+            poly_group,
+            merkle,
+        );
+    }
+
     fn with_circuit_hal<T>(&self, f: impl FnOnce() -> T) -> T {
         risc0_circuit_rv32im::prove::with_webgpu_hal(self.hal.clone(), || {
             risc0_circuit_keccak::prove::with_webgpu_hal(self.hal.clone(), || {
                 risc0_circuit_recursion::prove::with_webgpu_hal(self.hal.clone(), f)
             })
         })
+    }
+
+    /// Async browser WebGPU variant of [`Prover::prove`].
+    pub async fn prove_async(&self, env: ExecutorEnv<'_>, elf: &[u8]) -> Result<ProveInfo> {
+        let opts = ProverOpts::default();
+        let ctx = VerifierContext::default();
+        self.prove_with_ctx_async(env, &ctx, elf, &opts).await
+    }
+
+    /// Async browser WebGPU variant of [`Prover::prove_with_opts`].
+    pub async fn prove_with_opts_async(
+        &self,
+        env: ExecutorEnv<'_>,
+        elf: &[u8],
+        opts: &ProverOpts,
+    ) -> Result<ProveInfo> {
+        let ctx = VerifierContext::default().with_dev_mode(opts.dev_mode());
+        self.prove_with_ctx_async(env, &ctx, elf, opts).await
+    }
+
+    /// Async browser WebGPU variant of [`Prover::prove_with_ctx`].
+    pub async fn prove_with_ctx_async(
+        &self,
+        env: ExecutorEnv<'_>,
+        ctx: &VerifierContext,
+        elf: &[u8],
+        opts: &ProverOpts,
+    ) -> Result<ProveInfo> {
+        prove_webgpu_with_ctx(opts, self.hal.clone(), env, ctx, elf).await
+    }
+
+    /// Async browser WebGPU variant of [`Prover::compress`].
+    pub async fn compress_async(&self, opts: &ProverOpts, receipt: &Receipt) -> Result<Receipt> {
+        compress_webgpu(opts, self.hal.clone(), receipt).await
     }
 }
 

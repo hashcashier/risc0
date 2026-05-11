@@ -353,6 +353,9 @@ facts that affect the implementation path.
   bindings, so existing prover orchestration can resolve synchronous
   `segment_prover`, `keccak_prover`, and `recursion_prover` calls to the
   initialized WebGPU HAL instead of trying to create a device synchronously.
+- The ZKP HAL, Merkle, PolyGroup, FRI, STARK commit/finalize, rv32im segment
+  proving, recursion lift, and zkVM server path now have async
+  GPU-authoritative browser proving hooks with explicit readback boundaries.
 - `risc0-zkvm` exposes the async Rust/WASM `webgpu_prover().await` constructor
   and intentionally leaves `default_prover()` unavailable for browser WebGPU
   builds because WebGPU adapter/device acquisition is asynchronous.
@@ -388,25 +391,76 @@ facts that affect the implementation path.
   libm, Poseidon2, SHA-conformance, allocation, random, SHA/Keccak
   digest/update cases, BigInt, and raw BigInt. The accelerator/precompile CUDA
   baseline passes end-to-end with segment/cycle telemetry.
+- The focused public async path
+  `native_poseidon2_basic_async_succinct_receipt_verify` passed in Chrome with
+  a verified succinct receipt. It used `WebGpuProver::prove_with_opts_async`,
+  produced 1 segment with 3598 user cycles and 32768 total cycles, and kept
+  both rv32im and recursion ZKP commit/finalize in GPU-authoritative mode. The
+  latest focused rerun took 32.17s in Chrome after a 510.743182ms native CUDA
+  baseline for the same fixture. The run recorded `eval_check` as 6 WebGPU
+  dispatches and 0 CPU fallbacks. The rv32im check uses the interpreted WebGPU
+  path; recursion uses the same interpreter with bounded chunk uploads for its
+  oversized data group.
+- A WebGPU circuit `eval_check` hook now runs before the portable CPU fallback
+  in async finalize, and a tiny generated straight-line WGSL `poly_ext`
+  regression passes in Chrome. The generated WGSL path now reuses fixed named
+  scratch slots based on `poly_ext` liveness. A real recursion monolithic
+  shader probe still lost the WebGPU device after about 128 seconds, so large
+  straight-line real circuit shaders remain disabled. The current prototype
+  uses a small interpreted WGSL program for large real definitions; its
+  recursion CPU-equivalence smoke test passes in Chrome, and the focused proof
+  verifies with all focused `eval_check` work dispatched to WebGPU.
+- A split recursion `eval_check` prototype was also tested. Naive 64-term
+  chunks produced a device loss; a dependency-budgeted version showed that one
+  recursion contribution still needs 1603 FP dependencies; and a slot-reusing
+  split shader still lost the WebGPU device after 486.20s in Chrome on a
+  `po2 = 0` CPU-reference smoke test. The split path is therefore disabled and
+  the real definitions still use the known-correct portable fallback.
 - Native CUDA baselines with segment/cycle telemetry have been collected for
   the passed browser cases and for the deferred large cases. See
-  `docs/wasm-webgpu-validation.md`.
+  `docs/wasm-webgpu-validation.md` and
+  `docs/wasm-webgpu-cuda-comparison.md`.
 - The remaining native parity groups and performance-blocked public examples
   must finish before the goal is complete.
 
 ## Current Blockers And Debt
 
-- The current WebGPU HAL still keeps CPU mirrors authoritative for the
-  synchronous `Hal::Buffer` contract. Proof-critical operations dispatch on
-  WebGPU and browser tests assert `cpu_only_ops == 0`, but the proof path is
-  still CPU-bound because each operation also updates the CPU mirror.
+- The WebGPU HAL now has a GPU-authoritative mode and explicit async
+  GPU-to-CPU readback, and the ZKP Merkle/PolyGroup/FRI/commit/finalize layers
+  have WebGPU async variants. The focused public async path is wired end to
+  end, but full parity is still blocked by production-capable WebGPU circuit
+  `eval_check`, transcript/Merkle readbacks, and CPU fallbacks for oversized
+  WebGPU storage bindings.
+- Real circuit `eval_check` needs a different GPU decomposition than
+  monolithic or term-chunked straight-line WGSL. The interpreted WGSL
+  prototype avoids device loss and verifies a focused proof with rv32im and
+  recursion `eval_check` on GPU. Recursion currently chunk-uploads its
+  oversized data group, so the next viable shape is a tiled or staged
+  GPU-resident representation for that group, followed by an optimized
+  interpreter or circuit-specific kernels that keep shader size and
+  per-dispatch work below Chrome's device-loss threshold.
+- `mix_poly_coeffs` now uses an async GPU-authoritative path in STARK
+  finalize, with explicit readback before CPU fallback. The focused browser
+  proof records 7 `mix_poly_coeffs` GPU dispatches and 1 fallback while still
+  producing a verified succinct receipt.
+- `combos_prepare` and `combos_divide` now have WebGPU kernels and async
+  GPU-authoritative wrappers. The focused proof records 2 GPU dispatches for
+  each operation with no CPU mirrors or fallbacks, and now keeps `combos`
+  GPU-owned between combo mixing and combo division.
+- A production `gather_sample` chunking attempt was diagnosed with a
+  recursion-sized regression: the 512 MiB single source buffer required by the
+  recursion data group produced all-zero GPU output in Chrome. The HAL now
+  gates GPU allocation with `GPUSupportedLimits.maxBufferSize`, and the proof
+  path keeps the known-correct CPU fallback for oversized gather sources until
+  the WebGPU HAL can represent such matrices as tiled or staged buffers instead
+  of one oversized `GPUBuffer`.
 - The large public examples `groth16-verifier`, `xgboost`, and `bn254`, plus
   large internal fixtures such as BLST and in-guest receipt verification, are
-  deferred until the WebGPU HAL can keep proof buffers GPU-authoritative and
-  read back only at explicit boundaries.
+  deferred until the async GPU-authoritative path is extended and optimized for
+  the full matrix.
 - The accelerator/precompile group is not complete in browser:
   `multi_test/rsa_compat` and `multi_test/keccak_union` time out under the
-  current CPU-shadow proof path before producing succinct receipts.
+  current browser proof path before producing succinct receipts.
   `multi_test/keccak_union` also times out in a standalone 7200s browser run.
 - `RunUnconstrained { unconstrained: true }` is classified as a native-disabled
   fixture in this checkout because `SYS_FORK` is not registered in the native

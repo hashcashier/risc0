@@ -17,15 +17,18 @@ mod tests {
     use std::{cell::RefCell, rc::Rc};
 
     use risc0_zkp::{
-        core::{digest::Digest, hash::poseidon2::Poseidon2HashSuite},
+        adapter::{PolyExtStep, PolyExtStepDef},
+        core::{digest::Digest, hash::poseidon2::Poseidon2HashSuite, log2_ceil},
         field::{
             baby_bear::{BabyBearElem, BabyBearExtElem},
-            Elem as _,
+            Elem as _, ExtElem as _, RootsOfUnity as _,
         },
         hal::{
             webgpu::{WebGpuBuffer, WebGpuHal},
-            Buffer as _, Hal as _,
+            Buffer as _, Hal,
         },
+        taps::{TapData, TapSet},
+        INV_RATE,
     };
     use risc0_zkvm::{
         serde::{from_slice, to_vec},
@@ -59,6 +62,36 @@ mod tests {
         assert_eq!(gpu_bytes.as_slice(), cpu_bytes, "{name}: GPU/CPU mismatch");
     }
 
+    async fn assert_gpu_elem_buffer_matches_cpu(
+        hal: &WebGpuHal,
+        name: &str,
+        buffer: &WebGpuBuffer<BabyBearElem>,
+    ) {
+        assert_eq!(buffer.byte_offset(), 0, "{name}: expected full buffer");
+        let byte_len = (buffer.size() * std::mem::size_of::<BabyBearElem>()) as u64;
+        let gpu_bytes = hal
+            .read_buffer(buffer.raw_buffer().expect("non-empty GPU buffer"), byte_len)
+            .await
+            .unwrap_or_else(|err| panic!("{name}: GPU readback failed: {err}"));
+        let gpu = bytemuck::checked::try_cast_slice::<u8, BabyBearElem>(gpu_bytes.as_slice())
+            .unwrap_or_else(|err| panic!("{name}: GPU readback cast failed: {err}"));
+        let cpu = buffer.to_vec();
+        assert_eq!(
+            gpu.len(),
+            cpu.len(),
+            "{name}: GPU/CPU element length mismatch"
+        );
+        for (idx, (gpu, cpu)) in gpu.iter().zip(cpu.iter()).enumerate() {
+            if gpu != cpu {
+                panic!(
+                    "{name}: GPU/CPU mismatch at elem {idx}: gpu={} cpu={}",
+                    gpu.as_u32_montgomery(),
+                    cpu.as_u32_montgomery()
+                );
+            }
+        }
+    }
+
     fn elem(seed: usize) -> BabyBearElem {
         BabyBearElem::new((seed as u32).wrapping_mul(0x1f12bb5).wrapping_add(0x12345))
     }
@@ -66,6 +99,106 @@ mod tests {
     fn ext_elem(seed: usize) -> BabyBearExtElem {
         BabyBearExtElem::new(elem(seed), elem(seed + 1), elem(seed + 2), elem(seed + 3))
     }
+
+    fn poly_divide_ext(p: &mut [BabyBearExtElem], z: BabyBearExtElem) -> BabyBearExtElem {
+        let mut cur = BabyBearExtElem::ZERO;
+        for i in (0..p.len()).rev() {
+            let next = z * cur + p[i];
+            p[i] = cur;
+            cur = next;
+        }
+        cur
+    }
+
+    fn combos_prepare_expected(
+        combos: &mut [BabyBearExtElem],
+        coeff_u: &[BabyBearExtElem],
+        combo_count: usize,
+        cycles: usize,
+        reg_sizes: &[u32],
+        reg_combo_ids: &[u32],
+        mix: BabyBearExtElem,
+    ) {
+        let mut cur_pos = 0;
+        let mut cur = BabyBearExtElem::ONE;
+        for (reg_size, reg_combo_id) in reg_sizes.iter().zip(reg_combo_ids) {
+            let reg_size = *reg_size as usize;
+            let reg_combo_id = *reg_combo_id as usize;
+            for i in 0..reg_size {
+                combos[cycles * reg_combo_id + i] -= cur * coeff_u[cur_pos + i];
+            }
+            cur *= mix;
+            cur_pos += reg_size;
+        }
+        for _ in 0..(<WebGpuHal as Hal>::CHECK_SIZE) {
+            combos[cycles * combo_count] -= cur * coeff_u[cur_pos];
+            cur_pos += 1;
+            cur *= mix;
+        }
+    }
+
+    fn combos_divide_expected(
+        combos: &mut [BabyBearExtElem],
+        chunks: &[(usize, Vec<BabyBearExtElem>)],
+        cycles: usize,
+    ) {
+        for (idx, pows) in chunks {
+            let start = idx * cycles;
+            let combo = &mut combos[start..start + cycles];
+            for pow in pows {
+                let _remainder = poly_divide_ext(combo, *pow);
+            }
+        }
+    }
+
+    static TINY_EVAL_TAPS: [TapData; 3] = [
+        TapData {
+            offset: 0,
+            back: 0,
+            group: 0,
+            combo: 0,
+            skip: 1,
+        },
+        TapData {
+            offset: 0,
+            back: 0,
+            group: 1,
+            combo: 1,
+            skip: 1,
+        },
+        TapData {
+            offset: 0,
+            back: 0,
+            group: 2,
+            combo: 2,
+            skip: 1,
+        },
+    ];
+    static TINY_EVAL_COMBO_TAPS: [u16; 0] = [];
+    static TINY_EVAL_COMBO_BEGIN: [u16; 1] = [0];
+    static TINY_EVAL_GROUP_BEGIN: [usize; 4] = [0, 1, 2, 3];
+    static TINY_EVAL_GROUP_NAMES: [&str; 3] = ["accum", "code", "data"];
+    static TINY_EVAL_TAPSET: TapSet<'static> = TapSet {
+        taps: &TINY_EVAL_TAPS,
+        combo_taps: &TINY_EVAL_COMBO_TAPS,
+        combo_begin: &TINY_EVAL_COMBO_BEGIN,
+        group_begin: &TINY_EVAL_GROUP_BEGIN,
+        combos_count: 0,
+        reg_count: 3,
+        tot_combo_backs: 0,
+        group_names: &TINY_EVAL_GROUP_NAMES,
+    };
+    static TINY_EVAL_DEF_BLOCK: [PolyExtStep; 5] = [
+        PolyExtStep::True,
+        PolyExtStep::Get(0),
+        PolyExtStep::GetGlobal(0, 0),
+        PolyExtStep::Add(0, 1),
+        PolyExtStep::AndEqz(0, 2),
+    ];
+    static TINY_EVAL_DEF: PolyExtStepDef = PolyExtStepDef {
+        block: &TINY_EVAL_DEF_BLOCK,
+        ret: 1,
+    };
 
     fn digest(seed: u32) -> Digest {
         Digest::from([
@@ -160,6 +293,82 @@ mod tests {
         prove_succinct_info(prover, name, env, elf, image_id, &ProverOpts::succinct()).receipt
     }
 
+    async fn prove_succinct_info_async(
+        prover: &WebGpuProver,
+        name: &str,
+        env: ExecutorEnv<'_>,
+        elf: &[u8],
+        image_id: [u32; 8],
+        opts: &ProverOpts,
+    ) -> ProveInfo {
+        console_log!("browser-prove:start {name}");
+        prover.reset_diagnostics();
+        let prove_info = match prover.prove_with_opts_async(env, elf, opts).await {
+            Ok(prove_info) => prove_info,
+            Err(err) => {
+                log_webgpu_diagnostics(prover, name);
+                panic!("{name}: async prove failed: {err}");
+            }
+        };
+
+        prove_info
+            .receipt
+            .inner
+            .succinct()
+            .unwrap_or_else(|_| panic!("{name}: receipt is not succinct"));
+        prove_info
+            .receipt
+            .verify(image_id)
+            .unwrap_or_else(|err| panic!("{name}: receipt verification failed: {err}"));
+        console_log!(
+            "browser-prove:done {name}: segments={} user_cycles={} total_cycles={}",
+            prove_info.stats.segments,
+            prove_info.stats.user_cycles,
+            prove_info.stats.total_cycles
+        );
+        log_webgpu_diagnostics(prover, name);
+        prove_info
+    }
+
+    async fn prove_composite_info_async(
+        prover: &WebGpuProver,
+        name: &str,
+        env: ExecutorEnv<'_>,
+        elf: &[u8],
+        image_id: [u32; 8],
+    ) -> ProveInfo {
+        console_log!("browser-prove:start {name}");
+        prover.reset_diagnostics();
+        let prove_info = match prover
+            .prove_with_opts_async(env, elf, &ProverOpts::composite())
+            .await
+        {
+            Ok(prove_info) => prove_info,
+            Err(err) => {
+                log_webgpu_diagnostics(prover, name);
+                panic!("{name}: async prove failed: {err}");
+            }
+        };
+
+        prove_info
+            .receipt
+            .inner
+            .composite()
+            .unwrap_or_else(|_| panic!("{name}: receipt is not composite"));
+        prove_info
+            .receipt
+            .verify(image_id)
+            .unwrap_or_else(|err| panic!("{name}: receipt verification failed: {err}"));
+        console_log!(
+            "browser-prove:done {name}: segments={} user_cycles={} total_cycles={}",
+            prove_info.stats.segments,
+            prove_info.stats.user_cycles,
+            prove_info.stats.total_cycles
+        );
+        log_webgpu_diagnostics(prover, name);
+        prove_info
+    }
+
     fn prove_succinct_integrity(
         prover: &WebGpuProver,
         name: &str,
@@ -220,6 +429,40 @@ mod tests {
         let io = hal.copy_from_elem("webgpu_hal_intt_io", &io);
         hal.batch_interpolate_ntt(&io, count);
         assert_gpu_buffer_matches_cpu(&hal, "batch_interpolate_ntt", &io).await;
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_hal_accum_shape_interpolate_ntt_gpu_results_match_cpu() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        let count = 103;
+        let row_size = 1 << 18;
+        let io = (0..count * row_size)
+            .map(|idx| elem(idx + 9000))
+            .collect::<Vec<_>>();
+        let io = hal.copy_from_elem("webgpu_hal_accum_shape_intt_io", &io);
+        hal.batch_interpolate_ntt(&io, count);
+        assert_gpu_elem_buffer_matches_cpu(&hal, "accum_shape_batch_interpolate_ntt", &io).await;
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_hal_accum_shape_zk_shift_gpu_results_match_cpu() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        let count = 103;
+        let row_size = 1 << 18;
+        let io = (0..count * row_size)
+            .map(|idx| elem(idx + 19000))
+            .collect::<Vec<_>>();
+        let io = hal.copy_from_elem("webgpu_hal_accum_shape_zk_shift", &io);
+        hal.zk_shift(&io, count);
+        assert_gpu_elem_buffer_matches_cpu(&hal, "accum_shape_zk_shift", &io).await;
     }
 
     #[wasm_bindgen_test(async)]
@@ -370,6 +613,436 @@ mod tests {
     }
 
     #[wasm_bindgen_test(async)]
+    async fn webgpu_hal_eval_check_poly_ext_matches_cpu() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        let po2 = 3;
+        let steps = 1 << po2;
+        let domain = steps * INV_RATE;
+        let group0_values = (0..domain).map(|idx| elem(idx + 2000)).collect::<Vec<_>>();
+        let group1_values = (0..domain).map(|idx| elem(idx + 3000)).collect::<Vec<_>>();
+        let group2_values = (0..domain).map(|idx| elem(idx + 4000)).collect::<Vec<_>>();
+        let group0 = hal.copy_from_elem("webgpu_eval_check_group0", &group0_values);
+        let group1 = hal.copy_from_elem("webgpu_eval_check_group1", &group1_values);
+        let group2 = hal.copy_from_elem("webgpu_eval_check_group2", &group2_values);
+        let mix_global = hal.copy_from_elem("webgpu_eval_check_mix_global", &[elem(5000)]);
+        let out_global_value = elem(6000);
+        let out_global = hal.copy_from_elem("webgpu_eval_check_out_global", &[out_global_value]);
+        let check = hal.alloc_elem("webgpu_eval_check_check", BabyBearExtElem::EXT_SIZE * domain);
+        let poly_mix = ext_elem(7000);
+
+        let dispatched = hal
+            .dispatch_eval_check_poly_ext(
+                &check,
+                &[&group0, &group1, &group2],
+                &[&mix_global, &out_global],
+                &TINY_EVAL_TAPSET,
+                &TINY_EVAL_DEF,
+                poly_mix,
+                po2,
+                steps,
+            )
+            .unwrap();
+        assert!(dispatched, "tiny eval_check should dispatch on WebGPU");
+        check.sync_gpu_to_cpu(&hal).await.unwrap();
+
+        let exp_po2 = log2_ceil(INV_RATE);
+        let rou = BabyBearElem::ROU_FWD[po2 + exp_po2];
+        let three = BabyBearElem::from_u64(3);
+        let three_to_steps = three.pow(steps);
+        let rou_to_steps = rou.pow(steps);
+        let mut x_to_steps = BabyBearElem::ONE;
+        let mut zerofier_invs = Vec::new();
+        for _ in 0..INV_RATE {
+            zerofier_invs.push((three_to_steps * x_to_steps - BabyBearElem::ONE).inv());
+            x_to_steps *= rou_to_steps;
+        }
+
+        check.view(|check_values| {
+            for cycle in 0..domain {
+                let total =
+                    BabyBearExtElem::from_subfield(&(group0_values[cycle] + out_global_value));
+                let expected =
+                    total * BabyBearExtElem::from_subfield(&zerofier_invs[cycle % INV_RATE]);
+                for (idx, elem) in expected.subelems().iter().enumerate() {
+                    assert_eq!(
+                        check_values[idx * domain + cycle],
+                        *elem,
+                        "eval_check mismatch at subelem {idx}, cycle {cycle}"
+                    );
+                }
+            }
+        });
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn recursion_eval_check_poly_ext_matches_cpu() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        risc0_circuit_recursion::testutil::eval_check_webgpu_matches_portable(&hal)
+            .await
+            .unwrap();
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_hal_mix_poly_coeffs_authoritative_matches_cpu() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        let count = 64;
+        let combo_count = 4;
+        let mix = ext_elem(9100);
+        let mut mix_start = BabyBearExtElem::ONE;
+        let output = hal.alloc_extelem_zeroed(
+            "webgpu_hal_mix_authoritative_output",
+            count * (combo_count + 1),
+        );
+        let mut expected = vec![BabyBearExtElem::ZERO; output.size()];
+
+        let _gpu_scope = hal.gpu_authoritative_scope(true);
+        for (round, input_size) in [7usize, 5, 9].into_iter().enumerate() {
+            let input_values = (0..input_size * count)
+                .map(|idx| elem(9200 + round * 1000 + idx))
+                .collect::<Vec<_>>();
+            let combos_values = (0..input_size)
+                .map(|idx| ((idx * 3 + round) % (combo_count + 1)) as u32)
+                .collect::<Vec<_>>();
+
+            let mut cur = mix_start;
+            for (poly_idx, combo) in combos_values.iter().copied().enumerate() {
+                let out_offset = combo as usize * count;
+                for idx in 0..count {
+                    expected[out_offset + idx] +=
+                        cur * BabyBearExtElem::from_subfield(&input_values[poly_idx * count + idx]);
+                }
+                cur *= mix;
+            }
+
+            let input = hal.copy_from_elem("webgpu_hal_mix_authoritative_input", &input_values);
+            let combos = hal.copy_from_u32("webgpu_hal_mix_authoritative_combos", &combos_values);
+            let dispatched = hal
+                .debug_dispatch_mix_poly_coeffs_authoritative(
+                    &output, &mix_start, &mix, &input, &combos, input_size, count,
+                )
+                .unwrap();
+            assert!(dispatched, "mix_poly_coeffs should dispatch on WebGPU");
+            output.mark_gpu_dirty();
+            mix_start *= mix.pow(input_size);
+        }
+        drop(_gpu_scope);
+
+        output.sync_gpu_to_cpu(&hal).await.unwrap();
+        assert_eq!(output.to_vec(), expected);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_hal_combos_authoritative_matches_cpu() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        hal.reset_diagnostics();
+
+        let cycles = 8;
+        let combo_count = 2;
+        let reg_sizes = [3u32, 2u32];
+        let reg_combo_ids = [1u32, 0u32];
+        let coeff_len =
+            reg_sizes.iter().map(|size| *size as usize).sum::<usize>()
+                + <WebGpuHal as Hal>::CHECK_SIZE;
+        let coeff_u = (0..coeff_len)
+            .map(|idx| ext_elem(10100 + idx))
+            .collect::<Vec<_>>();
+        let mix = ext_elem(10200);
+        let chunks = vec![
+            (0usize, vec![ext_elem(10300)]),
+            (1usize, vec![ext_elem(10400), ext_elem(10500)]),
+            (2usize, vec![ext_elem(10600)]),
+        ];
+        let initial = (0..(combo_count + 1) * cycles)
+            .map(|idx| ext_elem(10700 + idx))
+            .collect::<Vec<_>>();
+        let mut expected = initial.clone();
+        combos_prepare_expected(
+            &mut expected,
+            &coeff_u,
+            combo_count,
+            cycles,
+            &reg_sizes,
+            &reg_combo_ids,
+            mix,
+        );
+        combos_divide_expected(&mut expected, &chunks, cycles);
+
+        let combos = hal.copy_from_extelem("webgpu_hal_combos", &initial);
+        {
+            let _gpu_scope = hal.gpu_authoritative_scope(true);
+            hal.combos_prepare(
+                &combos,
+                &coeff_u,
+                combo_count,
+                cycles,
+                &reg_sizes,
+                &reg_combo_ids,
+                &mix,
+            );
+            hal.combos_divide(&combos, chunks, cycles);
+        }
+
+        assert!(
+            !combos.cpu_is_current(),
+            "GPU-authoritative combos should require async readback"
+        );
+        combos.sync_gpu_to_cpu(&hal).await.unwrap();
+        assert_eq!(combos.to_vec(), expected);
+
+        let diagnostics = hal.diagnostics();
+        assert_eq!(
+            diagnostics.cpu_mirrors, 0,
+            "GPU-authoritative combo ops should not run CPU mirrors"
+        );
+        assert!(
+            diagnostics
+                .ops
+                .iter()
+                .any(|op| op.name == "combos_prepare" && op.gpu_dispatches == 1),
+            "combos_prepare should dispatch on WebGPU"
+        );
+        assert!(
+            diagnostics
+                .ops
+                .iter()
+                .any(|op| op.name == "combos_divide" && op.gpu_dispatches == 1),
+            "combos_divide should dispatch on WebGPU"
+        );
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_hal_proof_shaped_gpu_results_match_cpu() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+
+        let rows = 64;
+        let cols = 211;
+        let hash_matrix = hal.copy_from_elem(
+            "webgpu_hal_proof_shape_hash_matrix",
+            &(0..rows * cols)
+                .map(|idx| elem(idx + 3000))
+                .collect::<Vec<_>>(),
+        );
+        let hash_rows = hal.alloc_digest("webgpu_hal_proof_shape_hash_rows", rows);
+        hal.hash_rows(&hash_rows, &hash_matrix);
+        assert_gpu_buffer_matches_cpu(&hal, "proof_shape_hash_rows", &hash_rows).await;
+
+        let fold_inputs = 512;
+        let hash_fold = hal.copy_from_digest(
+            "webgpu_hal_proof_shape_hash_fold",
+            &(0..fold_inputs).map(|idx| digest(idx as u32)).collect::<Vec<_>>(),
+        );
+        hal.hash_fold(&hash_fold, fold_inputs / 2, fold_inputs / 4);
+        assert_gpu_buffer_matches_cpu(&hal, "proof_shape_hash_fold", &hash_fold).await;
+
+        let count = 211;
+        let in_size = 64;
+        let expand_bits = 2;
+        let out_size = in_size << expand_bits;
+        let input = hal.copy_from_elem(
+            "webgpu_hal_proof_shape_ntt_input",
+            &(0..count * in_size)
+                .map(|idx| elem(idx + 4000))
+                .collect::<Vec<_>>(),
+        );
+        let output = hal.alloc_elem("webgpu_hal_proof_shape_ntt_output", count * out_size);
+        hal.batch_expand_into_evaluate_ntt(&output, &input, count, expand_bits);
+        assert_gpu_buffer_matches_cpu(&hal, "proof_shape_batch_expand_ntt", &output).await;
+
+        hal.batch_bit_reverse(&output, count);
+        assert_gpu_buffer_matches_cpu(&hal, "proof_shape_batch_bit_reverse", &output).await;
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_hal_chunked_gather_sample_matches_cpu() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+
+        let rows = 1024;
+        let cols = 23;
+        let idx = 777;
+        let chunk_cols = 5;
+        let src_values = (0..rows * cols)
+            .map(|idx| elem(idx + 5000))
+            .collect::<Vec<_>>();
+        let expected = (0..cols)
+            .map(|col| src_values[col * rows + idx])
+            .collect::<Vec<_>>();
+
+        let src = hal.copy_from_elem("webgpu_hal_chunked_gather_src", &src_values);
+        let dst = hal.alloc_elem("webgpu_hal_chunked_gather_dst", cols);
+        hal.debug_dispatch_gather_sample_chunked(&dst, &src, idx, cols, rows, chunk_cols)
+            .unwrap();
+        dst.sync_gpu_to_cpu(&hal).await.unwrap();
+        assert_eq!(dst.to_vec(), expected);
+
+        let src_prefix = 3;
+        let dst_prefix = 7;
+        let src = hal.alloc_elem(
+            "webgpu_hal_chunked_gather_offset_src",
+            src_prefix + src_values.len(),
+        );
+        src.view_mut(|view| {
+            for (idx, value) in view.iter_mut().enumerate().take(src_prefix) {
+                *value = elem(idx + 6000);
+            }
+            view[src_prefix..].copy_from_slice(src_values.as_slice());
+        });
+        let dst = hal
+            .copy_from_elem(
+                "webgpu_hal_chunked_gather_offset_dst",
+                &(0..dst_prefix + cols)
+                    .map(|idx| elem(idx + 7000))
+                    .collect::<Vec<_>>(),
+            )
+            .slice(dst_prefix, cols);
+        hal.debug_dispatch_gather_sample_chunked(
+            &dst,
+            &src.slice(src_prefix, rows * cols),
+            idx,
+            cols,
+            rows,
+            chunk_cols,
+        )
+        .unwrap();
+        dst.sync_gpu_to_cpu(&hal).await.unwrap();
+        dst.view(|actual| assert_eq!(actual, expected.as_slice()));
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_hal_oversized_chunked_gather_sample_matches_cpu() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+
+        let rows = 1 << 20;
+        let cols = 31;
+        let source_elems = rows * cols;
+        let source_bytes = source_elems * std::mem::size_of::<BabyBearElem>();
+        assert!(source_bytes > 120 * 1024 * 1024);
+
+        let src = hal.alloc_elem("webgpu_hal_oversized_chunked_gather_src", source_elems);
+        src.view_mut(|view| {
+            for (idx, value) in view.iter_mut().enumerate() {
+                *value = elem(idx + 8000);
+            }
+        });
+
+        for (idx, chunk_cols) in [(0, 3), (rows / 2 + 17, 5), (rows - 1, 7)] {
+            let expected = (0..cols)
+                .map(|col| elem(col * rows + idx + 8000))
+                .collect::<Vec<_>>();
+            let dst = hal.alloc_elem("webgpu_hal_oversized_chunked_gather_dst", cols);
+            hal.debug_dispatch_gather_sample_chunked(&dst, &src, idx, cols, rows, chunk_cols)
+                .unwrap();
+            dst.sync_gpu_to_cpu(&hal).await.unwrap();
+            assert_eq!(dst.to_vec(), expected, "idx={idx} chunk_cols={chunk_cols}");
+        }
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_hal_recursion_sized_gather_sample_falls_back_to_cpu() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+
+        let rows = 1 << 20;
+        let cols = 128;
+        let source_elems = rows * cols;
+        let source_bytes = source_elems * std::mem::size_of::<BabyBearElem>();
+        assert!(source_bytes > 120 * 1024 * 1024);
+
+        let src = hal.alloc_elem("webgpu_hal_recursion_sized_gather_src", source_elems);
+        src.view_mut(|view| {
+            for (idx, value) in view.iter_mut().enumerate() {
+                *value = elem(idx + 9000);
+            }
+        });
+
+        for idx in [0, rows / 2 + 17, rows - 1] {
+            let expected = (0..cols)
+                .map(|col| elem(col * rows + idx + 9000))
+                .collect::<Vec<_>>();
+            let dst = hal.alloc_elem("webgpu_hal_recursion_sized_gather_dst", cols);
+            {
+                let _gpu_scope = hal.gpu_authoritative_scope(true);
+                hal.gather_sample(&dst, &src, idx, cols, rows);
+            }
+            assert!(
+                dst.cpu_is_current(),
+                "recursion-sized gather should keep CPU output current until WebGPU supports tiled buffers"
+            );
+            assert_eq!(dst.to_vec(), expected, "idx={idx}");
+        }
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_hal_gpu_authoritative_outputs_read_back() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        hal.reset_diagnostics();
+
+        let lhs_values = (0..64).map(|idx| elem(idx + 2100)).collect::<Vec<_>>();
+        let rhs_values = (0..64).map(|idx| elem(idx + 2200)).collect::<Vec<_>>();
+        let expected = lhs_values
+            .iter()
+            .zip(rhs_values.iter())
+            .map(|(lhs, rhs)| *lhs + *rhs)
+            .collect::<Vec<_>>();
+        let lhs = hal.copy_from_elem("webgpu_authoritative_lhs", &lhs_values);
+        let rhs = hal.copy_from_elem("webgpu_authoritative_rhs", &rhs_values);
+        let out = hal.alloc_elem("webgpu_authoritative_out", expected.len());
+
+        {
+            let _gpu_scope = hal.gpu_authoritative_scope(true);
+            hal.eltwise_add_elem(&out, &lhs, &rhs);
+        }
+
+        assert!(
+            !out.cpu_is_current(),
+            "GPU-authoritative output should require async CPU readback"
+        );
+        out.sync_gpu_to_cpu(&hal).await.unwrap();
+        assert!(out.cpu_is_current());
+        assert_eq!(out.to_vec(), expected);
+
+        let diagnostics = hal.diagnostics();
+        assert_eq!(
+            diagnostics.cpu_mirrors, 0,
+            "GPU-authoritative HAL op should not run a CPU mirror"
+        );
+    }
+
+    #[wasm_bindgen_test(async)]
     async fn internal_cfg_succinct_receipt_verifies() {
         use risc0_zkvm_methods::{CFG_ELF, CFG_ID};
 
@@ -469,6 +1142,590 @@ mod tests {
         // disabled in the native syscall table in this checkout and is covered
         // by an ignored native test. It is classified as a native-disabled
         // fixture rather than active browser proving parity.
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_poseidon2_basic_async_succinct_receipt_verify() {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        let env = ExecutorEnv::builder()
+            .write(&MultiTestSpec::Poseidon2Basic)
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/poseidon2_basic_async",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert_eq!(prove_info.stats.segments, 1);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_busy_loop_po2_18_async_succinct_receipt_verify() {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_async",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert_eq!(prove_info.stats.segments, 1);
+        assert_eq!(prove_info.stats.total_cycles, 1 << 18);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_busy_loop_po2_18_async_without_eval_check_gpu_succinct_receipt_verify() {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        prover.set_eval_check_gpu_enabled(false);
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_async_without_eval_check_gpu",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert_eq!(prove_info.stats.segments, 1);
+        assert_eq!(prove_info.stats.total_cycles, 1 << 18);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_busy_loop_po2_18_async_without_code_data_authoritative_succinct_receipt_verify()
+    {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        prover.set_rv32im_async_gpu_authoritative_scopes(false, true);
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_async_without_code_data_authoritative",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert_eq!(prove_info.stats.segments, 1);
+        assert_eq!(prove_info.stats.total_cycles, 1 << 18);
+        prover.set_rv32im_async_gpu_authoritative_scopes(true, true);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_busy_loop_po2_18_async_without_accum_finalize_authoritative_succinct_receipt_verify(
+    ) {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        prover.set_rv32im_async_gpu_authoritative_scopes(true, false);
+        prover.set_eval_check_gpu_enabled(false);
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_async_without_accum_finalize_authoritative",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert_eq!(prove_info.stats.segments, 1);
+        assert_eq!(prove_info.stats.total_cycles, 1 << 18);
+        prover.set_eval_check_gpu_enabled(true);
+        prover.set_rv32im_async_gpu_authoritative_scopes(true, true);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_busy_loop_po2_18_async_without_accum_commit_authoritative_succinct_receipt_verify(
+    ) {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        prover.set_rv32im_async_gpu_authoritative_stages(true, false, true);
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_async_without_accum_commit_authoritative",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert_eq!(prove_info.stats.segments, 1);
+        assert_eq!(prove_info.stats.total_cycles, 1 << 18);
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, true);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_busy_loop_po2_18_async_without_finalize_authoritative_succinct_receipt_verify()
+    {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, false);
+        prover.set_eval_check_gpu_enabled(false);
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_async_without_finalize_authoritative",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert_eq!(prove_info.stats.segments, 1);
+        assert_eq!(prove_info.stats.total_cycles, 1 << 18);
+        prover.set_eval_check_gpu_enabled(true);
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, true);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_busy_loop_po2_18_async_composite_without_accum_make_coeffs_authoritative_verify(
+    ) {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, false);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(false, true, true);
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_composite_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_async_composite_without_accum_make_coeffs_authoritative",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        assert_eq!(prove_info.stats.segments, 1);
+        assert_eq!(prove_info.stats.total_cycles, 1 << 18);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(true, true, true);
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, true);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_busy_loop_po2_18_async_composite_without_accum_poly_group_authoritative_verify()
+    {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, false);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(true, false, true);
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_composite_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_async_composite_without_accum_poly_group_authoritative",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        assert_eq!(prove_info.stats.segments, 1);
+        assert_eq!(prove_info.stats.total_cycles, 1 << 18);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(true, true, true);
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, true);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_busy_loop_po2_18_async_composite_without_accum_merkle_authoritative_verify() {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, false);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(true, true, false);
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_composite_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_async_composite_without_accum_merkle_authoritative",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        assert_eq!(prove_info.stats.segments, 1);
+        assert_eq!(prove_info.stats.total_cycles, 1 << 18);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(true, true, true);
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, true);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_busy_loop_po2_18_async_composite_without_accum_make_coeffs_poly_group_authoritative_verify(
+    ) {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, false);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(false, false, true);
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_composite_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_async_composite_without_accum_make_coeffs_poly_group_authoritative",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        assert_eq!(prove_info.stats.segments, 1);
+        assert_eq!(prove_info.stats.total_cycles, 1 << 18);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(true, true, true);
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, true);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_busy_loop_po2_18_async_composite_without_accum_make_coeffs_merkle_authoritative_verify(
+    ) {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, false);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(false, true, false);
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_composite_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_async_composite_without_accum_make_coeffs_merkle_authoritative",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        assert_eq!(prove_info.stats.segments, 1);
+        assert_eq!(prove_info.stats.total_cycles, 1 << 18);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(true, true, true);
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, true);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_busy_loop_po2_18_async_composite_without_accum_poly_group_merkle_authoritative_verify(
+    ) {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, false);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(true, false, false);
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_composite_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_async_composite_without_accum_poly_group_merkle_authoritative",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        assert_eq!(prove_info.stats.segments, 1);
+        assert_eq!(prove_info.stats.total_cycles, 1 << 18);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(true, true, true);
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, true);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_busy_loop_po2_18_async_composite_accum_make_coeffs_without_interpolate_gpu_verify(
+    ) {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, false);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(true, false, false);
+        prover.set_webgpu_op_gpu_enabled("batch_interpolate_ntt", false);
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_composite_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_async_composite_accum_make_coeffs_without_interpolate_gpu",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        assert_eq!(prove_info.stats.segments, 1);
+        assert_eq!(prove_info.stats.total_cycles, 1 << 18);
+        prover.set_webgpu_op_gpu_enabled("batch_interpolate_ntt", true);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(true, true, true);
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, true);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_busy_loop_po2_18_async_composite_accum_make_coeffs_without_zk_shift_gpu_verify(
+    ) {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, false);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(true, false, false);
+        prover.set_webgpu_op_gpu_enabled("zk_shift", false);
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_composite_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_async_composite_accum_make_coeffs_without_zk_shift_gpu",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        assert_eq!(prove_info.stats.segments, 1);
+        assert_eq!(prove_info.stats.total_cycles, 1 << 18);
+        prover.set_webgpu_op_gpu_enabled("zk_shift", true);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(true, true, true);
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, true);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_busy_loop_po2_18_async_composite_accum_make_coeffs_without_interpolate_zk_shift_gpu_verify(
+    ) {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, false);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(true, false, false);
+        prover.set_webgpu_op_gpu_enabled("batch_interpolate_ntt", false);
+        prover.set_webgpu_op_gpu_enabled("zk_shift", false);
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_composite_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_async_composite_accum_make_coeffs_without_interpolate_zk_shift_gpu",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        assert_eq!(prove_info.stats.segments, 1);
+        assert_eq!(prove_info.stats.total_cycles, 1 << 18);
+        prover.set_webgpu_op_gpu_enabled("zk_shift", true);
+        prover.set_webgpu_op_gpu_enabled("batch_interpolate_ntt", true);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(true, true, true);
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, true);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_busy_loop_po2_18_async_composite_accum_poly_group_without_expand_gpu_verify() {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, false);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(false, true, false);
+        prover.set_webgpu_op_gpu_enabled("batch_expand_into_evaluate_ntt", false);
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_composite_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_async_composite_accum_poly_group_without_expand_gpu",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        assert_eq!(prove_info.stats.segments, 1);
+        assert_eq!(prove_info.stats.total_cycles, 1 << 18);
+        prover.set_webgpu_op_gpu_enabled("batch_expand_into_evaluate_ntt", true);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(true, true, true);
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, true);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_busy_loop_po2_18_async_composite_accum_poly_group_without_bit_reverse_gpu_verify(
+    ) {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, false);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(false, true, false);
+        prover.set_webgpu_op_gpu_enabled("batch_bit_reverse", false);
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_composite_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_async_composite_accum_poly_group_without_bit_reverse_gpu",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        assert_eq!(prove_info.stats.segments, 1);
+        assert_eq!(prove_info.stats.total_cycles, 1 << 18);
+        prover.set_webgpu_op_gpu_enabled("batch_bit_reverse", true);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(true, true, true);
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, true);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_busy_loop_po2_18_async_composite_accum_poly_group_without_hash_rows_gpu_verify()
+    {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, false);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(false, true, false);
+        prover.set_webgpu_op_gpu_enabled("hash_rows", false);
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_composite_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_async_composite_accum_poly_group_without_hash_rows_gpu",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        assert_eq!(prove_info.stats.segments, 1);
+        assert_eq!(prove_info.stats.total_cycles, 1 << 18);
+        prover.set_webgpu_op_gpu_enabled("hash_rows", true);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(true, true, true);
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, true);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_busy_loop_po2_18_async_composite_accum_poly_group_without_hash_fold_gpu_verify()
+    {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, false);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(false, true, false);
+        prover.set_webgpu_op_gpu_enabled("hash_fold", false);
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_composite_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_async_composite_accum_poly_group_without_hash_fold_gpu",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        assert_eq!(prove_info.stats.segments, 1);
+        assert_eq!(prove_info.stats.total_cycles, 1 << 18);
+        prover.set_webgpu_op_gpu_enabled("hash_fold", true);
+        prover.set_rv32im_accum_commit_gpu_authoritative_stages(true, true, true);
+        prover.set_rv32im_async_gpu_authoritative_stages(true, true, true);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_busy_loop_po2_18_sync_succinct_receipt_verify() {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_succinct_info(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_sync",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        );
+        assert_eq!(prove_info.stats.segments, 1);
+        assert_eq!(prove_info.stats.total_cycles, 1 << 18);
     }
 
     #[wasm_bindgen_test(async)]
@@ -1031,14 +2288,22 @@ mod tests {
         prove_keccak_union(prover);
     }
 
-    fn prove_keccak_union(prover: &WebGpuProver) {
-        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+    fn keccak_union_env() -> ExecutorEnv<'static> {
+        use risc0_zkvm_methods::multi_test::MultiTestSpec;
 
-        let env = ExecutorEnv::builder()
+        let mut builder = ExecutorEnv::builder();
+        builder.keccak_max_po2(14).unwrap();
+        builder
             .write(&MultiTestSpec::KeccakUnion(3))
             .unwrap()
             .build()
-            .unwrap();
+            .unwrap()
+    }
+
+    fn prove_keccak_union(prover: &WebGpuProver) {
+        use risc0_zkvm_methods::{MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let env = keccak_union_env();
         prove_succinct(
             prover,
             "multi_test/keccak_union",
@@ -1048,10 +2313,35 @@ mod tests {
         );
     }
 
+    async fn prove_keccak_union_async(prover: &WebGpuProver) {
+        use risc0_zkvm_methods::{MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        console_log!("browser-prove:keccak_union env_start");
+        let env = keccak_union_env();
+        console_log!("browser-prove:keccak_union env_done");
+        prove_succinct_info_async(
+            prover,
+            "multi_test/keccak_union",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+    }
+
     #[wasm_bindgen_test(async)]
     async fn native_accelerator_pre_rsa_succinct_receipts_verify() {
         let prover = init_prover().await;
         prove_accelerator_pre_rsa(prover.as_ref());
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_libm_succinct_receipt_verify() {
+        use risc0_zkvm_methods::multi_test::MultiTestSpec;
+
+        let prover = init_prover().await;
+        prove_multi(prover.as_ref(), "multi_test/libm", MultiTestSpec::LibM);
     }
 
     #[wasm_bindgen_test(async)]
@@ -1074,7 +2364,17 @@ mod tests {
 
     #[wasm_bindgen_test(async)]
     async fn native_keccak_union_succinct_receipt_verify() {
+        console_log!("browser-prove:keccak_union init_start");
         let prover = init_prover().await;
+        console_log!("browser-prove:keccak_union init_done");
+        prove_keccak_union_async(prover.as_ref()).await;
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn native_keccak_union_sync_succinct_receipt_verify() {
+        console_log!("browser-prove:keccak_union_sync init_start");
+        let prover = init_prover().await;
+        console_log!("browser-prove:keccak_union_sync init_done");
         prove_keccak_union(prover.as_ref());
     }
 
@@ -2714,6 +4014,57 @@ mod native_stats_tests {
             MULTI_TEST_ELF,
             MULTI_TEST_ID,
         );
+    }
+
+    #[test]
+    #[ignore = "manual focused CUDA baseline for a single po2=18 RV32IM segment"]
+    fn native_busy_loop_po2_18_stats() {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(WEBGPU_BASELINE_SEGMENT_LIMIT_PO2)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        prove_and_print_stats(
+            "multi_test/busy_loop_po2_18",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        );
+    }
+
+    #[test]
+    #[ignore = "manual focused CUDA baseline for the RSA compatibility accelerator fixture"]
+    fn native_rsa_compat_stats() {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(WEBGPU_BASELINE_SEGMENT_LIMIT_PO2)
+            .write(&MultiTestSpec::RsaCompat)
+            .unwrap()
+            .build()
+            .unwrap();
+        prove_and_print_stats("multi_test/rsa_compat", env, MULTI_TEST_ELF, MULTI_TEST_ID);
+    }
+
+    #[test]
+    #[ignore = "manual focused CUDA baseline for the Keccak union accelerator fixture"]
+    fn native_keccak_union_stats() {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let mut builder = ExecutorEnv::builder();
+        builder.segment_limit_po2(WEBGPU_BASELINE_SEGMENT_LIMIT_PO2);
+        builder
+            .keccak_max_po2(WEBGPU_BASELINE_KECCAK_MAX_PO2)
+            .unwrap();
+        let env = builder
+            .write(&MultiTestSpec::KeccakUnion(3))
+            .unwrap()
+            .build()
+            .unwrap();
+        prove_and_print_stats("multi_test/keccak_union", env, MULTI_TEST_ELF, MULTI_TEST_ID);
     }
 
     #[test]
