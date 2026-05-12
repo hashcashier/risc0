@@ -5457,19 +5457,28 @@ impl WebGpuHal {
             ],
         )?;
 
-        // Single encoder, single compute pass, single submit per call.
-        // Bind group is set once, then each stage runs one
-        // `dispatch_workgroups(tile_size, num_tiles, 1)`.
+        // SP3 iter 7h: each stage gets its OWN compute pass within one
+        // encoder. WebGPU does not guarantee that storage writes from
+        // dispatch N are visible to dispatch N+1 inside the same compute
+        // pass — only across pass boundaries does the implementation
+        // insert a memory barrier. Iter 7c through 7g packed all stages
+        // into one pass; if stage K+1 reads scratch that stage K wrote,
+        // it could read stale data, corrupt the check buffer, and
+        // cascade into a bad merkle/FRI allocation that SIGKILLs Chrome
+        // during finalize_async. CUDA's sequential kernel launches each
+        // implicitly synchronize — this is the closest WebGPU analog.
+        // Single submit is preserved (one encoder.finish()), so queue
+        // pressure stays at iter 7e's level.
         let encoder = self.device.create_command_encoder();
-        let pass = encoder.begin_compute_pass();
-        pass.set_bind_group(0, Some(&bind_group));
         for stage in &pipeline.stages {
+            let pass = encoder.begin_compute_pass();
             pass.set_pipeline(&stage.pipeline);
+            pass.set_bind_group(0, Some(&bind_group));
             pass.dispatch_workgroups_with_workgroup_count_y_and_workgroup_count_z(
                 tile_size, num_tiles, 1,
             );
+            pass.end();
         }
-        pass.end();
         self.submit(encoder.finish());
         self.record_gpu_result_authoritative("eval_check", true);
         Ok(true)
