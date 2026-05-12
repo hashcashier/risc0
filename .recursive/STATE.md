@@ -18,6 +18,10 @@ Failed-experiment ledger (do not re-enable without dedicated evidence): split-sh
 
 ### Recursive-mode work
 
-- Run `wasm-webgpu-prover-perf`: Phase 0–4 LOCKED. SP1 baseline-capture recipe documented under `.recursive/run/wasm-webgpu-prover-perf/evidence/perf/r1-baselines/README.md`. SP2–SP11 production sub-phases deferred to follow-on runs per `02-to-be-plan.md`.
-- Worktree `recursive/wasm-webgpu-prover-perf` at HEAD `454b3109b` (controller checkout `wasm` is at same commit).
+- Run `wasm-webgpu-prover-perf`: Phase 0–8 LOCKED. SP1 baselines captured for all six R1 fixtures (`evidence/perf/r1-baselines/`); ratios 7.6×–8.8× for small fixtures, 15.7× for KeccakUnion(1). SP2 seed (webgpu_codegen module) landed with RED→GREEN unit tests. SP10 partial (xgboost) hit a `verify lift` regression — see Plan Addendum 01 below.
+- Worktree `recursive/wasm-webgpu-prover-perf` at HEAD `240425ba9` (SP2 seed); five commits ahead of the Phase 0–8 lock commit `f7698e62a`.
 - Diff basis for follow-on Phase 4 audits: `git diff --name-only d042da45c89a1cd5f9cf7c5eb962a754367b2118`.
+
+### Correctness-First Discipline (Plan Addendum 01)
+
+Plan amendment landed 2026-05-12 in `.recursive/run/wasm-webgpu-prover-perf/addenda/02-to-be-plan.addendum-01.md`. Rule: any correctness regression detected during SP1–SP11 (verifier rejection, panic before receipt, cycle drift, new cpu_only_ops/cpu_fallbacks, or Chrome WebGPU device loss) IMMEDIATELY halts all performance work and invokes the new sub-phase `SP-CR` (Correctness Regression triage). SP-CR runs to completion before any preempted SP resumes. Trigger event was the xgboost browser proof's verify_lift failure (`evidence/perf/r9-deferred/xgboost.chrome.txt`). xgboost is now `blocked` pending SP-CR. SP10 cannot proceed for any deferred fixture until xgboost's SP-CR closes.

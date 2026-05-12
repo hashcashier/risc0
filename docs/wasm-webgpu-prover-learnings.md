@@ -1,6 +1,6 @@
 # WASM/WebGPU Prover Learnings, Methods, And Results
 
-Status: paused at user request on 2026-05-11.
+Status: paused 2026-05-11; performance follow-up run `wasm-webgpu-prover-perf` resumed 2026-05-12. R1 smoke matrix refreshed (ratios 7-9× small, 15.7× KeccakUnion(1)) — see `docs/wasm-webgpu-cuda-comparison.md` and `.recursive/run/wasm-webgpu-prover-perf/evidence/perf/r1-baselines/`. SP2 generator seed landed. SP10 partial (xgboost) hit a multi-segment `verify lift` regression; governed by the Correctness-First Discipline below.
 
 This document records what we built, how we validated it, what we learned, and
 where the implementation still differs from native CUDA/Metal proving. It is
@@ -9,6 +9,18 @@ browser prover is capable of producing standard succinct STARK receipts through
 the existing verifier path for the proof shapes we exercised, and the design is
 now aligned with native local proving. The remaining work is mostly exhaustive
 coverage, browser portability, and performance.
+
+## Correctness-First Discipline (added 2026-05-12)
+
+Any correctness regression detected during performance work — verifier
+rejection, proof panic before receipt, cycle drift, new `cpu_only_ops` or
+`cpu_fallbacks` sites beyond the documented ledger, or Chrome WebGPU device
+loss — **IMMEDIATELY halts all performance work** until the regression is
+fixed under the `SP-CR` (Correctness Regression triage) sub-phase. SP-CR
+preempts whichever performance sub-phase is in flight, runs reproduce →
+root-cause → fix → verify, and only then does the preempted sub-phase resume.
+Currently SP-CR-blocking: xgboost browser proof's `verify lift` failure.
+Full text: `.recursive/run/wasm-webgpu-prover-perf/addenda/02-to-be-plan.addendum-01.md`.
 
 ## Executive Summary
 

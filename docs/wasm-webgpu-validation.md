@@ -1,6 +1,6 @@
 # WASM/WebGPU Prover Validation
 
-Status: validation paused at user request; complete parity is not yet achieved.
+Status: R1 smoke matrix refreshed 2026-05-12 (RTX 5090 + Chrome 148). SP10 partial hit a multi-segment correctness regression (xgboost `verify lift`). Currently governed by the **Correctness-First Discipline** in `.recursive/run/wasm-webgpu-prover-perf/addenda/02-to-be-plan.addendum-01.md`.
 
 This file records the current correctness matrix for the browser WebGPU prover.
 Native baselines are measured first with the local CUDA prover and the same
@@ -10,6 +10,21 @@ The native CUDA and browser WebGPU proving paths are compared in
 
 See `docs/wasm-webgpu-prover-learnings.md` for the latest pause handoff,
 including results gathered after parts of this matrix were written.
+
+## Correctness-First Discipline (governs every entry below)
+
+Any correctness regression detected on any fixture (verifier rejection, proof
+panic before receipt, cycle drift, new `cpu_only_ops`/`cpu_fallbacks` beyond
+the documented ledger, or Chrome WebGPU device loss) **IMMEDIATELY halts
+all performance work** until the regression is fixed under the `SP-CR`
+(Correctness Regression triage) sub-phase. Performance ratios in the table
+below are informational; correctness — verified succinct receipt with matching
+cycle/segment counts — is the unconditional gate. See
+`.recursive/run/wasm-webgpu-prover-perf/addenda/02-to-be-plan.addendum-01.md`.
+
+Currently in `SP-CR`-blocked state: **xgboost** (verify_lift failure 2026-05-12).
+SP10 (deferred matrix bring-up) cannot proceed for any other deferred fixture
+until xgboost SP-CR closes.
 
 ## Commands
 

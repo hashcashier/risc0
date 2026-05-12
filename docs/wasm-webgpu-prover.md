@@ -1,11 +1,29 @@
 # WASM/WebGPU Prover
 
-Status: implementation paused at user request; Chrome/WebGPU parity validation
-was in progress when paused.
+Status: performance follow-up run `wasm-webgpu-prover-perf` underway (Phase 0–8 LOCKED 2026-05-12). SP1 baselines captured, SP2 seed landed, SP10 partial hit a multi-segment correctness regression — see Plan Addendum 01.
 
 See `docs/wasm-webgpu-prover-learnings.md` for the pause handoff, current
 implementation summary, validation evidence, performance findings, and resume
-plan.
+plan. See `.recursive/run/wasm-webgpu-prover-perf/02-to-be-plan.md` for the
+locked ExecPlan and `.recursive/run/wasm-webgpu-prover-perf/addenda/02-to-be-plan.addendum-01.md`
+for the **Correctness-First Discipline** that now governs every sub-phase.
+
+## Correctness-First Discipline (binding rule, 2026-05-12)
+
+Per `.recursive/run/wasm-webgpu-prover-perf/addenda/02-to-be-plan.addendum-01.md`:
+
+Any correctness regression detected during performance work — verifier rejection,
+proof panic before receipt, cycle drift, new `cpu_only_ops`/`cpu_fallbacks`
+sites beyond the documented ledger, or Chrome WebGPU device loss — **IMMEDIATELY
+halts all performance work** and invokes the `SP-CR` (Correctness Regression
+triage) sub-phase. SP-CR preempts whichever SP is in flight, runs to completion
+(reproduce → root-cause → fix → verify), and only then does the preempted SP
+resume.
+
+Currently blocking: the **xgboost browser proof's `verify lift` failure**
+(2026-05-12). xgboost is classified `blocked` and SP10 (deferred matrix
+bring-up) cannot proceed for any deferred fixture until SP-CR resolves the
+xgboost root cause.
 
 The browser WebGPU prover is intended to run local proving in a
 `wasm32-unknown-unknown` browser build while reusing the native zkVM proving
