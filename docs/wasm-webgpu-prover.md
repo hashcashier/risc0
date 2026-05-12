@@ -20,16 +20,18 @@ triage) sub-phase. SP-CR preempts whichever SP is in flight, runs to completion
 (reproduce → root-cause → fix → verify), and only then does the preempted SP
 resume.
 
-xgboost SP-CR **RESOLVED 2026-05-12 via D12**: forced
-`gpu_authoritative_scope(false)` for recursion's commit_groups + finalize
-(`risc0/circuit/recursion/src/prove/hal/webgpu.rs`). xgboost succinct receipt
-verifies in 3547.81 s wall time (≈600× native CUDA). Root cause partially
-narrowed: under `gpu_authoritative=true` recursion's GPU dispatches
-non-deterministically produce zero Merkle roots at segments 5–8 (likely
-silent Chrome WebGPU `uncapturederror` under cumulative pressure). The
-surgical fix to restore lift performance is deferred (D14: attach
-`onuncapturederror` listener); D12 is the production configuration. xgboost
-reclassified to `verified` (cpu_mirror recursion). SP10 unblocked.
+xgboost SP-CR **RESOLVED 2026-05-12 via D14+D15+D16 GPU-only fix** in
+`risc0/zkp/src/hal/webgpu.rs`. D12 (cpu_mirror) was rejected by user and
+reverted. Root cause: `WebGpuBuffer` had no `Drop` impl calling
+`.destroy()`, so cumulative GPU memory across multi-segment recursion lifts
+exceeded Chrome Dawn's per-context budget and the next allocation returned
+an invalid buffer that silently failed validation (`VK_ERROR_OUT_OF_DEVICE_MEMORY`
+captured by D14's `onuncapturederror` listener). D14 attaches the listener;
+D15 caches `BabyBearElem::ROU_FWD` / `ROU_REV` once at HAL init; D16 wraps
+`GpuBuffer` in `Rc<WebGpuBufferOwner>` whose `Drop::drop` calls
+`buffer.destroy()` to release VRAM deterministically. xgboost succinct
+receipt now verifies in 117.92 s on the full GPU path (~21× native CUDA).
+xgboost reclassified to `verified` (full GPU path). SP10 unblocked.
 
 The browser WebGPU prover is intended to run local proving in a
 `wasm32-unknown-unknown` browser build while reusing the native zkVM proving

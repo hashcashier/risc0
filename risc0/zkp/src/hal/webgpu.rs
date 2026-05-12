@@ -28,6 +28,7 @@ use risc0_core::field::{
     baby_bear::{BabyBear, BabyBearElem, BabyBearExtElem},
     Elem as _, ExtElem as _, RootsOfUnity,
 };
+use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
@@ -4616,11 +4617,26 @@ impl<'a> WebGpuBufferBinding<'a> {
     }
 }
 
+/// SP-CR D16 (2026-05-12): owning wrapper that calls `GpuBuffer.destroy()` when
+/// the last Rc reference drops. Without explicit destruction, Chrome WebGPU's
+/// per-context VRAM budget is exhausted across multi-segment recursion lifts
+/// (D14 surfaced `VK_ERROR_OUT_OF_DEVICE_MEMORY` after 7-8 segments), because
+/// JS GC does not promptly reclaim GpuBuffer handles between hot-loop dispatches.
+struct WebGpuBufferOwner {
+    buffer: web_sys::GpuBuffer,
+}
+
+impl Drop for WebGpuBufferOwner {
+    fn drop(&mut self) {
+        self.buffer.destroy();
+    }
+}
+
 /// A browser WebGPU buffer with a CPU shadow for the existing synchronous HAL API.
 #[derive(Clone)]
 pub struct WebGpuBuffer<T> {
     cpu: CpuBuffer<T>,
-    gpu: Option<web_sys::GpuBuffer>,
+    gpu: Option<Rc<WebGpuBufferOwner>>,
     elem_offset: usize,
     /// CPU-side changes that have not been uploaded to the GPU buffer.
     cpu_dirty: Rc<Cell<bool>>,
@@ -4632,7 +4648,7 @@ pub struct WebGpuBuffer<T> {
 impl<T> WebGpuBuffer<T> {
     fn new(
         cpu: CpuBuffer<T>,
-        gpu: Option<web_sys::GpuBuffer>,
+        gpu: Option<Rc<WebGpuBufferOwner>>,
         cpu_dirty: Rc<Cell<bool>>,
         cpu_stale: Rc<Cell<bool>>,
     ) -> Self {
@@ -4683,7 +4699,7 @@ impl<T> WebGpuBuffer<T> {
 
     /// Return the underlying browser `GPUBuffer`, when the allocation is non-empty.
     pub fn raw_buffer(&self) -> Option<&web_sys::GpuBuffer> {
-        self.gpu.as_ref()
+        self.gpu.as_ref().map(|owner| &owner.buffer)
     }
 
     /// Byte offset of this buffer view into the underlying browser `GPUBuffer`.
@@ -4853,6 +4869,15 @@ pub struct WebGpuHal {
     max_compute_workgroup_storage_size: u32,
     eval_check_interpreter_pipelines:
         RefCell<BTreeMap<EvalCheckInterpreterPipelineKey, EvalCheckInterpreterPipeline>>,
+    // SP-CR D15 (2026-05-12): cache the static NTT roots-of-unity tables.
+    // Previously `dispatch_batch_expand_into_evaluate_ntt` and
+    // `dispatch_batch_interpolate_ntt` called `copy_from_elem` on each
+    // invocation, creating ~352 transient 112-byte GPU buffers per xgboost
+    // run. Cumulative Chrome WebGPU resource pressure is one suspect for the
+    // zero-roots silent failure. Caching these once at HAL init removes a
+    // measurable share of the per-dispatch buffer churn.
+    ntt_roots_fwd: Option<WebGpuBuffer<BabyBearElem>>,
+    ntt_roots_rev: Option<WebGpuBuffer<BabyBearElem>>,
 }
 
 /// Restores the previous GPU-authoritative mode when dropped.
@@ -4886,6 +4911,33 @@ impl WebGpuHal {
             "browser-prove:webgpu-limits max_buffer_size={} max_storage_buffer_binding_size={} max_compute_workgroup_storage_size={}",
             max_buffer_size, max_storage_buffer_binding_size, max_compute_workgroup_storage_size
         ));
+
+        // SP-CR D14 (2026-05-12): Surface Chrome WebGPU `uncapturederror` events
+        // so silent validation/OOM failures during cumulative-pressure paths
+        // (recursion lift/join at multi-segment scale) become visible. Without
+        // this listener Chrome swallows async device errors and dispatches that
+        // failed validation report success — see xgboost zero-roots regression.
+        // The closure is leaked via `.forget()`; it lives for the device's
+        // lifetime, which equals the HAL's lifetime.
+        let uncaptured_error_listener =
+            Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
+                let error = js_sys::Reflect::get(&event, &JsValue::from_str("error"))
+                    .unwrap_or(JsValue::NULL);
+                let msg = js_sys::Reflect::get(&error, &JsValue::from_str("message"))
+                    .ok()
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_else(|| "(no message)".to_string());
+                let kind = error
+                    .dyn_ref::<js_sys::Object>()
+                    .map(|obj| obj.constructor().name().as_string().unwrap_or_default())
+                    .unwrap_or_else(|| "GPUError".to_string());
+                web_sys::console::error_1(&JsValue::from_str(&format!(
+                    "browser-prove:webgpu-uncaptured-error type={kind} msg={msg}"
+                )));
+            });
+        device.set_onuncapturederror(Some(uncaptured_error_listener.as_ref().unchecked_ref()));
+        uncaptured_error_listener.forget();
+
         let mut hal = Self {
             device,
             queue,
@@ -4904,7 +4956,13 @@ impl WebGpuHal {
             max_storage_buffer_binding_size,
             max_compute_workgroup_storage_size,
             eval_check_interpreter_pipelines: RefCell::new(BTreeMap::new()),
+            ntt_roots_fwd: None,
+            ntt_roots_rev: None,
         };
+        // SP-CR D15 (2026-05-12): allocate the NTT roots-of-unity tables once
+        // at HAL init instead of per-dispatch. See struct field comment.
+        hal.ntt_roots_fwd = Some(hal.copy_from_elem("webgpu_ntt_roots_fwd", BabyBearElem::ROU_FWD));
+        hal.ntt_roots_rev = Some(hal.copy_from_elem("webgpu_ntt_roots_rev", BabyBearElem::ROU_REV));
         if use_poseidon2 {
             hal.poseidon2 = Some(
                 WebGpuPoseidon2Hash::new(&hal)
@@ -6991,10 +7049,11 @@ impl WebGpuHal {
         let gpu = if byte_len == 0 || !self.can_allocate_gpu_buffer(byte_len) {
             None
         } else {
-            Some(
-                self.create_storage_buffer(name, byte_len)
+            Some(Rc::new(WebGpuBufferOwner {
+                buffer: self
+                    .create_storage_buffer(name, byte_len)
                     .unwrap_or_else(|err| panic!("failed to allocate WebGPU buffer {name}: {err}")),
-            )
+            }))
         };
         WebGpuBuffer::new(
             cpu,
@@ -8944,7 +9003,11 @@ impl WebGpuHal {
             return Ok(true);
         }
 
-        let roots = self.copy_from_elem("webgpu_ntt_roots_fwd", BabyBearElem::ROU_FWD);
+        // SP-CR D15 (2026-05-12): use cached roots buffer instead of per-call alloc.
+        let roots = self
+            .ntt_roots_fwd
+            .as_ref()
+            .ok_or_else(|| anyhow!("WebGPU NTT roots_fwd not initialized"))?;
         let Some(roots_gpu) = roots.raw_buffer() else {
             return Ok(false);
         };
@@ -9029,7 +9092,11 @@ impl WebGpuHal {
         io.sync_cpu_to_gpu(self)?;
 
         if n_bits != 0 {
-            let roots = self.copy_from_elem("webgpu_ntt_roots_rev", BabyBearElem::ROU_REV);
+            // SP-CR D15 (2026-05-12): use cached roots buffer instead of per-call alloc.
+            let roots = self
+                .ntt_roots_rev
+                .as_ref()
+                .ok_or_else(|| anyhow!("WebGPU NTT roots_rev not initialized"))?;
             let Some(roots_gpu) = roots.raw_buffer() else {
                 return Ok(false);
             };

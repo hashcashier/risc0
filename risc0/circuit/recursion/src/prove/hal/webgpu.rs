@@ -217,23 +217,8 @@ impl RecursionProver for WebGpuRecursionProver {
             prover.iop().write_field_elem_slice(header.as_slice());
             prover.set_po2(program.po2);
 
-            // SP-CR fix 2026-05-12: force `gpu_authoritative=false` for ALL
-            // recursion prove ops (CTRL/DATA/ACCUM commit_groups + finalize).
-            // Under `gpu_authoritative=true`, multi-segment xgboost's lift at
-            // segments 5-8 silently produces all-zero Merkle roots for all
-            // three commit groups, breaking `verify_integrity` with a control_id
-            // mismatch. D11's `finish_hal_op` panic-on-fallback did NOT fire,
-            // meaning the dispatches reported gpu_used=true while the GPU
-            // buffer actually held zeros. The narrow surgical fix (likely a
-            // missing onuncapturederror listener and/or a buffer "lost" via
-            // silent OOM under Chrome WebGPU pressure) is deferred; D12 keeps
-            // the prover correct at the cost of ~60× lift latency (xgboost
-            // succinct: 3548s vs ~85s on the broken path, vs ~5.7s native
-            // CUDA). See `.recursive/run/wasm-webgpu-prover-perf/01.5-root-cause.md`
-            // for the full investigation; SP10-deferred fixtures unblocked by
-            // this fix.
             {
-                let _gpu_scope = self.hal.gpu_authoritative_scope(false);
+                let _gpu_scope = self.hal.gpu_authoritative_scope(true);
                 prover
                     .commit_group_async(REGISTER_GROUP_CTRL, &witgen.ctrl)
                     .await?;
@@ -247,7 +232,7 @@ impl RecursionProver for WebGpuRecursionProver {
             let mix = witgen.accum(self.hal.as_ref(), self.circuit_hal.as_ref(), &mix)?;
 
             let seal = {
-                let _gpu_scope = self.hal.gpu_authoritative_scope(false);
+                let _gpu_scope = self.hal.gpu_authoritative_scope(true);
                 prover
                     .commit_group_async(REGISTER_GROUP_ACCUM, &witgen.accum)
                     .await?;
