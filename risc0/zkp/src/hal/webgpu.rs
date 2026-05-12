@@ -67,6 +67,16 @@ const SP3_STAGED_TARGET_CHUNK_OPS: usize = 5000;
 /// requested and independent of how many cycles the prove has overall.
 const SP3_STAGED_TILE_SIZE: u32 = 4096;
 
+/// SP3 iter 7i (2026-05-12): minimum `def.block.len()` to attempt the
+/// staged WGSL fast path. Below this, the runtime interpreter is used
+/// regardless of `staged_eval_check_enabled`. rv32im production DEFs
+/// have ~20k+ ops; recursion's lift DEF and ad-hoc small DEFs sit
+/// below and currently SIGKILL Chrome somewhere in the lift's
+/// finalize_async flow when staged. Until that's root-caused, the gate
+/// keeps staged where it wins (rv32im) and out of where it doesn't
+/// (everything smaller).
+const SP3_STAGED_MIN_BLOCK_OPS: usize = 8000;
+
 /// `GPUBufferUsage.MAP_READ`.
 pub const WEBGPU_BUFFER_USAGE_MAP_READ: u32 = 0x0001;
 /// `GPUBufferUsage.MAP_WRITE`.
@@ -6473,7 +6483,18 @@ impl WebGpuHal {
         // dead code on the production path until browser parity tests
         // (iter 7) opt in per-fixture. Any failure (codegen, compile,
         // dispatch) falls through to the interpreter below.
+        //
+        // SP3 iter 7i (2026-05-12): only attempt staged for DEFs with
+        // enough ops to make staging worthwhile (rv32im production has
+        // ~20k+ ops; recursion's DEF is much smaller and currently
+        // SIGKILLs Chrome somewhere in the lift's finalize_async flow
+        // when staged. Limit the staged path to the heavy DEFs where
+        // it's the perf win, and let the recursion lift use the proven
+        // interpreter path until iter 7i+1 root-causes the recursion
+        // breakage. Threshold of 8000 keeps rv32im above and recursion
+        // / smaller DEFs below.
         if self.staged_eval_check_enabled.get()
+            && def.block.len() >= SP3_STAGED_MIN_BLOCK_OPS
             && group_can_bind.iter().all(|can_bind| *can_bind)
         {
             // Base-field DEFs (rv32im) take the optimized `FieldMode::Base`
