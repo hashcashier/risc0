@@ -1,0 +1,1444 @@
+Set timeout to 4800 seconds...
+Executing bindgen...                                                                                Running headless tests in Chrome on `http://127.0.0.1:42749/`
+Try find `webdriver.json` for configure browser's capabilities:
+Ok
+Starting new webdriver session...                 Visiting http://127.0.0.1:35213...                Loading page elements...                          Waiting for test to finish...                                                                       using deprecated parameters for the initialization function; pass a single object instead
+running 1 test
+browser-prove:webgpu-limits max_buffer_size=1073741824 max_storage_buffer_binding_size=1073741824 max_compute_workgroup_storage_size=49152
+browser-prove:start xgboost
+browser-prove:stage start execute
+browser-prove:stage done execute elapsed_ms=126
+browser-prove:stage start prove_session_async segments=11 pending_keccaks=0 assumptions=0
+browser-prove:stage start prove_segment_async index=0 po2=18 user_cycles=219666
+browser-prove:stage start segment_preflight index=0 po2=18 user_cycles=219666
+browser-prove:stage done segment_preflight index=0 po2=18 user_cycles=219666 elapsed_ms=47
+browser-prove:stage start prove_segment_core_async index=0 po2=18
+browser-prove:stage start segment_prove_core_async index=0 po2=18
+browser-prove:stage start rv32im_witgen mode=parallel cycles=262144 txns=899998 bigint_bytes=0 data_rows=262144 data_cols=211
+browser-prove:stage done rv32im_witgen mode=parallel cycles=262144 txns=899998 bigint_bytes=0 data_rows=262144 data_cols=211 elapsed_ms=534.000
+browser-prove:commit-group group=code root=4ece1f4a8b20c83d92977717ca495a6fd9f83d2439e7ec240de95b09763c4f74
+browser-prove:commit-group group=data root=bd08290499170b025a2b224055dbc33316047c4c0c473d76c6e2071e7eec980c
+browser-prove:stage start rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144
+browser-prove:stage done rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144 elapsed_ms=2042.000
+browser-prove:commit-group group=accum root=5ec6cb44cc06b06235eb17646191e01cddf225627a156f3d37bbd4732b8cbc5d
+browser-prove:stage start eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32
+browser-prove:stage done eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32 elapsed_ms=1.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=1.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=668.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=2.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=674.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=1.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=206.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=5.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=0.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=0.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=0.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=924.000
+browser-prove:stage done segment_prove_core_async index=0 po2=18 elapsed_ms=6008
+browser-prove:stage start verify_segment index=0
+browser-prove:stage done verify_segment index=0 elapsed_ms=16
+browser-prove:stage done prove_segment_core_async index=0 po2=18 elapsed_ms=6025
+browser-prove:stage done prove_segment_async index=0 po2=18 user_cycles=219666 elapsed_ms=6072
+browser-prove:stage start prove_segment_async index=1 po2=18 user_cycles=225068
+browser-prove:stage start segment_preflight index=1 po2=18 user_cycles=225068
+browser-prove:stage done segment_preflight index=1 po2=18 user_cycles=225068 elapsed_ms=20
+browser-prove:stage start prove_segment_core_async index=1 po2=18
+browser-prove:stage start segment_prove_core_async index=1 po2=18
+browser-prove:stage start rv32im_witgen mode=parallel cycles=262144 txns=916707 bigint_bytes=0 data_rows=262144 data_cols=211
+browser-prove:stage done rv32im_witgen mode=parallel cycles=262144 txns=916707 bigint_bytes=0 data_rows=262144 data_cols=211 elapsed_ms=507.000
+browser-prove:commit-group group=code root=4ece1f4a8b20c83d92977717ca495a6fd9f83d2439e7ec240de95b09763c4f74
+browser-prove:commit-group group=data root=d7c5ea2e02f72209a3273b57f05a92278dbaa851c2fe30335d5c496476cc695b
+browser-prove:stage start rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144
+browser-prove:stage done rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144 elapsed_ms=1993.000
+browser-prove:commit-group group=accum root=d6599200af478b4219eea8173800db40aa19911fcaa77f67e5694467ddc67565
+browser-prove:stage start eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32
+browser-prove:stage done eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32 elapsed_ms=0.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=1.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=657.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=2.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=670.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=1.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=206.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=5.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=0.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=1.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=0.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=930.000
+browser-prove:stage done segment_prove_core_async index=1 po2=18 elapsed_ms=5468
+browser-prove:stage start verify_segment index=1
+browser-prove:stage done verify_segment index=1 elapsed_ms=15
+browser-prove:stage done prove_segment_core_async index=1 po2=18 elapsed_ms=5483
+browser-prove:stage done prove_segment_async index=1 po2=18 user_cycles=225068 elapsed_ms=5503
+browser-prove:stage start prove_segment_async index=2 po2=18 user_cycles=224398
+browser-prove:stage start segment_preflight index=2 po2=18 user_cycles=224398
+browser-prove:stage done segment_preflight index=2 po2=18 user_cycles=224398 elapsed_ms=20
+browser-prove:stage start prove_segment_core_async index=2 po2=18
+browser-prove:stage start segment_prove_core_async index=2 po2=18
+browser-prove:stage start rv32im_witgen mode=parallel cycles=262144 txns=914579 bigint_bytes=0 data_rows=262144 data_cols=211
+browser-prove:stage done rv32im_witgen mode=parallel cycles=262144 txns=914579 bigint_bytes=0 data_rows=262144 data_cols=211 elapsed_ms=521.000
+browser-prove:commit-group group=code root=4ece1f4a8b20c83d92977717ca495a6fd9f83d2439e7ec240de95b09763c4f74
+browser-prove:commit-group group=data root=ce029b7127d3cd5aebbc596b1e6a3925e5ed7b4eac5cc24a1f21390bbd86ba14
+browser-prove:stage start rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144
+browser-prove:stage done rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144 elapsed_ms=2106.000
+browser-prove:commit-group group=accum root=ee3ce469e0c7107746e9e4312ee5f9119811a9221b264312b0a37c655a365824
+browser-prove:stage start eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32
+browser-prove:stage done eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32 elapsed_ms=0.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=679.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=2.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=671.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=206.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=5.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=0.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=0.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=0.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=918.000
+browser-prove:stage done segment_prove_core_async index=2 po2=18 elapsed_ms=5610
+browser-prove:stage start verify_segment index=2
+browser-prove:stage done verify_segment index=2 elapsed_ms=15
+browser-prove:stage done prove_segment_core_async index=2 po2=18 elapsed_ms=5625
+browser-prove:stage done prove_segment_async index=2 po2=18 user_cycles=224398 elapsed_ms=5646
+browser-prove:stage start prove_segment_async index=3 po2=18 user_cycles=225094
+browser-prove:stage start segment_preflight index=3 po2=18 user_cycles=225094
+browser-prove:stage done segment_preflight index=3 po2=18 user_cycles=225094 elapsed_ms=20
+browser-prove:stage start prove_segment_core_async index=3 po2=18
+browser-prove:stage start segment_prove_core_async index=3 po2=18
+browser-prove:stage start rv32im_witgen mode=parallel cycles=262144 txns=916769 bigint_bytes=0 data_rows=262144 data_cols=211
+browser-prove:stage done rv32im_witgen mode=parallel cycles=262144 txns=916769 bigint_bytes=0 data_rows=262144 data_cols=211 elapsed_ms=508.000
+browser-prove:commit-group group=code root=4ece1f4a8b20c83d92977717ca495a6fd9f83d2439e7ec240de95b09763c4f74
+browser-prove:commit-group group=data root=64e94e6877230a6cbcc4c8760735233ad4e47b29e2ec632e4fa56f31eadc0450
+browser-prove:stage start rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144
+browser-prove:stage done rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144 elapsed_ms=1990.000
+browser-prove:commit-group group=accum root=73244d575ace6639d15c6d6d456bfb6ef6464113cb0bd03e0aa3755367bdd343
+browser-prove:stage start eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32
+browser-prove:stage done eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32 elapsed_ms=0.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=1.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=656.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=2.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=669.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=206.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=5.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=0.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=0.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=0.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=919.000
+browser-prove:stage done segment_prove_core_async index=3 po2=18 elapsed_ms=5449
+browser-prove:stage start verify_segment index=3
+browser-prove:stage done verify_segment index=3 elapsed_ms=15
+browser-prove:stage done prove_segment_core_async index=3 po2=18 elapsed_ms=5464
+browser-prove:stage done prove_segment_async index=3 po2=18 user_cycles=225094 elapsed_ms=5484
+browser-prove:stage start prove_segment_async index=4 po2=18 user_cycles=224424
+browser-prove:stage start segment_preflight index=4 po2=18 user_cycles=224424
+browser-prove:stage done segment_preflight index=4 po2=18 user_cycles=224424 elapsed_ms=20
+browser-prove:stage start prove_segment_core_async index=4 po2=18
+browser-prove:stage start segment_prove_core_async index=4 po2=18
+browser-prove:stage start rv32im_witgen mode=parallel cycles=262144 txns=914634 bigint_bytes=0 data_rows=262144 data_cols=211
+browser-prove:stage done rv32im_witgen mode=parallel cycles=262144 txns=914634 bigint_bytes=0 data_rows=262144 data_cols=211 elapsed_ms=508.000
+browser-prove:commit-group group=code root=4ece1f4a8b20c83d92977717ca495a6fd9f83d2439e7ec240de95b09763c4f74
+browser-prove:commit-group group=data root=67fc7254856b2e6a0f8be9112238906a4b29c761be5a3e1b8b39f95541930f5c
+browser-prove:stage start rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144
+browser-prove:stage done rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144 elapsed_ms=1996.000
+browser-prove:commit-group group=accum root=4530660ba16d0f5d66bca92172cc7b24a42a111335ff0a39039692375383d66c
+browser-prove:stage start eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32
+browser-prove:stage done eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32 elapsed_ms=0.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=671.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=672.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=206.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=5.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=0.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=0.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=0.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=913.000
+browser-prove:stage done segment_prove_core_async index=4 po2=18 elapsed_ms=5474
+browser-prove:stage start verify_segment index=4
+browser-prove:stage done verify_segment index=4 elapsed_ms=15
+browser-prove:stage done prove_segment_core_async index=4 po2=18 elapsed_ms=5490
+browser-prove:stage done prove_segment_async index=4 po2=18 user_cycles=224424 elapsed_ms=5510
+browser-prove:stage start prove_segment_async index=5 po2=18 user_cycles=225016
+browser-prove:stage start segment_preflight index=5 po2=18 user_cycles=225016
+browser-prove:stage done segment_preflight index=5 po2=18 user_cycles=225016 elapsed_ms=21
+browser-prove:stage start prove_segment_core_async index=5 po2=18
+browser-prove:stage start segment_prove_core_async index=5 po2=18
+browser-prove:stage start rv32im_witgen mode=parallel cycles=262144 txns=916592 bigint_bytes=0 data_rows=262144 data_cols=211
+browser-prove:stage done rv32im_witgen mode=parallel cycles=262144 txns=916592 bigint_bytes=0 data_rows=262144 data_cols=211 elapsed_ms=505.000
+browser-prove:commit-group group=code root=4ece1f4a8b20c83d92977717ca495a6fd9f83d2439e7ec240de95b09763c4f74
+browser-prove:commit-group group=data root=23a7986a5200cb21b2feeb330ff10402d265275967bd255f002be03e0287946c
+browser-prove:stage start rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144
+browser-prove:stage done rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144 elapsed_ms=2000.000
+browser-prove:commit-group group=accum root=31a55964bafd506bf3e9d62f234f31640ee0c973473abc243027320a8ff0222b
+browser-prove:stage start eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32
+browser-prove:stage done eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32 elapsed_ms=1.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=659.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=2.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=669.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=206.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=9.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=0.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=0.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=0.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=904.000
+browser-prove:stage done segment_prove_core_async index=5 po2=18 elapsed_ms=5449
+browser-prove:stage start verify_segment index=5
+browser-prove:stage done verify_segment index=5 elapsed_ms=14
+browser-prove:stage done prove_segment_core_async index=5 po2=18 elapsed_ms=5464
+browser-prove:stage done prove_segment_async index=5 po2=18 user_cycles=225016 elapsed_ms=5485
+browser-prove:stage start prove_segment_async index=6 po2=18 user_cycles=224424
+browser-prove:stage start segment_preflight index=6 po2=18 user_cycles=224424
+browser-prove:stage done segment_preflight index=6 po2=18 user_cycles=224424 elapsed_ms=21
+browser-prove:stage start prove_segment_core_async index=6 po2=18
+browser-prove:stage start segment_prove_core_async index=6 po2=18
+browser-prove:stage start rv32im_witgen mode=parallel cycles=262144 txns=914640 bigint_bytes=0 data_rows=262144 data_cols=211
+browser-prove:stage done rv32im_witgen mode=parallel cycles=262144 txns=914640 bigint_bytes=0 data_rows=262144 data_cols=211 elapsed_ms=502.000
+browser-prove:commit-group group=code root=4ece1f4a8b20c83d92977717ca495a6fd9f83d2439e7ec240de95b09763c4f74
+browser-prove:commit-group group=data root=c035aa07c703be1957405e27a2e4446f9235131af52dfe5ac5fb1359cfdddb0e
+browser-prove:stage start rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144
+browser-prove:stage done rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144 elapsed_ms=1990.000
+browser-prove:commit-group group=accum root=0b4dbb2e20b609642f61ab522f000c2e727145583531346bfc2cd74ed31bf95d
+browser-prove:stage start eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32
+browser-prove:stage done eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32 elapsed_ms=0.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=674.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=3.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=669.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=205.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=5.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=0.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=1.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=0.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=912.000
+browser-prove:stage done segment_prove_core_async index=6 po2=18 elapsed_ms=5490
+browser-prove:stage start verify_segment index=6
+browser-prove:stage done verify_segment index=6 elapsed_ms=15
+browser-prove:stage done prove_segment_core_async index=6 po2=18 elapsed_ms=5505
+browser-prove:stage done prove_segment_async index=6 po2=18 user_cycles=224424 elapsed_ms=5526
+browser-prove:stage start prove_segment_async index=7 po2=18 user_cycles=225094
+browser-prove:stage start segment_preflight index=7 po2=18 user_cycles=225094
+browser-prove:stage done segment_preflight index=7 po2=18 user_cycles=225094 elapsed_ms=20
+browser-prove:stage start prove_segment_core_async index=7 po2=18
+browser-prove:stage start segment_prove_core_async index=7 po2=18
+browser-prove:stage start rv32im_witgen mode=parallel cycles=262144 txns=916762 bigint_bytes=0 data_rows=262144 data_cols=211
+browser-prove:stage done rv32im_witgen mode=parallel cycles=262144 txns=916762 bigint_bytes=0 data_rows=262144 data_cols=211 elapsed_ms=511.000
+browser-prove:commit-group group=code root=4ece1f4a8b20c83d92977717ca495a6fd9f83d2439e7ec240de95b09763c4f74
+browser-prove:commit-group group=data root=1b269525391b3568f77e8c33187250123b4468441dbb0a754546795a6ec8ca77
+browser-prove:stage start rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144
+browser-prove:stage done rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144 elapsed_ms=1988.000
+browser-prove:commit-group group=accum root=cb294719cf25b510eae29f0de1893960aff7e642c54a9b4c5d1bef7634442b21
+browser-prove:stage start eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32
+browser-prove:stage done eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32 elapsed_ms=0.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=1.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=664.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=2.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=673.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=207.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=6.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=0.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=0.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=0.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=900.000
+browser-prove:stage done segment_prove_core_async index=7 po2=18 elapsed_ms=5444
+browser-prove:stage start verify_segment index=7
+browser-prove:stage done verify_segment index=7 elapsed_ms=15
+browser-prove:stage done prove_segment_core_async index=7 po2=18 elapsed_ms=5459
+browser-prove:stage done prove_segment_async index=7 po2=18 user_cycles=225094 elapsed_ms=5479
+browser-prove:stage start prove_segment_async index=8 po2=18 user_cycles=183428
+browser-prove:stage start segment_preflight index=8 po2=18 user_cycles=183428
+browser-prove:stage done segment_preflight index=8 po2=18 user_cycles=183428 elapsed_ms=35
+browser-prove:stage start prove_segment_core_async index=8 po2=18
+browser-prove:stage start segment_prove_core_async index=8 po2=18
+browser-prove:stage start rv32im_witgen mode=parallel cycles=262144 txns=800047 bigint_bytes=0 data_rows=262144 data_cols=211
+browser-prove:stage done rv32im_witgen mode=parallel cycles=262144 txns=800047 bigint_bytes=0 data_rows=262144 data_cols=211 elapsed_ms=606.000
+browser-prove:commit-group group=code root=4ece1f4a8b20c83d92977717ca495a6fd9f83d2439e7ec240de95b09763c4f74
+browser-prove:commit-group group=data root=dd43075a1468ca4774819d53f502d70db8970a1a0c4c3d53669c21518ea22e43
+browser-prove:stage start rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144
+browser-prove:stage done rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144 elapsed_ms=1824.000
+browser-prove:commit-group group=accum root=21d9ad26ad635202e132ff222f8eaf60d0489e779480c2239451226e57346558
+browser-prove:stage start eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32
+browser-prove:stage done eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32 elapsed_ms=0.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=652.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=114.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=675.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=1.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=205.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=5.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=0.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=0.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=0.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=912.000
+browser-prove:stage done segment_prove_core_async index=8 po2=18 elapsed_ms=5531
+browser-prove:stage start verify_segment index=8
+browser-prove:stage done verify_segment index=8 elapsed_ms=17
+browser-prove:stage done prove_segment_core_async index=8 po2=18 elapsed_ms=5548
+browser-prove:stage done prove_segment_async index=8 po2=18 user_cycles=183428 elapsed_ms=5583
+browser-prove:stage start prove_segment_async index=9 po2=18 user_cycles=204191
+browser-prove:stage start segment_preflight index=9 po2=18 user_cycles=204191
+browser-prove:stage done segment_preflight index=9 po2=18 user_cycles=204191 elapsed_ms=28
+browser-prove:stage start prove_segment_core_async index=9 po2=18
+browser-prove:stage start segment_prove_core_async index=9 po2=18
+browser-prove:stage start rv32im_witgen mode=parallel cycles=262144 txns=870768 bigint_bytes=0 data_rows=262144 data_cols=211
+browser-prove:stage done rv32im_witgen mode=parallel cycles=262144 txns=870768 bigint_bytes=0 data_rows=262144 data_cols=211 elapsed_ms=612.000
+browser-prove:commit-group group=code root=4ece1f4a8b20c83d92977717ca495a6fd9f83d2439e7ec240de95b09763c4f74
+browser-prove:commit-group group=data root=73aa10141de1ea376a516c5d71a113487e854f5539fbb81fda31f439f9fc3600
+browser-prove:stage start rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144
+browser-prove:stage done rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144 elapsed_ms=1906.000
+browser-prove:commit-group group=accum root=4df2324eaf2b315e868c1933edd57e03a3819635b6ed953d148c5710a4db2b5b
+browser-prove:stage start eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32
+browser-prove:stage done eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32 elapsed_ms=0.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=667.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=3.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=671.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=206.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=8.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=0.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=0.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=0.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=923.000
+browser-prove:stage done segment_prove_core_async index=9 po2=18 elapsed_ms=5522
+browser-prove:stage start verify_segment index=9
+browser-prove:stage done verify_segment index=9 elapsed_ms=15
+browser-prove:stage done prove_segment_core_async index=9 po2=18 elapsed_ms=5537
+browser-prove:stage done prove_segment_async index=9 po2=18 user_cycles=204191 elapsed_ms=5565
+browser-prove:stage start prove_segment_async index=10 po2=18 user_cycles=114087
+browser-prove:stage start segment_preflight index=10 po2=18 user_cycles=114087
+browser-prove:stage done segment_preflight index=10 po2=18 user_cycles=114087 elapsed_ms=44
+browser-prove:stage start prove_segment_core_async index=10 po2=18
+browser-prove:stage start segment_prove_core_async index=10 po2=18
+browser-prove:stage start rv32im_witgen mode=parallel cycles=262144 txns=538399 bigint_bytes=0 data_rows=262144 data_cols=211
+browser-prove:stage done rv32im_witgen mode=parallel cycles=262144 txns=538399 bigint_bytes=0 data_rows=262144 data_cols=211 elapsed_ms=562.000
+browser-prove:commit-group group=code root=4ece1f4a8b20c83d92977717ca495a6fd9f83d2439e7ec240de95b09763c4f74
+browser-prove:commit-group group=data root=50aa1e65fd39b454411dd61421c32959ac1e691cca93c90c3098c50d78403a5f
+browser-prove:stage start rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144
+browser-prove:stage done rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144 elapsed_ms=2006.000
+browser-prove:commit-group group=accum root=5d696c22402422523dc72e0c5508f9379c1c733525dac01fa2f5132c5ee23e21
+browser-prove:stage start eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32
+browser-prove:stage done eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32 elapsed_ms=0.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=643.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=670.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=206.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=7.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=0.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=0.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=1.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=921.000
+browser-prove:stage done segment_prove_core_async index=10 po2=18 elapsed_ms=5624
+browser-prove:stage start verify_segment index=10
+browser-prove:stage done verify_segment index=10 elapsed_ms=15
+browser-prove:stage done prove_segment_core_async index=10 po2=18 elapsed_ms=5639
+browser-prove:stage done prove_segment_async index=10 po2=18 user_cycles=114087 elapsed_ms=5683
+browser-prove:stage start keccak_receipts_root
+browser-prove:stage done keccak_receipts_root elapsed_ms=0
+browser-prove:stage start verify_composite
+browser-prove:stage done verify_composite elapsed_ms=158
+browser-prove:stage start composite_to_succinct_async
+browser-prove:stage start lift_async segment_index=0
+browser-prove:stage start lift_prove_async segment_index=0
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111 elapsed_ms=235.000
+browser-prove:commit-group group=code root=e7934a23ddce1423b425cf32aa23be29f48cd40e0b6ff9376dce6f3bf9d0bc35
+browser-prove:commit-group group=data root=a344a67462ea7a3f42d7764dfc1ee46e688e284bbed1457413270372cfcde80f
+browser-prove:stage start recursion_accumulate work_cycles=145470 total_cycles=262144
+browser-prove:stage done recursion_accumulate work_cycles=145470 total_cycles=262144 elapsed_ms=245.000
+browser-prove:commit-group group=accum root=81f741647e226d354b57195c21e8811af90a1968a301735b32bf79735fc3d73b
+browser-prove:stage start recursion_eval_check po2=18 steps=262144 domain=1048576
+browser-prove:stage done recursion_eval_check po2=18 steps=262144 domain=1048576 elapsed_ms=120116.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=90.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=4804.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=2593.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=1.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=65.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=221.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=1.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=79.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=5.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=3.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=846.000
+browser-prove:stage done lift_prove_async segment_index=0 elapsed_ms=166854
+browser-prove:stage start verify_lift
+browser-prove:stage done verify_lift elapsed_ms=14
+browser-prove:stage done lift_async segment_index=0 elapsed_ms=166868
+browser-prove:stage start lift_async segment_index=1
+browser-prove:stage start lift_prove_async segment_index=1
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111 elapsed_ms=168.000
+browser-prove:commit-group group=code root=e7934a23ddce1423b425cf32aa23be29f48cd40e0b6ff9376dce6f3bf9d0bc35
+browser-prove:commit-group group=data root=31c2943cdaf8e5651f52974c76478743d193325aec59371f75909572e601b21f
+browser-prove:stage start recursion_accumulate work_cycles=145470 total_cycles=262144
+browser-prove:stage done recursion_accumulate work_cycles=145470 total_cycles=262144 elapsed_ms=219.000
+browser-prove:commit-group group=accum root=0d12f6421a97f2416e540d5167348a38a6f0541afe5e7b2f8ab3c02fe0b0485d
+browser-prove:stage start recursion_eval_check po2=18 steps=262144 domain=1048576
+browser-prove:stage done recursion_eval_check po2=18 steps=262144 domain=1048576 elapsed_ms=119545.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=89.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=4801.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=2571.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=65.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=213.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=79.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=3.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=2.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=840.000
+browser-prove:stage done lift_prove_async segment_index=1 elapsed_ms=165894
+browser-prove:stage start verify_lift
+browser-prove:stage done verify_lift elapsed_ms=14
+browser-prove:stage done lift_async segment_index=1 elapsed_ms=165908
+browser-prove:stage start join_async
+browser-prove:stage start join_prove_async
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=259612 wom=564091 iops=92882
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=259612 wom=564091 iops=92882 elapsed_ms=312.000
+browser-prove:commit-group group=code root=7a8f24092c34ed3eb81b3d0a0b796c588c615d3488ef9e61c21dbd1e4b83ea6e
+browser-prove:commit-group group=data root=2293795910e39f599a19f01bfc19ce28b99f1324651ead07206b194e2ade006f
+browser-prove:stage start recursion_accumulate work_cycles=259612 total_cycles=262144
+browser-prove:stage done recursion_accumulate work_cycles=259612 total_cycles=262144 elapsed_ms=390.000
+browser-prove:commit-group group=accum root=ec13c467df9b8833d3a998052971a365a6fc68115cb7d84f8230ef6693215727
+browser-prove:stage start recursion_eval_check po2=18 steps=262144 domain=1048576
+browser-prove:stage done recursion_eval_check po2=18 steps=262144 domain=1048576 elapsed_ms=119447.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=89.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=4800.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=2569.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=1.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=64.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=213.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=1.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=79.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=4.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=2.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=841.000
+browser-prove:stage done join_prove_async elapsed_ms=166105
+browser-prove:stage start verify_join
+browser-prove:stage done verify_join elapsed_ms=14
+browser-prove:stage done join_async elapsed_ms=166119
+browser-prove:stage start lift_async segment_index=2
+browser-prove:stage start lift_prove_async segment_index=2
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111 elapsed_ms=168.000
+browser-prove:commit-group group=code root=e7934a23ddce1423b425cf32aa23be29f48cd40e0b6ff9376dce6f3bf9d0bc35
+browser-prove:commit-group group=data root=cc38162b6b96a9049b33ed706021f95323dc083820d95f5cad05fd3bfd794e20
+browser-prove:stage start recursion_accumulate work_cycles=145470 total_cycles=262144
+browser-prove:stage done recursion_accumulate work_cycles=145470 total_cycles=262144 elapsed_ms=219.000
+browser-prove:commit-group group=accum root=729db26bc7005d4c5ff9d935caf68e23cca35d7557b28e27989bf93460c5c517
+browser-prove:stage start recursion_eval_check po2=18 steps=262144 domain=1048576
+browser-prove:stage done recursion_eval_check po2=18 steps=262144 domain=1048576 elapsed_ms=119391.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=89.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=4802.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=2598.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=64.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=216.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=79.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=4.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=2.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=868.000
+browser-prove:stage done lift_prove_async segment_index=2 elapsed_ms=165769
+browser-prove:stage start verify_lift
+browser-prove:stage done verify_lift elapsed_ms=14
+browser-prove:stage done lift_async segment_index=2 elapsed_ms=165783
+browser-prove:stage start join_async
+browser-prove:stage start join_prove_async
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=259612 wom=564091 iops=92882
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=259612 wom=564091 iops=92882 elapsed_ms=314.000
+browser-prove:commit-group group=code root=7a8f24092c34ed3eb81b3d0a0b796c588c615d3488ef9e61c21dbd1e4b83ea6e
+browser-prove:commit-group group=data root=ca12e53d88cf2b751962af125bac252a06cfc24b20476b1064f3e330da7f1455
+browser-prove:stage start recursion_accumulate work_cycles=259612 total_cycles=262144
+browser-prove:stage done recursion_accumulate work_cycles=259612 total_cycles=262144 elapsed_ms=394.000
+browser-prove:commit-group group=accum root=9aacf91715384e4c82aabd36b81ea760c1096e0f0aa5c13732cf2c167b6e5b62
+browser-prove:stage start recursion_eval_check po2=18 steps=262144 domain=1048576
+browser-prove:stage done recursion_eval_check po2=18 steps=262144 domain=1048576 elapsed_ms=119661.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=88.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=4806.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=2569.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=64.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=213.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=79.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=4.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=2.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=842.000
+browser-prove:stage done join_prove_async elapsed_ms=166498
+browser-prove:stage start verify_join
+browser-prove:stage done verify_join elapsed_ms=14
+browser-prove:stage done join_async elapsed_ms=166512
+browser-prove:stage start lift_async segment_index=3
+browser-prove:stage start lift_prove_async segment_index=3
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111 elapsed_ms=169.000
+browser-prove:commit-group group=code root=e7934a23ddce1423b425cf32aa23be29f48cd40e0b6ff9376dce6f3bf9d0bc35
+browser-prove:commit-group group=data root=8c9c49099f621f2de916082453388f1dcb167c3294d67c75721e114e6540df58
+browser-prove:stage start recursion_accumulate work_cycles=145470 total_cycles=262144
+browser-prove:stage done recursion_accumulate work_cycles=145470 total_cycles=262144 elapsed_ms=219.000
+browser-prove:commit-group group=accum root=24f1ac2f0b519534c1a2b32cf9fbf466b6b2946b2dc1bc32c7f09242d5c47c4c
+browser-prove:stage start recursion_eval_check po2=18 steps=262144 domain=1048576
+browser-prove:stage done recursion_eval_check po2=18 steps=262144 domain=1048576 elapsed_ms=119512.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=89.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=4802.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=2571.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=64.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=215.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=79.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=4.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=2.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=840.000
+browser-prove:stage done lift_prove_async segment_index=3 elapsed_ms=165838
+browser-prove:stage start verify_lift
+browser-prove:stage done verify_lift elapsed_ms=14
+browser-prove:stage done lift_async segment_index=3 elapsed_ms=165852
+browser-prove:stage start join_async
+browser-prove:stage start join_prove_async
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=259612 wom=564091 iops=92882
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=259612 wom=564091 iops=92882 elapsed_ms=309.000
+browser-prove:commit-group group=code root=7a8f24092c34ed3eb81b3d0a0b796c588c615d3488ef9e61c21dbd1e4b83ea6e
+browser-prove:commit-group group=data root=2360d9717b7ea948708df05c3c21d92c98aecb024cf9bc627241cb4b29cd3748
+browser-prove:stage start recursion_accumulate work_cycles=259612 total_cycles=262144
+browser-prove:stage done recursion_accumulate work_cycles=259612 total_cycles=262144 elapsed_ms=389.000
+browser-prove:commit-group group=accum root=d8b0bd7435f0d63ac73e290cd76d984c09772a3a4d9e8a2573c1bf6f91e1075e
+browser-prove:stage start recursion_eval_check po2=18 steps=262144 domain=1048576
+browser-prove:stage done recursion_eval_check po2=18 steps=262144 domain=1048576 elapsed_ms=119186.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=89.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=4803.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=2567.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=1.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=64.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=214.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=80.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=4.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=2.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=841.000
+browser-prove:stage done join_prove_async elapsed_ms=165826
+browser-prove:stage start verify_join
+browser-prove:stage done verify_join elapsed_ms=14
+browser-prove:stage done join_async elapsed_ms=165840
+browser-prove:stage start lift_async segment_index=4
+browser-prove:stage start lift_prove_async segment_index=4
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111 elapsed_ms=168.000
+browser-prove:commit-group group=code root=e7934a23ddce1423b425cf32aa23be29f48cd40e0b6ff9376dce6f3bf9d0bc35
+browser-prove:commit-group group=data root=c96789012bbe6767db06662e60e921553f68995df093465981a46609f2d4e70b
+browser-prove:stage start recursion_accumulate work_cycles=145470 total_cycles=262144
+browser-prove:stage done recursion_accumulate work_cycles=145470 total_cycles=262144 elapsed_ms=220.000
+browser-prove:commit-group group=accum root=48b52d2aa44eae4d2aa5e82507b0ae18198b7931982dcd0d0668c9754f25e463
+browser-prove:stage start recursion_eval_check po2=18 steps=262144 domain=1048576
+browser-prove:stage done recursion_eval_check po2=18 steps=262144 domain=1048576 elapsed_ms=119351.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=89.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=4800.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=2569.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=64.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=214.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=79.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=4.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=2.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=840.000
+browser-prove:stage done lift_prove_async segment_index=4 elapsed_ms=165662
+browser-prove:stage start verify_lift
+browser-prove:stage done verify_lift elapsed_ms=14
+browser-prove:stage done lift_async segment_index=4 elapsed_ms=165676
+browser-prove:stage start join_async
+browser-prove:stage start join_prove_async
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=259612 wom=564091 iops=92882
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=259612 wom=564091 iops=92882 elapsed_ms=312.000
+browser-prove:commit-group group=code root=7a8f24092c34ed3eb81b3d0a0b796c588c615d3488ef9e61c21dbd1e4b83ea6e
+browser-prove:commit-group group=data root=05e94e747732312ac292865ffc0e47004977b437e6e9d06f5a1edc40f4b2d90f
+browser-prove:stage start recursion_accumulate work_cycles=259612 total_cycles=262144
+browser-prove:stage done recursion_accumulate work_cycles=259612 total_cycles=262144 elapsed_ms=389.000
+browser-prove:commit-group group=accum root=d7d03f557c24c60b6a953c27fa019d76d4033439ed1a72445aab3e48ba957064
+browser-prove:stage start recursion_eval_check po2=18 steps=262144 domain=1048576
+browser-prove:stage done recursion_eval_check po2=18 steps=262144 domain=1048576 elapsed_ms=119422.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=89.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=4805.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=2568.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=1.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=64.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=213.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=79.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=4.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=3.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=839.000
+browser-prove:stage done join_prove_async elapsed_ms=166062
+browser-prove:stage start verify_join
+browser-prove:stage done verify_join elapsed_ms=13
+browser-prove:stage done join_async elapsed_ms=166076
+browser-prove:stage start lift_async segment_index=5
+browser-prove:stage start lift_prove_async segment_index=5
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111 elapsed_ms=168.000
+browser-prove:commit-group group=code root=e7934a23ddce1423b425cf32aa23be29f48cd40e0b6ff9376dce6f3bf9d0bc35
+browser-prove:commit-group group=data root=bab50e60bf65f71f480e742523e61a17c5a4fb3aa73aee6945596d3780fe7650
+browser-prove:stage start recursion_accumulate work_cycles=145470 total_cycles=262144
+browser-prove:stage done recursion_accumulate work_cycles=145470 total_cycles=262144 elapsed_ms=219.000
+browser-prove:commit-group group=accum root=fce8555d69554f0fd063761e86010720b6086320d2f0624be0d2273d7c2bc31f
+browser-prove:stage start recursion_eval_check po2=18 steps=262144 domain=1048576
+browser-prove:stage done recursion_eval_check po2=18 steps=262144 domain=1048576 elapsed_ms=119402.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=89.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=4800.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=2577.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=64.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=215.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=79.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=4.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=3.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=839.000
+browser-prove:stage done lift_prove_async segment_index=5 elapsed_ms=165700
+browser-prove:stage start verify_lift
+browser-prove:stage done verify_lift elapsed_ms=14
+browser-prove:stage done lift_async segment_index=5 elapsed_ms=165714
+browser-prove:stage start join_async
+browser-prove:stage start join_prove_async
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=259612 wom=564091 iops=92882
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=259612 wom=564091 iops=92882 elapsed_ms=311.000
+browser-prove:commit-group group=code root=7a8f24092c34ed3eb81b3d0a0b796c588c615d3488ef9e61c21dbd1e4b83ea6e
+browser-prove:commit-group group=data root=25be22364142fe30fa9a7f27052efb5402e6b44b6a21c84b057956680f523f54
+browser-prove:stage start recursion_accumulate work_cycles=259612 total_cycles=262144
+browser-prove:stage done recursion_accumulate work_cycles=259612 total_cycles=262144 elapsed_ms=406.000
+browser-prove:commit-group group=accum root=98d17f2403f6dc5dae7dca73eb1ab6332e38d80cef88ee5bc9627a4c25bf5b0d
+browser-prove:stage start recursion_eval_check po2=18 steps=262144 domain=1048576
+browser-prove:stage done recursion_eval_check po2=18 steps=262144 domain=1048576 elapsed_ms=119650.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=89.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=4807.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=2578.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=65.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=214.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=80.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=4.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=2.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=840.000
+browser-prove:stage done join_prove_async elapsed_ms=166342
+browser-prove:stage start verify_join
+browser-prove:stage done verify_join elapsed_ms=13
+browser-prove:stage done join_async elapsed_ms=166356
+browser-prove:stage start lift_async segment_index=6
+browser-prove:stage start lift_prove_async segment_index=6
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111 elapsed_ms=168.000
+browser-prove:commit-group group=code root=e7934a23ddce1423b425cf32aa23be29f48cd40e0b6ff9376dce6f3bf9d0bc35
+browser-prove:commit-group group=data root=cadd3f5b46ddb2622952a3138ee6d3485648455b5ceb81204e9ac230ad428658
+browser-prove:stage start recursion_accumulate work_cycles=145470 total_cycles=262144
+browser-prove:stage done recursion_accumulate work_cycles=145470 total_cycles=262144 elapsed_ms=219.000
+browser-prove:commit-group group=accum root=dc6f6a1221ac142dbf835b387105ee2c1c3dc114b7a4b85cf574ca159860972a
+browser-prove:stage start recursion_eval_check po2=18 steps=262144 domain=1048576
+browser-prove:stage done recursion_eval_check po2=18 steps=262144 domain=1048576 elapsed_ms=119372.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=90.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=4814.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=2574.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=1.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=64.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=213.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=79.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=3.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=3.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=839.000
+browser-prove:stage done lift_prove_async segment_index=6 elapsed_ms=165706
+browser-prove:stage start verify_lift
+browser-prove:stage done verify_lift elapsed_ms=14
+browser-prove:stage done lift_async segment_index=6 elapsed_ms=165720
+browser-prove:stage start join_async
+browser-prove:stage start join_prove_async
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=259612 wom=564091 iops=92882
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=259612 wom=564091 iops=92882 elapsed_ms=311.000
+browser-prove:commit-group group=code root=7a8f24092c34ed3eb81b3d0a0b796c588c615d3488ef9e61c21dbd1e4b83ea6e
+browser-prove:commit-group group=data root=edc5ee26195a2f2648066d14ee95cb75af285857ad50ba5ee6c59a21e86b6e10
+browser-prove:stage start recursion_accumulate work_cycles=259612 total_cycles=262144
+browser-prove:stage done recursion_accumulate work_cycles=259612 total_cycles=262144 elapsed_ms=390.000
+browser-prove:commit-group group=accum root=7f36b2008879de40c120a75f79fa405964506e59e187dc3c95e2bf4ce9347117
+browser-prove:stage start recursion_eval_check po2=18 steps=262144 domain=1048576
+browser-prove:stage done recursion_eval_check po2=18 steps=262144 domain=1048576 elapsed_ms=119179.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=89.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=4798.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=2571.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=64.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=213.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=79.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=3.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=3.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=839.000
+browser-prove:stage done join_prove_async elapsed_ms=165849
+browser-prove:stage start verify_join
+browser-prove:stage done verify_join elapsed_ms=13
+browser-prove:stage done join_async elapsed_ms=165862
+browser-prove:stage start lift_async segment_index=7
+browser-prove:stage start lift_prove_async segment_index=7
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111 elapsed_ms=168.000
+browser-prove:commit-group group=code root=e7934a23ddce1423b425cf32aa23be29f48cd40e0b6ff9376dce6f3bf9d0bc35
+browser-prove:commit-group group=data root=24a336207b87f229cf8e3048dd370a63280a38280bf99737a076be0595e6c16e
+browser-prove:stage start recursion_accumulate work_cycles=145470 total_cycles=262144
+browser-prove:stage done recursion_accumulate work_cycles=145470 total_cycles=262144 elapsed_ms=219.000
+browser-prove:commit-group group=accum root=916cab0a9a7b842a66c19631bdb43013f6c7c840bddc892cec3f4c60aef5cd54
+browser-prove:stage start recursion_eval_check po2=18 steps=262144 domain=1048576
+browser-prove:stage done recursion_eval_check po2=18 steps=262144 domain=1048576 elapsed_ms=119573.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=89.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=4808.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=2575.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=65.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=214.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=1.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=79.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=4.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=2.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=841.000
+browser-prove:stage done lift_prove_async segment_index=7 elapsed_ms=165913
+browser-prove:stage start verify_lift
+browser-prove:stage done verify_lift elapsed_ms=14
+browser-prove:stage done lift_async segment_index=7 elapsed_ms=165927
+browser-prove:stage start join_async
+browser-prove:stage start join_prove_async
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=259612 wom=564091 iops=92882
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=259612 wom=564091 iops=92882 elapsed_ms=313.000
+browser-prove:commit-group group=code root=7a8f24092c34ed3eb81b3d0a0b796c588c615d3488ef9e61c21dbd1e4b83ea6e
+browser-prove:commit-group group=data root=43354c04d2f80467d41a1162318f6a129b0d462800f553680c4d041b357ab56c
+browser-prove:stage start recursion_accumulate work_cycles=259612 total_cycles=262144
+browser-prove:stage done recursion_accumulate work_cycles=259612 total_cycles=262144 elapsed_ms=390.000
+browser-prove:commit-group group=accum root=c6b1be5ee2a8eb4ba4ee7f00d6d2da1499d05d6c58dee53c6698ab2a84b45072
+browser-prove:stage start recursion_eval_check po2=18 steps=262144 domain=1048576
+browser-prove:stage done recursion_eval_check po2=18 steps=262144 domain=1048576 elapsed_ms=119444.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=89.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=4806.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=2575.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=1.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=64.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=213.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=79.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=4.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=3.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=839.000
+browser-prove:stage done join_prove_async elapsed_ms=166147
+browser-prove:stage start verify_join
+browser-prove:stage done verify_join elapsed_ms=14
+browser-prove:stage done join_async elapsed_ms=166161
+browser-prove:stage start lift_async segment_index=8
+browser-prove:stage start lift_prove_async segment_index=8
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111 elapsed_ms=168.000
+browser-prove:commit-group group=code root=e7934a23ddce1423b425cf32aa23be29f48cd40e0b6ff9376dce6f3bf9d0bc35
+browser-prove:commit-group group=data root=25c6771fe15e425b096df81eab2ef34334bc7a354e6fc04efadb7c4dc7e79972
+browser-prove:stage start recursion_accumulate work_cycles=145470 total_cycles=262144
+browser-prove:stage done recursion_accumulate work_cycles=145470 total_cycles=262144 elapsed_ms=219.000
+browser-prove:commit-group group=accum root=54877e002fe54d32f601f2699d6a7d230a9b6833166fbe42ff621c106f86e204
+browser-prove:stage start recursion_eval_check po2=18 steps=262144 domain=1048576
+browser-prove:stage done recursion_eval_check po2=18 steps=262144 domain=1048576 elapsed_ms=119247.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=89.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=4799.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=2567.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=64.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=213.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=79.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=4.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=3.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=839.000
+browser-prove:stage done lift_prove_async segment_index=8 elapsed_ms=165552
+browser-prove:stage start verify_lift
+browser-prove:stage done verify_lift elapsed_ms=14
+browser-prove:stage done lift_async segment_index=8 elapsed_ms=165566
+browser-prove:stage start join_async
+browser-prove:stage start join_prove_async
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=259612 wom=564091 iops=92882
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=259612 wom=564091 iops=92882 elapsed_ms=310.000
+browser-prove:commit-group group=code root=7a8f24092c34ed3eb81b3d0a0b796c588c615d3488ef9e61c21dbd1e4b83ea6e
+browser-prove:commit-group group=data root=4ecf7561b62ea4635fe28a5f1427e96f38655e2eb92c79311910d71c646c7e2c
+browser-prove:stage start recursion_accumulate work_cycles=259612 total_cycles=262144
+browser-prove:stage done recursion_accumulate work_cycles=259612 total_cycles=262144 elapsed_ms=390.000
+browser-prove:commit-group group=accum root=6a455e4a810b481b90b8150fb628636653a61443ab78df66b81a0a74f2dbb864
+browser-prove:stage start recursion_eval_check po2=18 steps=262144 domain=1048576
+browser-prove:stage done recursion_eval_check po2=18 steps=262144 domain=1048576 elapsed_ms=119498.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=89.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=4802.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=2569.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=64.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=213.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=79.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=4.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=3.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=839.000
+browser-prove:stage done join_prove_async elapsed_ms=166139
+browser-prove:stage start verify_join
+browser-prove:stage done verify_join elapsed_ms=14
+browser-prove:stage done join_async elapsed_ms=166153
+browser-prove:stage start lift_async segment_index=9
+browser-prove:stage start lift_prove_async segment_index=9
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111 elapsed_ms=167.000
+browser-prove:commit-group group=code root=e7934a23ddce1423b425cf32aa23be29f48cd40e0b6ff9376dce6f3bf9d0bc35
+browser-prove:commit-group group=data root=9626e52b84ab5655c9a3323b21bcae3164478b3419c81a23491f9f4704b3293a
+browser-prove:stage start recursion_accumulate work_cycles=145470 total_cycles=262144
+browser-prove:stage done recursion_accumulate work_cycles=145470 total_cycles=262144 elapsed_ms=219.000
+browser-prove:commit-group group=accum root=0b113a37ab384c0fd33a52714f803948e11003606164a01fe8120d1f34cc091d
+browser-prove:stage start recursion_eval_check po2=18 steps=262144 domain=1048576
+browser-prove:stage done recursion_eval_check po2=18 steps=262144 domain=1048576 elapsed_ms=119392.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=89.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=4799.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=2567.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=64.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=214.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=79.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=3.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=3.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=838.000
+browser-prove:stage done lift_prove_async segment_index=9 elapsed_ms=165692
+browser-prove:stage start verify_lift
+browser-prove:stage done verify_lift elapsed_ms=14
+browser-prove:stage done lift_async segment_index=9 elapsed_ms=165706
+browser-prove:stage start join_async
+browser-prove:stage start join_prove_async
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=259612 wom=564091 iops=92882
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=259612 wom=564091 iops=92882 elapsed_ms=310.000
+browser-prove:commit-group group=code root=7a8f24092c34ed3eb81b3d0a0b796c588c615d3488ef9e61c21dbd1e4b83ea6e
+browser-prove:commit-group group=data root=f9d015466370d668130c6f50bcc6a159f661403df7842457a97688427f286003
+browser-prove:stage start recursion_accumulate work_cycles=259612 total_cycles=262144
+browser-prove:stage done recursion_accumulate work_cycles=259612 total_cycles=262144 elapsed_ms=389.000
+browser-prove:commit-group group=accum root=90a9f33da1f6950d93bbfc4d09fff814e31ae143181d363c9457e13553d8281c
+browser-prove:stage start recursion_eval_check po2=18 steps=262144 domain=1048576
+browser-prove:stage done recursion_eval_check po2=18 steps=262144 domain=1048576 elapsed_ms=119471.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=89.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=4800.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=2571.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=64.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=214.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=79.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=4.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=3.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=839.000
+browser-prove:stage done join_prove_async elapsed_ms=166141
+browser-prove:stage start verify_join
+browser-prove:stage done verify_join elapsed_ms=14
+browser-prove:stage done join_async elapsed_ms=166155
+browser-prove:stage start lift_async segment_index=10
+browser-prove:stage start lift_prove_async segment_index=10
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111 elapsed_ms=168.000
+browser-prove:commit-group group=code root=e7934a23ddce1423b425cf32aa23be29f48cd40e0b6ff9376dce6f3bf9d0bc35
+browser-prove:commit-group group=data root=c8704b6a72e4e15f26390738b93a830d4d3a16225501cb438b9adf36d80d014c
+browser-prove:stage start recursion_accumulate work_cycles=145470 total_cycles=262144
+browser-prove:stage done recursion_accumulate work_cycles=145470 total_cycles=262144 elapsed_ms=221.000
+browser-prove:commit-group group=accum root=60483b39b415bd580265311d06f02048d2516d351b02ff6f4b4a7f3d866d9240
+browser-prove:stage start recursion_eval_check po2=18 steps=262144 domain=1048576
+browser-prove:stage done recursion_eval_check po2=18 steps=262144 domain=1048576 elapsed_ms=119194.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=88.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=4810.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=2573.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=64.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=214.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=79.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=4.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=3.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=838.000
+browser-prove:stage done lift_prove_async segment_index=10 elapsed_ms=165514
+browser-prove:stage start verify_lift
+browser-prove:stage done verify_lift elapsed_ms=14
+browser-prove:stage done lift_async segment_index=10 elapsed_ms=165528
+browser-prove:stage start join_async
+browser-prove:stage start join_prove_async
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=259612 wom=564091 iops=92882
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=259612 wom=564091 iops=92882 elapsed_ms=311.000
+browser-prove:commit-group group=code root=7a8f24092c34ed3eb81b3d0a0b796c588c615d3488ef9e61c21dbd1e4b83ea6e
+browser-prove:commit-group group=data root=278eb40a9052a428cf63f94983364e2af6b2d859076b5d38a78a282e878dc768
+browser-prove:stage start recursion_accumulate work_cycles=259612 total_cycles=262144
+browser-prove:stage done recursion_accumulate work_cycles=259612 total_cycles=262144 elapsed_ms=390.000
+browser-prove:commit-group group=accum root=0f312f059c9d6e5f295dba3601133e1afce7dd429a539508fece580c4178d614
+browser-prove:stage start recursion_eval_check po2=18 steps=262144 domain=1048576
+browser-prove:stage done recursion_eval_check po2=18 steps=262144 domain=1048576 elapsed_ms=119682.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=89.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=4818.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=2577.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=64.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=214.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=1.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=79.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=4.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=3.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=842.000
+browser-prove:stage done join_prove_async elapsed_ms=166398
+browser-prove:stage start verify_join
+browser-prove:stage done verify_join elapsed_ms=14
+browser-prove:stage done join_async elapsed_ms=166412
+browser-prove:stage done composite_to_succinct_async elapsed_ms=3485897
+browser-prove:stage done prove_session_async segments=11 pending_keccaks=0 assumptions=0 elapsed_ms=3547594
+browser-prove:done xgboost: segments=11 user_cycles=2294890 total_cycles=2883584
+browser-prove:webgpu xgboost: gpu_dispatches=5344 cpu_mirrors=3562 cpu_fallbacks=11 cpu_only_ops=0 uploads=13555 upload_bytes=15617183028 device_copies=128 device_copy_bytes=7222624256 readbacks=363 readback_bytes=2810632 buffers=13569 buffer_bytes=56440294340
+browser-prove:webgpu-op xgboost: op=batch_bit_reverse gpu_dispatches=192 cpu_mirrors=126 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op xgboost: op=batch_evaluate_any gpu_dispatches=128 cpu_mirrors=84 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op xgboost: op=batch_expand_into_evaluate_ntt gpu_dispatches=224 cpu_mirrors=147 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op xgboost: op=batch_interpolate_ntt gpu_dispatches=128 cpu_mirrors=84 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op xgboost: op=combos_divide gpu_dispatches=32 cpu_mirrors=21 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op xgboost: op=combos_prepare gpu_dispatches=32 cpu_mirrors=21 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op xgboost: op=eltwise_copy_elem gpu_dispatches=128 cpu_mirrors=84 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op xgboost: op=eltwise_copy_elem_slice gpu_dispatches=42 cpu_mirrors=42 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op xgboost: op=eltwise_sum_extelem gpu_dispatches=32 cpu_mirrors=21 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op xgboost: op=eltwise_zeroize_elem gpu_dispatches=128 cpu_mirrors=128 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op xgboost: op=eval_check gpu_dispatches=11 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op xgboost: op=fri_fold gpu_dispatches=96 cpu_mirrors=63 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op xgboost: op=hash_fold gpu_dispatches=3712 cpu_mirrors=2436 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op xgboost: op=hash_rows gpu_dispatches=224 cpu_mirrors=147 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op xgboost: op=mix_poly_coeffs gpu_dispatches=128 cpu_mirrors=84 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op xgboost: op=scatter gpu_dispatches=11 cpu_mirrors=11 cpu_fallbacks=11 cpu_only_ops=0
+browser-prove:webgpu-op xgboost: op=zk_shift gpu_dispatches=96 cpu_mirrors=63 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-upload xgboost: source=accum uploads=119 upload_bytes=1716518912
+browser-prove:webgpu-upload xgboost: source=check_poly uploads=21 upload_bytes=352321536
+browser-prove:webgpu-upload xgboost: source=code uploads=11 upload_bytes=11534336
+browser-prove:webgpu-upload xgboost: source=combos uploads=64 upload_bytes=759169024
+browser-prove:webgpu-upload xgboost: source=ctrl uploads=21 upload_bytes=506462208
+browser-prove:webgpu-upload xgboost: source=data uploads=476 upload_bytes=7686062080
+browser-prove:webgpu-upload xgboost: source=global uploads=85 upload_bytes=15984
+browser-prove:webgpu-upload xgboost: source=mix uploads=32 upload_bytes=3264
+browser-prove:webgpu-upload xgboost: source=nodes uploads=352 upload_bytes=4366532608
+browser-prove:webgpu-upload xgboost: source=out uploads=128 upload_bytes=363280
+browser-prove:webgpu-upload xgboost: source=out_coeffs uploads=96 upload_bytes=8945664
+browser-prove:webgpu-upload xgboost: source=webgpu_batch_bit_reverse_params uploads=192 upload_bytes=3072
+browser-prove:webgpu-upload xgboost: source=webgpu_batch_evaluate_any_params uploads=128 upload_bytes=4096
+browser-prove:webgpu-upload xgboost: source=webgpu_batch_expand_params uploads=224 upload_bytes=7168
+browser-prove:webgpu-upload xgboost: source=webgpu_combos_divide_chunk_indices uploads=32 upload_bytes=724
+browser-prove:webgpu-upload xgboost: source=webgpu_combos_divide_chunk_offsets uploads=32 upload_bytes=852
+browser-prove:webgpu-upload xgboost: source=webgpu_combos_divide_params uploads=32 upload_bytes=1024
+browser-prove:webgpu-upload xgboost: source=webgpu_combos_divide_pows uploads=32 upload_bytes=9696
+browser-prove:webgpu-upload xgboost: source=webgpu_combos_prepare_coeff_u uploads=32 upload_bytes=363280
+browser-prove:webgpu-upload xgboost: source=webgpu_combos_prepare_mix_pows uploads=32 upload_bytes=118400
+browser-prove:webgpu-upload xgboost: source=webgpu_combos_prepare_params uploads=32 upload_bytes=1536
+browser-prove:webgpu-upload xgboost: source=webgpu_combos_prepare_reg_combo_ids uploads=32 upload_bytes=27552
+browser-prove:webgpu-upload xgboost: source=webgpu_combos_prepare_reg_sizes uploads=32 upload_bytes=27552
+browser-prove:webgpu-upload xgboost: source=webgpu_eltwise_copy_elem_slice_from uploads=42 upload_bytes=12042240
+browser-prove:webgpu-upload xgboost: source=webgpu_eltwise_copy_elem_slice_params uploads=42 upload_bytes=1344
+browser-prove:webgpu-upload xgboost: source=webgpu_eltwise_sum_extelem_params uploads=32 upload_bytes=512
+browser-prove:webgpu-upload xgboost: source=webgpu_eval_check_interpreter_instructions uploads=11 upload_bytes=7111104
+browser-prove:webgpu-upload xgboost: source=webgpu_eval_check_interpreter_mix_pows uploads=11 upload_bytes=1138016
+browser-prove:webgpu-upload xgboost: source=webgpu_eval_check_interpreter_params uploads=11 upload_bytes=1056
+browser-prove:webgpu-upload xgboost: source=webgpu_fri_fold_params uploads=96 upload_bytes=3072
+browser-prove:webgpu-upload xgboost: source=webgpu_mix_poly_coeffs_params uploads=128 upload_bytes=8192
+browser-prove:webgpu-upload xgboost: source=webgpu_ntt_normalize_params uploads=128 upload_bytes=2048
+browser-prove:webgpu-upload xgboost: source=webgpu_ntt_roots_fwd uploads=224 upload_bytes=25088
+browser-prove:webgpu-upload xgboost: source=webgpu_ntt_roots_rev uploads=128 upload_bytes=14336
+browser-prove:webgpu-upload xgboost: source=webgpu_ntt_step_params uploads=6016 upload_bytes=192512
+browser-prove:webgpu-upload xgboost: source=webgpu_poseidon2_fold_params uploads=3712 upload_bytes=118784
+browser-prove:webgpu-upload xgboost: source=webgpu_poseidon2_rows_params uploads=224 upload_bytes=7168
+browser-prove:webgpu-upload xgboost: source=webgpu_scatter_offsets uploads=11 upload_bytes=93769148
+browser-prove:webgpu-upload xgboost: source=webgpu_scatter_params uploads=11 upload_bytes=176
+browser-prove:webgpu-upload xgboost: source=webgpu_scatter_values uploads=11 upload_bytes=93769148
+browser-prove:webgpu-upload xgboost: source=webgpu_zk_shift_params uploads=96 upload_bytes=1536
+browser-prove:webgpu-upload xgboost: source=which uploads=256 upload_bytes=120420
+browser-prove:webgpu-upload xgboost: source=xs uploads=128 upload_bytes=363280
+browser-prove:webgpu-readback xgboost: source=evaluated readbacks=77 readback_bytes=1150600
+browser-prove:webgpu-readback xgboost: source=final_coeffs readbacks=11 readback_bytes=11264
+browser-prove:webgpu-readback xgboost: source=nodes readbacks=231 readback_bytes=1506912
+browser-prove:webgpu-readback xgboost: source=out readbacks=44 readback_bytes=141856
+test tests::xgboost_succinct_receipt_verifies ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 75 filtered out; finished in 3547.81s
+                                                  

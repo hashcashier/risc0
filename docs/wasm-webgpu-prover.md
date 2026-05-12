@@ -20,10 +20,16 @@ triage) sub-phase. SP-CR preempts whichever SP is in flight, runs to completion
 (reproduce → root-cause → fix → verify), and only then does the preempted SP
 resume.
 
-Currently blocking: the **xgboost browser proof's `verify lift` failure**
-(2026-05-12). xgboost is classified `blocked` and SP10 (deferred matrix
-bring-up) cannot proceed for any deferred fixture until SP-CR resolves the
-xgboost root cause.
+xgboost SP-CR **RESOLVED 2026-05-12 via D12**: forced
+`gpu_authoritative_scope(false)` for recursion's commit_groups + finalize
+(`risc0/circuit/recursion/src/prove/hal/webgpu.rs`). xgboost succinct receipt
+verifies in 3547.81 s wall time (≈600× native CUDA). Root cause partially
+narrowed: under `gpu_authoritative=true` recursion's GPU dispatches
+non-deterministically produce zero Merkle roots at segments 5–8 (likely
+silent Chrome WebGPU `uncapturederror` under cumulative pressure). The
+surgical fix to restore lift performance is deferred (D14: attach
+`onuncapturederror` listener); D12 is the production configuration. xgboost
+reclassified to `verified` (cpu_mirror recursion). SP10 unblocked.
 
 The browser WebGPU prover is intended to run local proving in a
 `wasm32-unknown-unknown` browser build while reusing the native zkVM proving

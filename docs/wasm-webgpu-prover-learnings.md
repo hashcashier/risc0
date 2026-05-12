@@ -1,6 +1,6 @@
 # WASM/WebGPU Prover Learnings, Methods, And Results
 
-Status: paused 2026-05-11; performance follow-up run `wasm-webgpu-prover-perf` resumed 2026-05-12. R1 smoke matrix refreshed (ratios 7-9× small, 15.7× KeccakUnion(1)) — see `docs/wasm-webgpu-cuda-comparison.md` and `.recursive/run/wasm-webgpu-prover-perf/evidence/perf/r1-baselines/`. SP2 generator seed landed. SP10 partial (xgboost) hit a multi-segment `verify lift` regression; governed by the Correctness-First Discipline below.
+Status: paused 2026-05-11; performance follow-up run `wasm-webgpu-prover-perf` resumed 2026-05-12. R1 smoke matrix refreshed (ratios 7-9× small, 15.7× KeccakUnion(1)) — see `docs/wasm-webgpu-cuda-comparison.md` and `.recursive/run/wasm-webgpu-prover-perf/evidence/perf/r1-baselines/`. SP2 generator seed landed. xgboost SP-CR resolved via D12 (recursion `gpu_authoritative_scope(false)`; 3548 s wall time / ~600× native CUDA). Governed by the Correctness-First Discipline below.
 
 This document records what we built, how we validated it, what we learned, and
 where the implementation still differs from native CUDA/Metal proving. It is
@@ -19,7 +19,7 @@ loss — **IMMEDIATELY halts all performance work** until the regression is
 fixed under the `SP-CR` (Correctness Regression triage) sub-phase. SP-CR
 preempts whichever performance sub-phase is in flight, runs reproduce →
 root-cause → fix → verify, and only then does the preempted sub-phase resume.
-Currently SP-CR-blocking: xgboost browser proof's `verify lift` failure.
+xgboost SP-CR resolved 2026-05-12 via D12 (`risc0/circuit/recursion/src/prove/hal/webgpu.rs` forces `gpu_authoritative_scope(false)` for recursion's commit_groups + finalize; xgboost succinct receipt verifies in 3548 s, ~600× native CUDA). Surgical fix to restore lift performance pending D14 (`onuncapturederror` listener).
 Full text: `.recursive/run/wasm-webgpu-prover-perf/addenda/02-to-be-plan.addendum-01.md`.
 
 ## Executive Summary

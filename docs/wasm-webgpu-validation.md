@@ -1,6 +1,6 @@
 # WASM/WebGPU Prover Validation
 
-Status: R1 smoke matrix refreshed 2026-05-12 (RTX 5090 + Chrome 148). SP10 partial hit a multi-segment correctness regression (xgboost `verify lift`). Currently governed by the **Correctness-First Discipline** in `.recursive/run/wasm-webgpu-prover-perf/addenda/02-to-be-plan.addendum-01.md`.
+Status: R1 smoke matrix refreshed 2026-05-12 (RTX 5090 + Chrome 148). xgboost SP-CR resolved 2026-05-12 via D12 (`risc0/circuit/recursion/src/prove/hal/webgpu.rs` forces `gpu_authoritative_scope(false)` for recursion's commit_groups; xgboost verifies in 3548 s, ~600× native CUDA). Run governed by the **Correctness-First Discipline** in `.recursive/run/wasm-webgpu-prover-perf/addenda/02-to-be-plan.addendum-01.md`; performance follow-up SP10+ unblocked.
 
 This file records the current correctness matrix for the browser WebGPU prover.
 Native baselines are measured first with the local CUDA prover and the same
@@ -22,9 +22,11 @@ below are informational; correctness — verified succinct receipt with matching
 cycle/segment counts — is the unconditional gate. See
 `.recursive/run/wasm-webgpu-prover-perf/addenda/02-to-be-plan.addendum-01.md`.
 
-Currently in `SP-CR`-blocked state: **xgboost** (verify_lift failure 2026-05-12).
-SP10 (deferred matrix bring-up) cannot proceed for any other deferred fixture
-until xgboost SP-CR closes.
+SP-CR (xgboost verify_lift) **RESOLVED 2026-05-12 via D12**: forced
+`gpu_authoritative_scope(false)` for recursion's commit_groups + finalize.
+xgboost succinct receipt now verifies (3548 s wall time; ~600× native CUDA).
+Surgical fix to restore lift performance is deferred (D14 — `onuncapturederror`
+listener). SP10 unblocked for follow-on deferred fixtures.
 
 ## Commands
 
@@ -105,7 +107,7 @@ zero CPU-only HAL operations.
 | `ecdsa/k256` | 2 segments, 343611 user cycles, 524288 total cycles, 1.08389501s | Passed, same cycles |
 | `ecdsa/p256` | 2 segments, 232373 user cycles, 327680 total cycles, 978.112464ms | Passed, same cycles |
 | `groth16-verifier` | 914 segments, 180291710 user cycles, 239370240 total cycles, 462.439128141s | Browser run deferred until remaining eval_check/readback and oversized-buffer bottlenecks are addressed |
-| `xgboost` | 11 segments, 2294908 user cycles, 2883584 total cycles, 5.702544275s | **Attempted 2026-05-12 on RTX 5090 + Chrome 148: failed at `verify lift` during composite-to-succinct after prove_session_async completed in 103.585s (each per-segment `lift_prove_async ≈ 2.57s`, segment 8 anomalously short at 642ms / verify_lift 1ms). Receipt rejected before succinct compression.** Root cause not yet isolated — likely a precision/transcript issue at multi-segment lift boundary. Re-attempt after R5/R6 work plus a focused root-cause investigation. |
+| `xgboost` | 11 segments, 2294908 user cycles, 2883584 total cycles, 5.702544275s | **Verified 2026-05-12 on RTX 5090 + Chrome 148 in 3547.81 s wall time** (≈600× native CUDA). xgboost SP-CR fix (`.recursive/run/wasm-webgpu-prover-perf/01.5-root-cause.md` D12) forces `gpu_authoritative_scope(false)` for recursion's commit_groups + finalize because under `gpu_authoritative=true` GPU dispatches non-deterministically produce zero Merkle roots at segments 5–8 (likely silent Chrome WebGPU `uncapturederror` under cumulative pressure). Surgical fix to restore lift performance pending D14 (`onuncapturederror` listener) — see `.recursive/STATE.md`. |
 | `bn254` | 189 segments, 37989643 user cycles, 49348608 total cycles, 100.237964323s | Browser run deferred until remaining eval_check/readback and oversized-buffer bottlenecks are addressed |
 
 ## Internal Parity Matrix

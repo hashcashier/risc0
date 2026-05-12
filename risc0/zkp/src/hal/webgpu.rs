@@ -145,7 +145,7 @@ impl Drop for WebGpuStageTimer {
     }
 }
 
-fn log_webgpu_stage(message: &str) {
+pub(crate) fn log_webgpu_stage(message: &str) {
     web_sys::console::log_1(&JsValue::from_str(message));
 }
 
@@ -6326,11 +6326,21 @@ impl WebGpuHal {
     }
 
     fn can_dispatch_hash_fold(&self, io: &WebGpuBuffer<Digest>, output_size: usize) -> bool {
-        self.hash_fold_gpu_enabled.get()
-            && (output_size == 0
-                || (self.poseidon2.is_some()
-                    && io.raw_buffer().is_some()
-                    && self.storage_binding_fits(io)))
+        if !self.hash_fold_gpu_enabled.get() {
+            return false;
+        }
+        if output_size == 0 {
+            return true;
+        }
+        // SP-CR fix 2026-05-12: mirror `dispatch_poseidon2_hash_fold`'s
+        // `round_constants` / `m_int_diag` checks (this file, near line 9339).
+        let Some(hash) = self.poseidon2.as_ref() else {
+            return false;
+        };
+        io.raw_buffer().is_some()
+            && hash.round_constants.raw_buffer().is_some()
+            && hash.m_int_diag.raw_buffer().is_some()
+            && self.storage_binding_fits(io)
     }
 
     fn can_dispatch_hash_rows(
@@ -6339,13 +6349,27 @@ impl WebGpuHal {
         matrix: &WebGpuBuffer<BabyBearElem>,
         row_size: usize,
     ) -> bool {
-        self.hash_rows_gpu_enabled.get()
-            && (row_size == 0
-                || (self.poseidon2.is_some()
-                    && output.raw_buffer().is_some()
-                    && matrix.raw_buffer().is_some()
-                    && self.storage_binding_fits(output)
-                    && self.storage_binding_fits(matrix)))
+        if !self.hash_rows_gpu_enabled.get() {
+            return false;
+        }
+        if row_size == 0 {
+            return true;
+        }
+        // SP-CR fix 2026-05-12: `dispatch_poseidon2_hash_rows` (this file, near
+        // line 9397) requires both `round_constants` and `m_int_diag` GPU
+        // buffers to be materialized. If `can_dispatch_*` is more permissive
+        // than the actual dispatch, the `_async` wrapper skips the input sync
+        // and `finish_hal_op` invokes `cpu_mirror` against stale CPU shadows,
+        // producing all-zero hash outputs — see `01.5-root-cause.md` D11.
+        let Some(hash) = self.poseidon2.as_ref() else {
+            return false;
+        };
+        output.raw_buffer().is_some()
+            && matrix.raw_buffer().is_some()
+            && hash.round_constants.raw_buffer().is_some()
+            && hash.m_int_diag.raw_buffer().is_some()
+            && self.storage_binding_fits(output)
+            && self.storage_binding_fits(matrix)
     }
 
     fn can_dispatch_gather_sample(
