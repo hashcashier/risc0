@@ -1283,6 +1283,47 @@ mod tests {
         assert_eq!(prove_info.stats.segments, 1);
     }
 
+    /// SP3 staged-WGSL `eval_check` runtime parity test.
+    ///
+    /// Enables `staged_eval_check_enabled` and runs poseidon2_basic. iter 5
+    /// confirmed via this test that the staged path is correctly wired (6
+    /// `eval_check_staged_submit` markers fire on the prove path, zero
+    /// fall-through markers, zero `webgpu-uncaptured-error` events), but
+    /// the kernel itself exhausts GPU private-memory limits on the
+    /// production rv32im DEF (~15k fp slots × 64 threads/workgroup ≫ Chrome
+    /// Dawn's per-workgroup budget). Result: kernel dispatches submit but
+    /// the device errors on a later readback with `AbortError: mapAsync …
+    /// external Instance reference no longer exists`, i.e., the device
+    /// effectively died from running an out-of-bounds private-memory
+    /// kernel. Fix: SP3 iter 6 lands slot-reuse in the emitter (mirroring
+    /// the interpreter's `eval_check_last_uses` + `EvalCheckSlotAllocator`
+    /// logic), which bounds fp_slots to the live set (~927 for rv32im).
+    /// This test is `#[ignore]`'d until iter 6 unignores it.
+    #[wasm_bindgen_test(async)]
+    #[ignore = "SP3 iter 6 prerequisite: slot allocation not yet in the emitter; staged kernel exhausts GPU private memory on rv32im DEF"]
+    async fn poseidon2_basic_async_staged_eval_check_verifies() {
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        prover.set_staged_eval_check_enabled(true);
+        let env = ExecutorEnv::builder()
+            .write(&MultiTestSpec::Poseidon2Basic)
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/poseidon2_basic_async_staged",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert_eq!(prove_info.stats.segments, 1);
+        prover.set_staged_eval_check_enabled(false);
+    }
+
     #[wasm_bindgen_test(async)]
     async fn native_busy_loop_po2_18_async_succinct_receipt_verify() {
         use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};

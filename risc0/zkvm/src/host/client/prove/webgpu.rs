@@ -72,6 +72,14 @@ impl WebGpuProver {
         self.hal.set_eval_check_gpu_enabled(enabled);
     }
 
+    /// Enable or disable the SP3 staged-WGSL `eval_check` fast path.
+    /// Default `false` — browser parity tests opt in per fixture once
+    /// runtime parity against the interpreter is established.
+    #[doc(hidden)]
+    pub fn set_staged_eval_check_enabled(&self, enabled: bool) {
+        self.hal.set_staged_eval_check_enabled(enabled);
+    }
+
     /// Enable or disable a specific WebGPU HAL kernel for diagnostics.
     #[doc(hidden)]
     pub fn set_webgpu_op_gpu_enabled(&self, op: &str, enabled: bool) {

@@ -43,6 +43,9 @@ use crate::core::{
 };
 use crate::{
     adapter::{PolyExtStep, PolyExtStepDef},
+    hal::webgpu_codegen::{
+        staged_full_kernel_wgsl, CodegenError, EmitterTap, FieldMode,
+    },
     taps::TapSet,
     INV_RATE,
 };
@@ -4553,6 +4556,18 @@ struct EvalCheckInterpreterPipeline {
     kernel: WebGpuKernel,
 }
 
+/// SP3 iter 5 (2026-05-12): a compiled staged-WGSL `eval_check` kernel for a
+/// specific `(PolyExtStepDef, base_field_fp)` pair. The bind-group layout
+/// here mirrors the runtime interpreter's at 9 bindings MINUS binding 6
+/// (`instrs`) — the staged kernel embeds the DEF inline and has no
+/// instruction stream to read.
+#[derive(Clone)]
+struct StagedEvalCheckPipeline {
+    layout: web_sys::GpuBindGroupLayout,
+    kernel: WebGpuKernel,
+    base_field_fp: bool,
+}
+
 /// A single storage or uniform buffer binding in a WebGPU bind group layout.
 #[derive(Clone, Copy)]
 pub struct WebGpuBindingLayout {
@@ -4869,6 +4884,20 @@ pub struct WebGpuHal {
     max_compute_workgroup_storage_size: u32,
     eval_check_interpreter_pipelines:
         RefCell<BTreeMap<EvalCheckInterpreterPipelineKey, EvalCheckInterpreterPipeline>>,
+    // SP3 iter 5 (2026-05-12): runtime flag that opts a HAL into the
+    // staged-WGSL eval_check path before the runtime interpreter. Default
+    // false — the interpreter remains the production path until iter 7's
+    // browser parity test proves the staged path produces byte-equivalent
+    // outputs and a multi-stage split (iter 6) handles the production
+    // rv32im DEF's ~20k-op shader size.
+    staged_eval_check_enabled: Cell<bool>,
+    // SP3 iter 5 (2026-05-12): per-DEF cache of compiled staged eval_check
+    // pipelines. Keyed by `def as *const PolyExtStepDef as usize` because
+    // DEFs are `&'static` and program identity is the natural cache key.
+    // Each cached entry holds the bind-group layout + the compiled compute
+    // kernel so subsequent dispatches against the same DEF skip the
+    // (potentially slow) WGSL compile step.
+    staged_eval_check_pipelines: RefCell<BTreeMap<usize, StagedEvalCheckPipeline>>,
     // SP-CR D15 (2026-05-12): cache the static NTT roots-of-unity tables.
     // Previously `dispatch_batch_expand_into_evaluate_ntt` and
     // `dispatch_batch_interpolate_ntt` called `copy_from_elem` on each
@@ -4956,6 +4985,8 @@ impl WebGpuHal {
             max_storage_buffer_binding_size,
             max_compute_workgroup_storage_size,
             eval_check_interpreter_pipelines: RefCell::new(BTreeMap::new()),
+            staged_eval_check_enabled: Cell::new(false),
+            staged_eval_check_pipelines: RefCell::new(BTreeMap::new()),
             ntt_roots_fwd: None,
             ntt_roots_rev: None,
         };
@@ -5004,6 +5035,20 @@ impl WebGpuHal {
     /// GPU-authoritative proof path.
     pub fn set_eval_check_gpu_enabled(&self, enabled: bool) {
         self.eval_check_gpu_enabled.set(enabled);
+    }
+
+    /// Enable or disable the staged-WGSL `eval_check` fast path. When `true`,
+    /// `dispatch_eval_check_poly_ext` tries the staged kernel first and
+    /// falls through to the runtime interpreter on any failure (compile,
+    /// dispatch, or `CodegenError`). Default `false` — browser parity tests
+    /// enable this for individual fixtures once parity is established.
+    pub fn set_staged_eval_check_enabled(&self, enabled: bool) {
+        self.staged_eval_check_enabled.set(enabled);
+    }
+
+    /// Returns whether the staged-WGSL `eval_check` fast path is enabled.
+    pub fn staged_eval_check_enabled(&self) -> bool {
+        self.staged_eval_check_enabled.get()
     }
 
     /// Enable or disable specific WebGPU kernels for diagnostics.
@@ -5106,6 +5151,189 @@ impl WebGpuHal {
             .borrow_mut()
             .insert(key, pipeline.clone());
         Ok(pipeline)
+    }
+
+    /// SP3 iter 5: cache lookup (or compile + insert) of a staged-WGSL
+    /// `eval_check` pipeline for a specific DEF + field-mode pair. Cache
+    /// is keyed by `def as *const _ as usize` because `PolyExtStepDef`s
+    /// are `&'static` and program identity is the natural key. Compilation
+    /// may be slow on large DEFs — the rv32im production DEF emits a
+    /// ~1.6 MB shader whose Chrome compile time is empirical — so caching
+    /// per-DEF avoids paying that cost on every dispatch.
+    fn staged_eval_check_pipeline(
+        &self,
+        def: &PolyExtStepDef,
+        taps: &TapSet<'_>,
+        base_field_fp: bool,
+    ) -> Result<StagedEvalCheckPipeline> {
+        let key = def as *const PolyExtStepDef as usize;
+        if let Some(pipeline) = self.staged_eval_check_pipelines.borrow().get(&key) {
+            if pipeline.base_field_fp == base_field_fp {
+                return Ok(pipeline.clone());
+            }
+        }
+        let field_mode = if base_field_fp {
+            FieldMode::Base
+        } else {
+            FieldMode::Ext
+        };
+        let emitter_taps: Vec<EmitterTap> = taps
+            .taps()
+            .map(|t| EmitterTap {
+                group: t.group() as u32,
+                offset: t.offset() as u32,
+                back_inv_rate: (t.back() * INV_RATE) as u32,
+            })
+            .collect();
+        let wgsl = staged_full_kernel_wgsl("staged_eval_check", def, &emitter_taps, field_mode)
+            .map_err(|err: CodegenError| {
+                anyhow!("staged eval_check codegen failed: {:?}", err)
+            })?;
+        let layout = self.create_bind_group_layout(
+            "webgpu_staged_eval_check_layout",
+            &[
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::read_only_storage(1, 0),
+                WebGpuBindingLayout::read_only_storage(2, 0),
+                WebGpuBindingLayout::read_only_storage(3, 0),
+                WebGpuBindingLayout::read_only_storage(4, 0),
+                WebGpuBindingLayout::read_only_storage(5, 0),
+                // binding 6 (instrs) intentionally omitted; staged kernel
+                // inlines the DEF rather than reading an instruction stream.
+                WebGpuBindingLayout::read_only_storage(7, 0),
+                WebGpuBindingLayout::uniform(8, 96),
+            ],
+        )?;
+        let kernel = self.create_compute_kernel(
+            "webgpu_staged_eval_check",
+            &wgsl,
+            "main",
+            &[layout.clone()],
+        )?;
+        let pipeline = StagedEvalCheckPipeline {
+            layout,
+            kernel,
+            base_field_fp,
+        };
+        self.staged_eval_check_pipelines
+            .borrow_mut()
+            .insert(key, pipeline.clone());
+        Ok(pipeline)
+    }
+
+    /// SP3 iter 5: dispatch the staged-WGSL `eval_check` kernel for a DEF.
+    /// Mirrors `dispatch_eval_check_poly_ext_interpreted` but without the
+    /// runtime opcode stream — the per-DEF body is baked into the cached
+    /// pipeline at first call. Returns `Ok(false)` if any GPU buffer is
+    /// missing (caller falls through to interpreter); returns `Err` on
+    /// codegen / compile / WebGPU API failure.
+    fn dispatch_eval_check_poly_ext_staged(
+        &self,
+        check: &WebGpuBuffer<BabyBearElem>,
+        groups: &[&WebGpuBuffer<BabyBearElem>],
+        logical_globals: &[&WebGpuBuffer<BabyBearElem>; 2],
+        taps: &TapSet<'_>,
+        def: &PolyExtStepDef,
+        poly_mix: BabyBearExtElem,
+        domain_u32: u32,
+        params: [u32; 12],
+        base_field_fp: bool,
+    ) -> Result<bool> {
+        let (Some(check_gpu), Some(group0_gpu), Some(group1_gpu), Some(group2_gpu)) = (
+            check.raw_buffer(),
+            groups[0].raw_buffer(),
+            groups[1].raw_buffer(),
+            groups[2].raw_buffer(),
+        ) else {
+            return Ok(false);
+        };
+        let (Some(global0_gpu), Some(global1_gpu)) = (
+            logical_globals[0].raw_buffer(),
+            logical_globals[1].raw_buffer(),
+        ) else {
+            return Ok(false);
+        };
+
+        let pipeline = self.staged_eval_check_pipeline(def, taps, base_field_fp)?;
+
+        let _timer = WebGpuStageTimer::new(format!(
+            "eval_check_staged_submit domain={domain_u32} base_field_fp={base_field_fp}"
+        ));
+
+        let mix_pows = eval_check_mix_pows(def, poly_mix)?;
+        let mut mix_pow_words = Vec::with_capacity(mix_pows.len() * BabyBearExtElem::EXT_SIZE);
+        for value in mix_pows {
+            mix_pow_words.extend(ext_words(value));
+        }
+        let mix_pows_gpu = self.create_storage_buffer(
+            "webgpu_staged_eval_check_mix_pows",
+            byte_len_for::<u32>(mix_pow_words.len()),
+        )?;
+        self.write_buffer_named(
+            &mix_pows_gpu,
+            "webgpu_staged_eval_check_mix_pows",
+            0,
+            bytemuck::cast_slice(&mix_pow_words),
+        )?;
+
+        // Params layout matches the interpreter's; staged kernel ignores the
+        // `instr_count` / `instr_base` / `ret_mix_slot` slots.
+        let params_words = [
+            params[0],
+            params[1],
+            params[2],
+            params[3],
+            params[4],
+            params[5],
+            domain_u32,
+            0u32, // instr_count
+            0u32, // instr_base
+            0u32, // mix_pows_base (fresh buffer, base = 0)
+            0u32, // ret_mix_slot (baked into write_check at codegen time)
+            domain_u32,
+            0u32, // cycle_base
+            0u32, // group0_chunk_base
+            domain_u32, // group0_chunk_rows
+            0u32, // group1_chunk_base
+            domain_u32, // group1_chunk_rows
+            0u32, // group2_chunk_base
+            domain_u32, // group2_chunk_rows
+            0u32, // _pad0
+            params[8],
+            params[9],
+            params[10],
+            params[11],
+        ];
+        let params_buf = self.create_uniform_buffer(
+            "webgpu_staged_eval_check_params",
+            bytemuck::cast_slice(&params_words),
+        )?;
+
+        let bind_group = self.create_bind_group(
+            "webgpu_staged_eval_check_bind_group",
+            &pipeline.layout,
+            &[
+                WebGpuBufferBinding::new(0, check_gpu),
+                WebGpuBufferBinding::new(1, group0_gpu),
+                WebGpuBufferBinding::new(2, group1_gpu),
+                WebGpuBufferBinding::new(3, group2_gpu),
+                WebGpuBufferBinding::new(4, global0_gpu),
+                WebGpuBufferBinding::new(5, global1_gpu),
+                // binding 6 (instrs) omitted; not in pipeline layout
+                WebGpuBufferBinding::new(7, &mix_pows_gpu),
+                WebGpuBufferBinding {
+                    binding: 8,
+                    buffer: &params_buf,
+                    offset: 0,
+                    size: Some(96),
+                },
+            ],
+        )?;
+
+        let workgroups = domain_u32.div_ceil(64);
+        self.dispatch_compute_1d(&pipeline.kernel, &bind_group, workgroups);
+        self.record_gpu_result_authoritative("eval_check", true);
+        Ok(true)
     }
 
     fn can_allocate_gpu_buffer(&self, byte_len: u64) -> bool {
@@ -6090,6 +6318,46 @@ impl WebGpuHal {
             invs[2],
             invs[3],
         ];
+
+        // SP3 iter 5 (2026-05-12): try the staged-WGSL fast path first when
+        // the runtime flag is set and all groups bind in a single dispatch.
+        // Default `staged_eval_check_enabled = false`, so this branch is
+        // dead code on the production path until browser parity tests
+        // (iter 7) opt in per-fixture. Any failure (codegen, compile,
+        // dispatch) falls through to the interpreter below.
+        if self.staged_eval_check_enabled.get()
+            && group_can_bind.iter().all(|can_bind| *can_bind)
+        {
+            // Base-field DEFs (rv32im) take the optimized `FieldMode::Base`
+            // path; DEFs that use `ConstExt` must use `FieldMode::Ext`.
+            let base_field_fp = !def
+                .block
+                .iter()
+                .any(|op| matches!(op, PolyExtStep::ConstExt(_, _, _, _)));
+            match self.dispatch_eval_check_poly_ext_staged(
+                check,
+                groups,
+                &logical_globals,
+                taps,
+                def,
+                poly_mix,
+                domain_u32,
+                params,
+                base_field_fp,
+            ) {
+                Ok(true) => return Ok(true),
+                Ok(false) => {
+                    log_webgpu_stage(
+                        "browser-prove:stage eval_check staged unavailable; falling back to interpreter",
+                    );
+                }
+                Err(err) => {
+                    log_webgpu_stage(&format!(
+                        "browser-prove:stage eval_check staged failed: {err}; falling back to interpreter"
+                    ));
+                }
+            }
+        }
 
         if def.block.len() > WEBGPU_EVAL_CHECK_MAX_POLY_EXT_STEPS {
             let base_interpreter_program = eval_check_base_interpreter_instructions(taps, def);

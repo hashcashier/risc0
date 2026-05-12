@@ -1,0 +1,167 @@
+Set timeout to 120 seconds...
+Executing bindgen...                                                                                Running headless tests in Chrome on `http://127.0.0.1:39579/`
+Try find `webdriver.json` for configure browser's capabilities:
+Ok
+Starting new webdriver session...                 Visiting http://127.0.0.1:33939...                Loading page elements...                          Waiting for test to finish...                                                                       using deprecated parameters for the initialization function; pass a single object instead
+running 1 test
+browser-prove:webgpu-limits max_buffer_size=1073741824 max_storage_buffer_binding_size=1073741824 max_compute_workgroup_storage_size=49152
+browser-prove:start multi_test/poseidon2_basic_async
+browser-prove:stage start execute
+browser-prove:stage done execute elapsed_ms=53
+browser-prove:stage start prove_session_async segments=1 pending_keccaks=0 assumptions=0
+browser-prove:stage start prove_segment_async index=0 po2=15 user_cycles=3553
+browser-prove:stage start segment_preflight index=0 po2=15 user_cycles=3553
+browser-prove:stage done segment_preflight index=0 po2=15 user_cycles=3553 elapsed_ms=22
+browser-prove:stage start prove_segment_core_async index=0 po2=15
+browser-prove:stage start segment_prove_core_async index=0 po2=15
+browser-prove:stage start rv32im_witgen mode=parallel cycles=32768 txns=34776 bigint_bytes=0 data_rows=32768 data_cols=211
+browser-prove:stage done rv32im_witgen mode=parallel cycles=32768 txns=34776 bigint_bytes=0 data_rows=32768 data_cols=211 elapsed_ms=83.000
+browser-prove:stage start rv32im_accumulate cycles=32768 data_rows=32768 accum_rows=32768
+browser-prove:stage done rv32im_accumulate cycles=32768 data_rows=32768 accum_rows=32768 elapsed_ms=246.000
+browser-prove:stage start eval_check_interpreter_submit domain=131072 dispatch_count=131072 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32
+browser-prove:stage done eval_check_interpreter_submit domain=131072 dispatch_count=131072 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32 elapsed_ms=0.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=1.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=113.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=4.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=93.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=1.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=28.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=1.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=0.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=0.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=0.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=169.000
+browser-prove:stage done segment_prove_core_async index=0 po2=15 elapsed_ms=972
+browser-prove:stage start verify_segment index=0
+browser-prove:stage done verify_segment index=0 elapsed_ms=13
+browser-prove:stage done prove_segment_core_async index=0 po2=15 elapsed_ms=986
+browser-prove:stage done prove_segment_async index=0 po2=15 user_cycles=3553 elapsed_ms=1008
+browser-prove:stage start keccak_receipts_root
+browser-prove:stage done keccak_receipts_root elapsed_ms=0
+browser-prove:stage start verify_composite
+browser-prove:stage done verify_composite elapsed_ms=13
+browser-prove:stage start composite_to_succinct_async
+browser-prove:stage start lift_async segment_index=0
+browser-prove:stage start lift_prove_async segment_index=0
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=121426 wom=268827 iops=44719
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=121426 wom=268827 iops=44719 elapsed_ms=203.000
+browser-prove:stage start recursion_accumulate work_cycles=121426 total_cycles=262144
+browser-prove:stage done recursion_accumulate work_cycles=121426 total_cycles=262144 elapsed_ms=200.000
+browser-prove:stage start eval_check_base_private_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=12359 fp_slots=1001 mix_slots=10 workgroup_size=32
+browser-prove:stage done eval_check_base_private_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=12359 fp_slots=1001 mix_slots=10 workgroup_size=32 elapsed_ms=1.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=110.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=3.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=670.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=205.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=6.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=0.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=0.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=1.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=896.000
+browser-prove:stage done lift_prove_async segment_index=0 elapsed_ms=2739
+browser-prove:stage start verify_lift
+browser-prove:stage done verify_lift elapsed_ms=16
+browser-prove:stage done lift_async segment_index=0 elapsed_ms=2755
+browser-prove:stage done composite_to_succinct_async elapsed_ms=2755
+browser-prove:stage done prove_session_async segments=1 pending_keccaks=0 assumptions=0 elapsed_ms=3776
+browser-prove:done multi_test/poseidon2_basic_async: segments=1 user_cycles=3553 total_cycles=32768
+browser-prove:webgpu multi_test/poseidon2_basic_async: gpu_dispatches=306 cpu_mirrors=11 cpu_fallbacks=1 cpu_only_ops=0 uploads=729 upload_bytes=444072620 device_copies=8 device_copy_bytes=212208640 readbacks=62 readback_bytes=431840 buffers=797 buffer_bytes=1738015524
+browser-prove:webgpu-op multi_test/poseidon2_basic_async: op=batch_bit_reverse gpu_dispatches=12 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/poseidon2_basic_async: op=batch_evaluate_any gpu_dispatches=8 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/poseidon2_basic_async: op=batch_expand_into_evaluate_ntt gpu_dispatches=13 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/poseidon2_basic_async: op=batch_interpolate_ntt gpu_dispatches=8 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/poseidon2_basic_async: op=combos_divide gpu_dispatches=2 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/poseidon2_basic_async: op=combos_prepare gpu_dispatches=2 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/poseidon2_basic_async: op=eltwise_copy_elem gpu_dispatches=8 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/poseidon2_basic_async: op=eltwise_copy_elem_slice gpu_dispatches=2 cpu_mirrors=2 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/poseidon2_basic_async: op=eltwise_sum_extelem gpu_dispatches=2 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/poseidon2_basic_async: op=eltwise_zeroize_elem gpu_dispatches=8 cpu_mirrors=8 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/poseidon2_basic_async: op=eval_check gpu_dispatches=2 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/poseidon2_basic_async: op=fri_fold gpu_dispatches=5 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/poseidon2_basic_async: op=hash_fold gpu_dispatches=206 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/poseidon2_basic_async: op=hash_rows gpu_dispatches=13 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/poseidon2_basic_async: op=mix_poly_coeffs gpu_dispatches=8 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/poseidon2_basic_async: op=scatter gpu_dispatches=1 cpu_mirrors=1 cpu_fallbacks=1 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/poseidon2_basic_async: op=zk_shift gpu_dispatches=6 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=accum uploads=3 upload_bytes=38666240
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=code uploads=1 upload_bytes=131072
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=combos uploads=3 upload_bytes=27787264
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=ctrl uploads=1 upload_bytes=24117248
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=data uploads=12 upload_bytes=189530112
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=global uploads=5 upload_bytes=1104
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=mix uploads=2 upload_bytes=224
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=nodes uploads=17 upload_bytes=153509888
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=out uploads=8 upload_bytes=23440
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=out_coeffs uploads=5 upload_bytes=314368
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_batch_bit_reverse_params uploads=12 upload_bytes=192
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_batch_evaluate_any_params uploads=8 upload_bytes=256
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_batch_expand_params uploads=13 upload_bytes=416
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_combos_divide_chunk_indices uploads=2 upload_bytes=44
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_combos_divide_chunk_offsets uploads=2 upload_bytes=52
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_combos_divide_params uploads=2 upload_bytes=64
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_combos_divide_pows uploads=2 upload_bytes=576
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_combos_prepare_coeff_u uploads=2 upload_bytes=23440
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_combos_prepare_mix_pows uploads=2 upload_bytes=8160
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_combos_prepare_params uploads=2 upload_bytes=96
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_combos_prepare_reg_combo_ids uploads=2 upload_bytes=1912
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_combos_prepare_reg_sizes uploads=2 upload_bytes=1912
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_eltwise_copy_elem_slice_from uploads=2 upload_bytes=573440
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_eltwise_copy_elem_slice_params uploads=2 upload_bytes=64
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_eltwise_sum_extelem_params uploads=2 upload_bytes=32
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_eval_check_base_interpreter_instructions uploads=1 upload_bytes=395488
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_eval_check_base_interpreter_mix_pows uploads=1 upload_bytes=19664
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_eval_check_interpreter_instructions uploads=1 upload_bytes=646464
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_eval_check_interpreter_mix_pows uploads=1 upload_bytes=103456
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_eval_check_interpreter_params uploads=2 upload_bytes=192
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_fri_fold_params uploads=5 upload_bytes=160
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_mix_poly_coeffs_params uploads=8 upload_bytes=512
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_ntt_normalize_params uploads=8 upload_bytes=128
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_ntt_step_params uploads=336 upload_bytes=10752
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_poseidon2_fold_params uploads=206 upload_bytes=6592
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_poseidon2_rows_params uploads=13 upload_bytes=416
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_scatter_offsets uploads=1 upload_bytes=4082864
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_scatter_params uploads=1 upload_bytes=16
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_scatter_values uploads=1 upload_bytes=4082864
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=webgpu_zk_shift_params uploads=6 upload_bytes=96
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=which uploads=16 upload_bytes=7900
+browser-prove:webgpu-upload multi_test/poseidon2_basic_async: source=xs uploads=8 upload_bytes=23440
+browser-prove:webgpu-readback multi_test/poseidon2_basic_async: source=evaluated readbacks=13 readback_bytes=166000
+browser-prove:webgpu-readback multi_test/poseidon2_basic_async: source=final_coeffs readbacks=2 readback_bytes=3072
+browser-prove:webgpu-readback multi_test/poseidon2_basic_async: source=nodes readbacks=39 readback_bytes=239328
+browser-prove:webgpu-readback multi_test/poseidon2_basic_async: source=out readbacks=8 readback_bytes=23440
+test tests::native_poseidon2_basic_async_succinct_receipt_verify ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 76 filtered out; finished in 3.92s
+                                                  

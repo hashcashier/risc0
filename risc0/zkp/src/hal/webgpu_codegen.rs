@@ -43,7 +43,6 @@
 //!   multi-stage split for the production rv32im DEF (~20k ops).
 
 use alloc::{
-    format,
     string::{String, ToString},
     vec::Vec,
 };
