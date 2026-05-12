@@ -836,6 +836,230 @@ pub struct MultiKernelPlan {
     pub max_live_mix: usize,
 }
 
+/// Result of multi-stage emission for a DEF: per-chunk `StagedKernel`s
+/// plus the scratch dimensioning the dispatch wiring needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedMultiKernel {
+    pub id: String,
+    pub field_mode: FieldMode,
+    /// One kernel per chunk, in dispatch order. Each kernel's
+    /// `wgsl_source` includes scratch loads (for chunks > 0) and
+    /// scratch stores (for chunks < N-1).
+    pub stages: Vec<StagedKernel>,
+    /// Number of u32 words per cycle in `fp_scratch` (max live fp
+    /// vars at any non-final boundary × 1 for Base mode or × 4 for
+    /// Ext mode).
+    pub fp_scratch_stride_u32: usize,
+    /// Number of u32 words per cycle in each of `mix_tot_scratch` /
+    /// `mix_mul_scratch` (max live mix vars × 4).
+    pub mix_scratch_stride_u32: usize,
+}
+
+/// Per-chunk emission of WGSL with scratch I/O bracketing the chunk's ops.
+///
+/// `prev_boundary` is `None` for the first chunk (no live-in to load) or
+/// `Some(&plan.boundaries[k-1])` for chunks `k > 0`. `this_boundary` is
+/// the chunk's own boundary; for the last chunk the body emits
+/// `write_check(cycle, mix_tot[ret_slot])` instead of scratch stores.
+fn emit_chunk_wgsl(
+    name: &str,
+    chunk_idx: usize,
+    is_last: bool,
+    field_mode: FieldMode,
+    plan: &MultiKernelPlan,
+    prev_boundary: Option<&ChunkBoundary>,
+    this_boundary: &ChunkBoundary,
+    ops: &[PolyExtStep],
+    op_start_idx: usize,
+    taps: &[EmitterTap],
+    emitter: &mut WgslEmitter,
+    ret_var: usize,
+) -> Result<StagedKernel, CodegenError> {
+    emitter.body.clear();
+    // 1) Live-in scratch loads (only for chunks > 0).
+    if let Some(prev) = prev_boundary {
+        writeln!(
+            emitter.body,
+            "  // === chunk {chunk_idx} live-in: restore {} fp + {} mix from scratch ===",
+            prev.live_fp.len(),
+            prev.live_mix.len()
+        )
+        .unwrap();
+        let fp_helper = match field_mode {
+            FieldMode::Base => "read_fp_scratch_scalar",
+            FieldMode::Ext => "read_fp_scratch_ext",
+        };
+        for (live_idx, (var, slot)) in prev.live_fp.iter().enumerate() {
+            writeln!(
+                emitter.body,
+                "  fp[{slot}] = {fp_helper}(cycle, {live_idx}u); // fp_var{var}",
+            )
+            .unwrap();
+        }
+        for (live_idx, (var, slot)) in prev.live_mix.iter().enumerate() {
+            writeln!(
+                emitter.body,
+                "  mix_tot[{slot}] = read_mix_tot_scratch(cycle, {live_idx}u); mix_mul[{slot}] = read_mix_mul_scratch(cycle, {live_idx}u); // mix_var{var}",
+            )
+            .unwrap();
+        }
+    }
+    // 2) Run the chunk's ops via the persistent emitter.
+    for (offset, op) in ops.iter().enumerate() {
+        let global_idx = op_start_idx + offset;
+        emitter.emit(global_idx, op)?;
+    }
+    // 3) Live-out scratch stores OR write_check.
+    if !is_last {
+        writeln!(
+            emitter.body,
+            "  // === chunk {chunk_idx} live-out: save {} fp + {} mix to scratch ===",
+            this_boundary.live_fp.len(),
+            this_boundary.live_mix.len()
+        )
+        .unwrap();
+        let fp_helper = match field_mode {
+            FieldMode::Base => "write_fp_scratch_scalar",
+            FieldMode::Ext => "write_fp_scratch_ext",
+        };
+        for (live_idx, (var, slot)) in this_boundary.live_fp.iter().enumerate() {
+            writeln!(
+                emitter.body,
+                "  {fp_helper}(cycle, {live_idx}u, fp[{slot}]); // fp_var{var}",
+            )
+            .unwrap();
+        }
+        for (live_idx, (var, slot)) in this_boundary.live_mix.iter().enumerate() {
+            writeln!(
+                emitter.body,
+                "  write_mix_tot_scratch(cycle, {live_idx}u, mix_tot[{slot}]); write_mix_mul_scratch(cycle, {live_idx}u, mix_mul[{slot}]); // mix_var{var}",
+            )
+            .unwrap();
+        }
+    } else {
+        let ret_slot = emitter
+            .mix_slot_for(ret_var)
+            .map_err(|err| match err {
+                CodegenError::VarNotLive(msg) => CodegenError::VarNotLive(format!(
+                    "final chunk: ret mix var {ret_var} not live: {msg}"
+                )),
+                other => other,
+            })?;
+        writeln!(
+            emitter.body,
+            "  // === chunk {chunk_idx} final: write_check ===",
+        )
+        .unwrap();
+        writeln!(emitter.body, "  write_check(cycle, mix_tot[{ret_slot}]);").unwrap();
+    }
+
+    // 4) Materialize as a StagedKernel. We reuse the local array sizes
+    // across stages (each chunk declares fp/mix arrays of the same size
+    // as the single-kernel emission would).
+    let stage_name = format!("{name}_stage{chunk_idx}");
+    let fp_slots = plan.fp_slots;
+    let mix_slots = plan.mix_slots;
+    let mut wgsl = String::new();
+    writeln!(wgsl, "// staged eval_check kernel: {stage_name}").unwrap();
+    writeln!(
+        wgsl,
+        "// field_mode = {:?}, fp_slots = {fp_slots}, mix_slots = {mix_slots}, chunk = {chunk_idx}/{} (final = {is_last})",
+        field_mode,
+        plan.boundaries.len(),
+    )
+    .unwrap();
+    wgsl.push_str(
+        "// runtime prelude (bindings, params, ext_*/add/sub/mul helpers,\n// read_g{0,1,2}_*, read_global_*, load_mix_pow, write_check,\n// read/write_*_scratch) is the `STAGED_EVAL_CHECK_PRELUDE_WGSL` constant.\n",
+    );
+    writeln!(wgsl, "@compute @workgroup_size(1)").unwrap();
+    wgsl.push_str("fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
+    wgsl.push_str("  let cycle = gid.x;\n");
+    wgsl.push_str("  if (cycle >= params.domain) { return; }\n");
+    writeln!(
+        wgsl,
+        "  var fp: array<{}, {fp_slots}>;",
+        field_mode.fp_ty()
+    )
+    .unwrap();
+    writeln!(wgsl, "  var mix_tot: array<vec4<u32>, {mix_slots}>;").unwrap();
+    writeln!(wgsl, "  var mix_mul: array<vec4<u32>, {mix_slots}>;").unwrap();
+    wgsl.push_str(&emitter.body);
+    wgsl.push_str("}\n");
+
+    let _ = taps;
+    Ok(StagedKernel {
+        id: stage_name,
+        field_mode,
+        fp_slots,
+        mix_slots,
+        wgsl_source: wgsl,
+    })
+}
+
+/// Emit a multi-stage staged WGSL kernel for `def`. Each chunk runs
+/// roughly `target_chunk_ops` PolyExtSteps; the final chunk additionally
+/// writes the check buffer. The N stages share slot assignments (same
+/// emitter state threads through chunks), so a fp/mix var defined in
+/// chunk K and consumed in chunk K+M lives at the same slot index in
+/// both — the per-chunk scratch loads/stores rebind that slot at chunk
+/// boundaries.
+pub fn staged_multi_kernel_from_def(
+    name: &str,
+    def: &PolyExtStepDef,
+    taps: &[EmitterTap],
+    field_mode: FieldMode,
+    target_chunk_ops: usize,
+) -> Result<StagedMultiKernel, CodegenError> {
+    let plan = plan_multi_kernel(def, target_chunk_ops)?;
+    let mut emitter = WgslEmitter::new(def, taps, field_mode)?;
+    let mut stages = Vec::with_capacity(plan.boundaries.len());
+
+    let mut prev_end = 0usize;
+    let n = plan.boundaries.len();
+    // Walk boundaries by index so we can borrow the previous boundary.
+    for chunk_idx in 0..n {
+        let is_last = chunk_idx + 1 == n;
+        let this_boundary = &plan.boundaries[chunk_idx];
+        let prev_boundary = if chunk_idx == 0 {
+            None
+        } else {
+            Some(&plan.boundaries[chunk_idx - 1])
+        };
+        let ops = &def.block[prev_end..this_boundary.end];
+        let stage = emit_chunk_wgsl(
+            name,
+            chunk_idx,
+            is_last,
+            field_mode,
+            &plan,
+            prev_boundary,
+            this_boundary,
+            ops,
+            prev_end,
+            taps,
+            &mut emitter,
+            def.ret,
+        )?;
+        stages.push(stage);
+        prev_end = this_boundary.end;
+    }
+
+    let fp_per_slot_u32 = match field_mode {
+        FieldMode::Base => 1,
+        FieldMode::Ext => 4,
+    };
+    let fp_scratch_stride_u32 = plan.max_live_fp * fp_per_slot_u32;
+    let mix_scratch_stride_u32 = plan.max_live_mix * 4;
+
+    Ok(StagedMultiKernel {
+        id: name.to_string(),
+        field_mode,
+        stages,
+        fp_scratch_stride_u32,
+        mix_scratch_stride_u32,
+    })
+}
+
 /// Plan an N-chunk emission for `def` targeting roughly `target_chunk_ops`
 /// PolyExtSteps per chunk. Each chunk runs the same slot-allocation
 /// discipline as the single-kernel emitter (matching the runtime
@@ -1351,6 +1575,85 @@ mod tests {
         // Slot maxima identical to single-kernel.
         assert_eq!(plan.fp_slots, 3);
         assert_eq!(plan.mix_slots, 2);
+    }
+
+    #[test]
+    fn multi_kernel_single_chunk_matches_single_kernel_for_small_def() {
+        // target 100 ops/chunk → 1 chunk; multi-stage output should match
+        // the single-kernel output up to the per-stage header comment.
+        let multi =
+            staged_multi_kernel_from_def("tiny", &TINY_DEF, &[], FieldMode::Base, 100).unwrap();
+        assert_eq!(multi.stages.len(), 1);
+        let stage0 = &multi.stages[0];
+        // No live-in/out — no scratch references.
+        assert!(!stage0.wgsl_source.contains("read_fp_scratch_"));
+        assert!(!stage0.wgsl_source.contains("write_fp_scratch_"));
+        // Last chunk emits write_check.
+        assert!(stage0.wgsl_source.contains("write_check(cycle, mix_tot[1])"));
+        // Strides are zero — no scratch needed.
+        assert_eq!(multi.fp_scratch_stride_u32, 0);
+        assert_eq!(multi.mix_scratch_stride_u32, 0);
+    }
+
+    #[test]
+    fn multi_kernel_three_chunks_emit_scratch_io_at_boundaries() {
+        // target 2 ops/chunk → 3 chunks. Stage 0 stores 2 fp vars at the
+        // end; stage 1 loads them and stores its live-out; stage 2 loads.
+        let multi =
+            staged_multi_kernel_from_def("tiny3", &TINY_DEF, &[], FieldMode::Base, 2).unwrap();
+        assert_eq!(multi.stages.len(), 3);
+
+        // Stage 0: no live-in, two fp live-out (live_idx 0 = var 0 slot 0,
+        // live_idx 1 = var 1 slot 1). "write_check" appears in the
+        // prelude-reference comment in every stage; the CALL doesn't.
+        let s0 = &multi.stages[0].wgsl_source;
+        assert!(!s0.contains("fp[0] = read_fp_scratch_scalar"));
+        assert!(s0.contains("write_fp_scratch_scalar(cycle, 0u, fp[0])"));
+        assert!(s0.contains("write_fp_scratch_scalar(cycle, 1u, fp[1])"));
+        assert!(!s0.contains("write_check(cycle, mix_tot["));
+
+        // Stage 1: load 2 fp, run Add + True, store 1 fp + 1 mix.
+        let s1 = &multi.stages[1].wgsl_source;
+        assert!(s1.contains("fp[0] = read_fp_scratch_scalar(cycle, 0u)"));
+        assert!(s1.contains("fp[1] = read_fp_scratch_scalar(cycle, 1u)"));
+        // After Add, fp_var 2 lives at slot 2 (slots 0/1 freed by Add).
+        assert!(s1.contains("write_fp_scratch_scalar(cycle, 0u, fp[2])"));
+        // After True, mix_var 0 lives at slot 0.
+        assert!(s1.contains("write_mix_tot_scratch(cycle, 0u, mix_tot[0])"));
+        assert!(!s1.contains("write_check(cycle, mix_tot["));
+
+        // Stage 2: load 1 fp + 1 mix, run AndEqz, write_check.
+        let s2 = &multi.stages[2].wgsl_source;
+        assert!(s2.contains("fp[2] = read_fp_scratch_scalar(cycle, 0u)"));
+        assert!(s2.contains("mix_tot[0] = read_mix_tot_scratch(cycle, 0u)"));
+        assert!(s2.contains("write_check(cycle, mix_tot[1])"));
+
+        // Strides: max_live_fp = 2 (after stage 0), max_live_mix = 1
+        // (after stage 1). Base mode: 1 u32 per fp slot.
+        assert_eq!(multi.fp_scratch_stride_u32, 2);
+        assert_eq!(multi.mix_scratch_stride_u32, 4); // 1 mix * 4 u32 per vec4
+    }
+
+    #[test]
+    fn multi_kernel_uses_ext_helpers_for_ext_field_mode() {
+        // FULL_DEF requires Ext mode. Two-chunk split exercises ext
+        // scratch helpers.
+        let multi =
+            staged_multi_kernel_from_def("full2", &FULL_DEF, TEST_TAPS, FieldMode::Ext, 5).unwrap();
+        assert!(multi.stages.len() >= 2);
+        let early = &multi.stages[0].wgsl_source;
+        // Boundary live-out for ext mode uses _ext helpers.
+        assert!(
+            early.contains("write_fp_scratch_ext(cycle"),
+            "ext mode must use write_fp_scratch_ext at chunk boundaries"
+        );
+        let last = &multi.stages.last().unwrap().wgsl_source;
+        assert!(
+            last.contains("write_check(cycle, mix_tot["),
+            "last stage must call write_check"
+        );
+        // Strides: ext mode uses 4 u32s per fp slot.
+        assert_eq!(multi.fp_scratch_stride_u32 % 4, 0);
     }
 
     #[test]
