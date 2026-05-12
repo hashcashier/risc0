@@ -777,6 +777,235 @@ pub fn staged_full_kernel_wgsl(
     Ok(full)
 }
 
+// ============================================================================
+// SP3 iter 7: multi-stage staged-kernel planner.
+//
+// The single-kernel emitter (iters 1-6) inlines the entire DEF block into one
+// compute shader. For the rv32im production DEF (~20k PolyExtSteps) the
+// resulting kernel exhausts the per-dispatch budget of Chrome's SwiftShader
+// fallback (and likely of real-GPU TDR limits too — see iter 6 evidence).
+//
+// iter 7 splits the DEF into N chunks of ~5k ops each, mirroring CUDA's
+// 4-file `eval_check_{0,1,2,3}.cu` layout. Between chunks, the kernel
+// serializes the live fp/mix vars to a per-cycle scratch storage buffer; the
+// next chunk reloads them at its entry. The scratch buffer is sized to
+// `max_live_at_any_boundary * domain` entries — typically a few hundred
+// elements per cycle, well within `maxStorageBufferBindingSize`.
+//
+// This module adds the planner that walks the DEF, runs the same slot
+// allocator the single-kernel emitter uses, and captures the live-set
+// snapshot at each chunk boundary. The follow-on iter (7b) emits per-chunk
+// WGSL using the planner's output; iter 7c wires multi-kernel dispatch.
+// ============================================================================
+
+/// One chunk-boundary snapshot: which fp and mix vars are live at the end
+/// of the chunk that produced ops `[prev_end, end)`, along with their
+/// physical slot assignments at that moment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkBoundary {
+    /// Exclusive end op_idx for this chunk. Chunk K runs ops
+    /// `[boundaries[K-1].end, boundaries[K].end)` (with boundary -1 = 0).
+    pub end: usize,
+    /// Fp vars live at this boundary, recorded as `(var_idx, slot_idx)`
+    /// pairs. The next chunk reads these from scratch and recovers each
+    /// var's slot assignment.
+    pub live_fp: Vec<(usize, usize)>,
+    /// Mix vars live at this boundary, recorded as `(var_idx, slot_idx)`.
+    pub live_mix: Vec<(usize, usize)>,
+}
+
+/// Plan output: per-chunk boundaries + slot/scratch-stride dimensioning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiKernelPlan {
+    /// One entry per chunk. The last boundary's `end` is `def.block.len()`.
+    /// At least one boundary is produced (the trivial case of a single
+    /// chunk that fits below `target_chunk_ops`).
+    pub boundaries: Vec<ChunkBoundary>,
+    /// High-water mark of fp / mix slot indices ever allocated, sized
+    /// across the entire DEF. Each per-chunk kernel sizes its `fp` /
+    /// `mix_tot` / `mix_mul` local arrays to these numbers — slots are
+    /// physical, not chunk-local, so they're shared across chunks.
+    pub fp_slots: usize,
+    pub mix_slots: usize,
+    /// Max `live_fp.len()` across all *non-final* boundaries — drives the
+    /// fp scratch buffer stride (each cycle reserves this many u32 / vec4
+    /// entries depending on field mode).
+    pub max_live_fp: usize,
+    /// Max `live_mix.len()` across non-final boundaries. The mix scratch
+    /// holds both `mix_tot` and `mix_mul` for each live mix var.
+    pub max_live_mix: usize,
+}
+
+/// Plan an N-chunk emission for `def` targeting roughly `target_chunk_ops`
+/// PolyExtSteps per chunk. Each chunk runs the same slot-allocation
+/// discipline as the single-kernel emitter (matching the runtime
+/// interpreter); the planner additionally snapshots which vars are live
+/// at each chunk boundary so the per-chunk emitter knows what to save to
+/// the scratch buffer.
+pub fn plan_multi_kernel(
+    def: &PolyExtStepDef,
+    target_chunk_ops: usize,
+) -> Result<MultiKernelPlan, CodegenError> {
+    let target_chunk_ops = target_chunk_ops.max(1);
+
+    let (last_fp, last_mix, _fp_count, _mix_count) = eval_check_last_uses(def)
+        .map_err(|err| CodegenError::LastUseAnalysisFailed(err.to_string()))?;
+
+    let mut fp_alloc = EvalCheckSlotAllocator::default();
+    let mut mix_alloc = EvalCheckSlotAllocator::default();
+    let mut fp_slot_map: Vec<Option<usize>> = Vec::new();
+    let mut mix_slot_map: Vec<Option<usize>> = Vec::new();
+
+    let mut fp_var_count = 0usize;
+    let mut mix_var_count = 0usize;
+
+    let mut boundaries: Vec<ChunkBoundary> = Vec::new();
+    let mut max_live_fp = 0usize;
+    let mut max_live_mix = 0usize;
+
+    let block_len = def.block.len();
+    let mut next_boundary_at = target_chunk_ops.min(block_len);
+
+    for (op_idx, op) in def.block.iter().enumerate() {
+        // Walk the op exactly like the emitter: allocate output slot,
+        // free dead operands. We don't emit WGSL here, just track slots.
+        let alloc_fp_var = |fp_alloc: &mut EvalCheckSlotAllocator,
+                            fp_slot_map: &mut Vec<Option<usize>>,
+                            fp_var_count: &mut usize,
+                            last_fp: &[Option<usize>]| {
+            let var_idx = *fp_var_count;
+            *fp_var_count += 1;
+            let slot = fp_alloc.alloc();
+            fp_slot_map.push(Some(slot));
+            if last_fp.get(var_idx).copied().flatten().is_none() {
+                fp_slot_map[var_idx] = None;
+                fp_alloc.free(slot);
+            }
+        };
+        let alloc_mix_var = |mix_alloc: &mut EvalCheckSlotAllocator,
+                             mix_slot_map: &mut Vec<Option<usize>>,
+                             mix_var_count: &mut usize,
+                             last_mix: &[Option<usize>]| {
+            let var_idx = *mix_var_count;
+            *mix_var_count += 1;
+            let slot = mix_alloc.alloc();
+            mix_slot_map.push(Some(slot));
+            if last_mix.get(var_idx).copied().flatten().is_none() {
+                mix_slot_map[var_idx] = None;
+                mix_alloc.free(slot);
+            }
+        };
+        match op {
+            PolyExtStep::Const(_)
+            | PolyExtStep::ConstExt(_, _, _, _)
+            | PolyExtStep::Get(_)
+            | PolyExtStep::GetGlobal(_, _) => {
+                alloc_fp_var(&mut fp_alloc, &mut fp_slot_map, &mut fp_var_count, &last_fp);
+            }
+            PolyExtStep::Add(x, y) | PolyExtStep::Sub(x, y) | PolyExtStep::Mul(x, y) => {
+                alloc_fp_var(&mut fp_alloc, &mut fp_slot_map, &mut fp_var_count, &last_fp);
+                // Free dead operands.
+                for &var in &[*x, *y] {
+                    if let Some(Some(last)) = last_fp.get(var) {
+                        if *last == op_idx {
+                            if let Some(slot) = fp_slot_map[var].take() {
+                                fp_alloc.free(slot);
+                            }
+                        }
+                    }
+                }
+            }
+            PolyExtStep::True => {
+                alloc_mix_var(
+                    &mut mix_alloc,
+                    &mut mix_slot_map,
+                    &mut mix_var_count,
+                    &last_mix,
+                );
+            }
+            PolyExtStep::AndEqz(chain, inner) => {
+                alloc_mix_var(
+                    &mut mix_alloc,
+                    &mut mix_slot_map,
+                    &mut mix_var_count,
+                    &last_mix,
+                );
+                if let Some(Some(last)) = last_mix.get(*chain) {
+                    if *last == op_idx {
+                        if let Some(slot) = mix_slot_map[*chain].take() {
+                            mix_alloc.free(slot);
+                        }
+                    }
+                }
+                if let Some(Some(last)) = last_fp.get(*inner) {
+                    if *last == op_idx {
+                        if let Some(slot) = fp_slot_map[*inner].take() {
+                            fp_alloc.free(slot);
+                        }
+                    }
+                }
+            }
+            PolyExtStep::AndCond(chain, cond, inner) => {
+                alloc_mix_var(
+                    &mut mix_alloc,
+                    &mut mix_slot_map,
+                    &mut mix_var_count,
+                    &last_mix,
+                );
+                for &var in &[*chain, *inner] {
+                    if let Some(Some(last)) = last_mix.get(var) {
+                        if *last == op_idx {
+                            if let Some(slot) = mix_slot_map[var].take() {
+                                mix_alloc.free(slot);
+                            }
+                        }
+                    }
+                }
+                if let Some(Some(last)) = last_fp.get(*cond) {
+                    if *last == op_idx {
+                        if let Some(slot) = fp_slot_map[*cond].take() {
+                            fp_alloc.free(slot);
+                        }
+                    }
+                }
+            }
+        }
+        // Snapshot at chunk boundary OR at the last op.
+        let is_last_op = op_idx + 1 == block_len;
+        let at_boundary = op_idx + 1 >= next_boundary_at;
+        if at_boundary || is_last_op {
+            let live_fp: Vec<(usize, usize)> = fp_slot_map
+                .iter()
+                .enumerate()
+                .filter_map(|(var, slot)| slot.map(|s| (var, s)))
+                .collect();
+            let live_mix: Vec<(usize, usize)> = mix_slot_map
+                .iter()
+                .enumerate()
+                .filter_map(|(var, slot)| slot.map(|s| (var, s)))
+                .collect();
+            if !is_last_op {
+                max_live_fp = max_live_fp.max(live_fp.len());
+                max_live_mix = max_live_mix.max(live_mix.len());
+            }
+            boundaries.push(ChunkBoundary {
+                end: op_idx + 1,
+                live_fp,
+                live_mix,
+            });
+            next_boundary_at = (op_idx + 1 + target_chunk_ops).min(block_len);
+        }
+    }
+
+    Ok(MultiKernelPlan {
+        boundaries,
+        fp_slots: fp_alloc.max_used().max(1),
+        mix_slots: mix_alloc.max_used().max(1),
+        max_live_fp,
+        max_live_mix,
+    })
+}
+
 /// rv32im staged-WGSL `eval_check` generator.
 ///
 /// rv32im is a pure base-field circuit (no `ConstExt` steps in its DEF), so
@@ -1073,6 +1302,73 @@ mod tests {
                 "FULL_DEF under Ext mode must emit '{token}' at least once"
             );
         }
+    }
+
+    #[test]
+    fn plan_multi_kernel_returns_single_chunk_when_block_fits() {
+        // TINY_DEF has 5 ops; target 100 ops/chunk → one chunk.
+        let plan = plan_multi_kernel(&TINY_DEF, 100).unwrap();
+        assert_eq!(plan.boundaries.len(), 1);
+        assert_eq!(plan.boundaries[0].end, TINY_DEF.block.len());
+        // No earlier boundaries → max_live_* are 0.
+        assert_eq!(plan.max_live_fp, 0);
+        assert_eq!(plan.max_live_mix, 0);
+        // Slot counts match the single-kernel emission.
+        assert_eq!(plan.fp_slots, 3);
+        assert_eq!(plan.mix_slots, 2);
+    }
+
+    #[test]
+    fn plan_multi_kernel_splits_at_target_chunk_size() {
+        // TINY_DEF has 5 ops; target 2 ops/chunk → 3 chunks ([0,2), [2,4), [4,5)).
+        let plan = plan_multi_kernel(&TINY_DEF, 2).unwrap();
+        assert_eq!(plan.boundaries.len(), 3);
+        assert_eq!(plan.boundaries[0].end, 2);
+        assert_eq!(plan.boundaries[1].end, 4);
+        assert_eq!(plan.boundaries[2].end, 5);
+
+        // After chunk 0 (ops Const(7), Const(3)): fp_var 0 (slot 0) and
+        // fp_var 1 (slot 1) are live (used by Add at op 2 in chunk 1).
+        assert_eq!(
+            plan.boundaries[0].live_fp,
+            vec![(0, 0), (1, 1)],
+            "after chunk 0 both consts are live for the upcoming Add"
+        );
+        assert!(plan.boundaries[0].live_mix.is_empty());
+
+        // After chunk 1 (ops Add(0,1), True): fp_var 2 (slot 2) is live
+        // (used by AndEqz at op 4); mix_var 0 (slot 0) is live.
+        assert_eq!(plan.boundaries[1].live_fp, vec![(2, 2)]);
+        assert_eq!(plan.boundaries[1].live_mix, vec![(0, 0)]);
+
+        // Final chunk's snapshot is recorded for completeness but excluded
+        // from max_live_* (no scratch save needed at the end of the program).
+        assert_eq!(plan.boundaries[2].live_mix, vec![(1, 1)]);
+
+        // Max live across non-final boundaries: 2 fp vars (boundary 0), 1 mix var (boundary 1).
+        assert_eq!(plan.max_live_fp, 2);
+        assert_eq!(plan.max_live_mix, 1);
+        // Slot maxima identical to single-kernel.
+        assert_eq!(plan.fp_slots, 3);
+        assert_eq!(plan.mix_slots, 2);
+    }
+
+    #[test]
+    fn plan_multi_kernel_handles_full_def_with_slot_reuse() {
+        // FULL_DEF has 10 ops; target 3 ops/chunk → 4 chunks ([0,3), [3,6), [6,9), [9,10)).
+        let plan = plan_multi_kernel(&FULL_DEF, 3).unwrap();
+        assert_eq!(plan.boundaries.len(), 4);
+        // The slot reuse from iter 6 still applies — the planner runs the
+        // same allocator.
+        assert_eq!(plan.fp_slots, 5);
+        // Liveness at boundary 2 (end of [6,9)): mix_var 1 slot 1 is live
+        // (used by AndCond at op 9). fp_var 0 slot 0 is live (used by
+        // AndCond's cond operand). All other slots freed.
+        let b2 = &plan.boundaries[2];
+        assert!(
+            b2.live_fp.iter().any(|(v, _)| *v == 0),
+            "fp_var 0 must be live at end of chunk 2 (AndCond at op 9 reads it)"
+        );
     }
 
     #[test]
