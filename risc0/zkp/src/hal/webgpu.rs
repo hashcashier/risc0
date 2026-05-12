@@ -5256,9 +5256,18 @@ impl WebGpuHal {
             } else {
                 "webgpu_staged_eval_check_stage"
             };
+            // SP3 iter 7q (2026-05-12): time each stage's WGSL compile
+            // separately so we can attribute the staged-path slowness.
+            // Iter 7p (workgroup_size=32) didn't move total prove time,
+            // so the 40 s overhead is either WGSL compile (one-shot per
+            // pipeline) or kernel execution (per-call).
+            let _stage_compile_timer = WebGpuStageTimer::new(format!(
+                "staged_eval_check_compile stage={idx}/{} wgsl_bytes={}",
+                multi.stages.len(),
+                wgsl.len()
+            ));
             let kernel =
                 self.create_compute_kernel(kernel_name, &wgsl, "main", &[layout.clone()])?;
-            let _ = idx;
             stages.push(kernel);
         }
         // SP3 iter 7d: allocate scratch buffers once at pipeline create
