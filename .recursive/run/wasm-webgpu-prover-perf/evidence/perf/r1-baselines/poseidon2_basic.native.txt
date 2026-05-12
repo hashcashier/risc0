@@ -1,0 +1,200 @@
+   Compiling merkle_light v0.4.0
+   Compiling divrem v1.0.0
+   Compiling prost-build v0.13.5
+   Compiling tower v0.5.2
+   Compiling hyper-util v0.1.16
+   Compiling futures-executor v0.3.31
+   Compiling wasm-bindgen-macro v0.2.100
+   Compiling futures v0.3.31
+   Compiling wast v64.0.0
+   Compiling regex-automata v0.1.10
+   Compiling idna_adapter v1.2.1
+   Compiling rustls-webpki v0.103.4
+   Compiling idna v1.1.0
+   Compiling tower-http v0.6.6
+   Compiling lazy-regex v3.4.1
+   Compiling circom-witnesscalc v0.2.1
+   Compiling serde_spanned v0.6.9
+   Compiling toml_datetime v0.6.11
+   Compiling serde_with v3.14.0
+   Compiling cargo-platform v0.1.9
+   Compiling postcard v1.1.3
+   Compiling rustc_version v0.4.1
+   Compiling serde_urlencoded v0.7.1
+   Compiling url v2.5.7
+   Compiling toml_edit v0.22.27
+   Compiling erased-serde v0.4.6
+   Compiling serdect v0.2.0
+   Compiling vek v0.15.10
+   Compiling heapless v0.7.17
+   Compiling bincode v1.3.3
+   Compiling matchers v0.1.0
+   Compiling sec1 v0.7.3
+   Compiling ciborium v0.2.2
+   Compiling js-sys v0.3.77
+   Compiling tracing-subscriber v0.3.19
+   Compiling csv v1.3.1
+   Compiling elliptic-curve v0.13.8
+   Compiling typetag v0.2.20
+   Compiling rmp-serde v1.3.0
+   Compiling console_error_panic_hook v0.1.7
+   Compiling cargo_metadata v0.19.2
+   Compiling chess-core v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/chess/core)
+   Compiling bn254-core v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/bn254/core)
+   Compiling bevy-core v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/bevy/core)
+   Compiling password-checker-core v0.12.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/password-checker/core)
+   Compiling ecdsa v0.16.9
+   Compiling primeorder v0.13.6
+   Compiling prorata-core v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/prorata/core)
+   Compiling jwt-compact v0.8.0
+   Compiling p256 v0.13.2
+   Compiling k256 v0.13.3
+   Compiling forust-ml v0.4.8
+   Compiling ark-serialize v0.5.0
+   Compiling num-rational v0.4.2
+   Compiling proc-macro-crate v3.3.0
+   Compiling toml v0.8.23
+   Compiling liblzma v0.4.4
+   Compiling ark-ff v0.5.0
+   Compiling num v0.4.3
+   Compiling smartcore v0.3.2 (https://github.com/risc0/smartcore.git?rev=4bd3cadd50ed988c45c239f5264c3e2c2af0a690#4bd3cadd)
+   Compiling risc0-circuit-keccak v4.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/keccak)
+   Compiling rzup v0.5.1 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/rzup)
+   Compiling jwt-core v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/jwt-validator/core)
+   Compiling borsh-derive v1.5.7
+   Compiling tokio-rustls v0.26.2
+   Compiling browser-prove v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/browser-prove)
+   Compiling hyper-rustls v0.27.7
+   Compiling cust_core v0.1.1
+   Compiling reqwest v0.12.23
+   Compiling wasm-bindgen-futures v0.4.50
+   Compiling wasm-bindgen-test v0.3.50
+   Compiling wat v1.0.71
+   Compiling ruint v1.16.0
+   Compiling downloader v0.2.8
+   Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+   Compiling risc0-binfmt v3.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/binfmt)
+   Compiling risc0-build v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/build)
+   Compiling hello-world-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/hello-world/methods)
+   Compiling jwt-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/jwt-validator/methods)
+   Compiling chess-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/chess/methods)
+   Compiling sha-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/sha/methods)
+   Compiling voting-machine-methods v0.12.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/voting-machine/methods)
+   Compiling wordle-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/wordle/methods)
+   Compiling keccak-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/keccak/methods)
+   Compiling risc0-bigint2-methods v3.0.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/bigint2/methods)
+   Compiling p256-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/ecdsa/p256/methods)
+   Compiling password-checker-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/password-checker/methods)
+   Compiling composition-example-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/composition/methods)
+   Compiling waldo-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/waldo/methods)
+   Compiling bevy-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/bevy/methods)
+   Compiling smartcore-ml-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/smartcore-ml/methods)
+   Compiling bn254-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/bn254/methods)
+   Compiling k256-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/ecdsa/k256/methods)
+   Compiling wasm-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/wasm/methods)
+   Compiling json-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/json/methods)
+   Compiling risc0-zkvm-methods v3.0.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm/methods)
+   Compiling xgboost-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/xgboost/methods)
+   Compiling prorata-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/prorata/methods)
+   Compiling digital-signature-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/digital-signature/methods)
+   Compiling malachite-q v0.4.22
+   Compiling groth16-verifier-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/groth16-verifier/methods)
+   Compiling ark-poly v0.5.0
+   Compiling ark-relations v0.5.1
+   Compiling ark-snark v0.5.1
+   Compiling malachite-float v0.4.22
+   Compiling ark-ec v0.5.0
+   Compiling malachite v0.4.22
+   Compiling ark-crypto-primitives v0.5.0
+   Compiling ark-bn254 v0.5.0
+   Compiling ark-groth16 v0.5.0
+warning: risc0-sys@1.5.0: kernels/zkp/cuda/fp.h: In constructor 'constexpr Fp::Fp(uint32_t, bool)':
+warning: risc0-sys@1.5.0: kernels/zkp/cuda/fp.h:82:33: warning: unused parameter 'ignore' [-Wunused-parameter]
+warning: risc0-sys@1.5.0:    82 |   __host__ __device__ constexpr Fp(uint32_t val, bool ignore) : val(val) {}
+warning: risc0-sys@1.5.0:       |                            ~~~~~^~~~~~
+warning: risc0-sys@1.5.0: kernels/zkp/cuda/fp.h: In constructor 'constexpr Fp::Fp(uint32_t, bool)':
+warning: risc0-sys@1.5.0: kernels/zkp/cuda/fp.h:82:33: warning: unused parameter 'ignore' [-Wunused-parameter]
+warning: risc0-sys@1.5.0:    82 |   __host__ __device__ constexpr Fp(uint32_t val, bool ignore) : val(val) {}
+warning: risc0-sys@1.5.0:       |                            ~~~~~^~~~~~
+warning: risc0-sys@1.5.0: kernels/zkp/cuda/fp.h: In constructor 'constexpr Fp::Fp(uint32_t, bool)':
+warning: risc0-sys@1.5.0: kernels/zkp/cuda/fp.h:82:33: warning: unused parameter 'ignore' [-Wunused-parameter]
+warning: risc0-sys@1.5.0:    82 |   __host__ __device__ constexpr Fp(uint32_t val, bool ignore) : val(val) {}
+warning: risc0-sys@1.5.0:       |                            ~~~~~^~~~~~
+warning: risc0-sys@1.5.0: kernels/zkp/cuda/fp.h: In constructor 'constexpr Fp::Fp(uint32_t, bool)':
+warning: risc0-sys@1.5.0: kernels/zkp/cuda/fp.h:82:33: warning: unused parameter 'ignore' [-Wunused-parameter]
+warning: risc0-sys@1.5.0:    82 |   __host__ __device__ constexpr Fp(uint32_t val, bool ignore) : val(val) {}
+warning: risc0-sys@1.5.0:       |                            ~~~~~^~~~~~
+warning: risc0-sys@1.5.0: kernels/zkp/cuda/kernels.cu: In function 'constexpr size_t log2Ceil(size_t)':
+warning: risc0-sys@1.5.0: kernels/zkp/cuda/kernels.cu:23:17: warning: comparison of integer expressions of different signedness: 'int' and 'size_t' {aka 'long unsigned int'} [-Wsign-compare]
+warning: risc0-sys@1.5.0:    23 |   while ((1 << r) < in) {
+warning: risc0-sys@1.5.0:       |        ~~~~~~~~~^~~~
+warning: risc0-sys@1.5.0: kernels/zkp/cuda/fp.h: In constructor 'constexpr Fp::Fp(uint32_t, bool)':
+warning: risc0-sys@1.5.0: kernels/zkp/cuda/fp.h:82:33: warning: unused parameter 'ignore' [-Wunused-parameter]
+warning: risc0-sys@1.5.0:    82 |   __host__ __device__ constexpr Fp(uint32_t val, bool ignore) : val(val) {}
+warning: risc0-sys@1.5.0:       |                            ~~~~~^~~~~~
+warning: risc0-sys@1.5.0: kernels/zkp/cuda/supra/ntt.cu: In function 'RustError::by_value sppark_init()':
+warning: risc0-sys@1.5.0: kernels/zkp/cuda/supra/ntt.cu:10:10: warning: array subscript 1 is outside array bounds of 'bb31_t [1]' [-Warray-bounds=]
+warning: risc0-sys@1.5.0:    10 |   inout[1] = fr_t(1);
+warning: risc0-sys@1.5.0: In member function '_Tp* std::__new_allocator<_Tp>::allocate(size_type, const void*) [with _Tp = bb31_t]',
+warning: risc0-sys@1.5.0:     inlined from 'static _Tp* std::allocator_traits<std::allocator<_CharT> >::allocate(allocator_type&, size_type) [with _Tp = bb31_t]' at /usr/include/c++/13/bits/alloc_traits.h:482:22,
+warning: risc0-sys@1.5.0:     inlined from 'std::_Vector_base<_Tp, _Alloc>::pointer std::_Vector_base<_Tp, _Alloc>::_M_allocate(std::size_t) [with _Tp = bb31_t; _Alloc = std::allocator<bb31_t>]' at /usr/include/c++/13/bits/stl_vector.h:381:36,
+warning: risc0-sys@1.5.0:     inlined from 'void std::vector<_Tp, _Alloc>::_M_range_initialize(_ForwardIterator, _ForwardIterator, std::forward_iterator_tag) [with _ForwardIterator = const bb31_t*; _Tp = bb31_t; _Alloc = std::allocator<bb31_t>]' at /usr/include/c++/13/bits/stl_vector.h:1691:47,
+warning: risc0-sys@1.5.0:     inlined from 'std::vector<_Tp, _Alloc>::vector(std::initializer_list<_Tp>, const allocator_type&) [with _Tp = bb31_t; _Alloc = std::allocator<bb31_t>]' at /usr/include/c++/13/bits/stl_vector.h:682:20,
+warning: risc0-sys@1.5.0:     inlined from 'RustError::by_value sppark_init()' at kernels/zkp/cuda/supra/ntt.cu:8:40:
+warning: risc0-sys@1.5.0: /usr/include/c++/13/bits/new_allocator.h:151:49: note: at offset 4 into object of size 4 allocated by 'operator new'
+warning: risc0-sys@1.5.0:   151 |         return static_cast<_Tp*>(_GLIBCXX_OPERATOR_NEW(__n * sizeof(_Tp)));
+warning: risc0-sys@1.5.0:       |                                   ~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~
+warning: risc0-groth16-sys@0.1.0: kernels/cuda/ffi.cu:10: warning: ignoring '#pragma clang diagnostic' [-Wunknown-pragmas]
+warning: risc0-groth16-sys@0.1.0:    10 | #pragma clang diagnostic push
+warning: risc0-groth16-sys@0.1.0:       |
+warning: risc0-groth16-sys@0.1.0: kernels/cuda/ffi.cu:11: warning: ignoring '#pragma clang diagnostic' [-Wunknown-pragmas]
+warning: risc0-groth16-sys@0.1.0:    11 | #pragma clang diagnostic ignored "-Wbitwise-instead-of-logical"
+warning: risc0-groth16-sys@0.1.0:       |
+warning: risc0-groth16-sys@0.1.0: kernels/cuda/ffi.cu:13: warning: ignoring '#pragma clang diagnostic' [-Wunknown-pragmas]
+warning: risc0-groth16-sys@0.1.0:    13 | #pragma clang diagnostic pop
+warning: risc0-groth16-sys@0.1.0:       |
+   Compiling voting-machine-core v0.12.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/voting-machine/core)
+   Compiling risc0-groth16 v3.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/groth16)
+warning: risc0-circuit-recursion-sys@4.0.2: /home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/sys/kernels/zkp/cuda/fp.h: In constructor 'constexpr Fp::Fp(uint32_t, bool)':
+warning: risc0-circuit-recursion-sys@4.0.2: /home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/sys/kernels/zkp/cuda/fp.h:82:33: warning: unused parameter 'ignore' [-Wunused-parameter]
+warning: risc0-circuit-recursion-sys@4.0.2:    82 |   __host__ __device__ constexpr Fp(uint32_t val, bool ignore) : val(val) {}
+warning: risc0-circuit-recursion-sys@4.0.2:       |                            ~~~~~^~~~~~
+warning: risc0-circuit-recursion-sys@4.0.2: /home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/sys/kernels/zkp/cuda/fp.h: In constructor 'constexpr Fp::Fp(uint32_t, bool)':
+warning: risc0-circuit-recursion-sys@4.0.2: /home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/sys/kernels/zkp/cuda/fp.h:82:33: warning: unused parameter 'ignore' [-Wunused-parameter]
+warning: risc0-circuit-recursion-sys@4.0.2:    82 |   __host__ __device__ constexpr Fp(uint32_t val, bool ignore) : val(val) {}
+warning: risc0-circuit-recursion-sys@4.0.2:       |                            ~~~~~^~~~~~
+warning: risc0-circuit-recursion-sys@4.0.2: /home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/sys/kernels/zkp/cuda/fp.h: In constructor 'constexpr Fp::Fp(uint32_t, bool)':
+warning: risc0-circuit-recursion-sys@4.0.2: /home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/sys/kernels/zkp/cuda/fp.h:82:33: warning: unused parameter 'ignore' [-Wunused-parameter]
+warning: risc0-circuit-recursion-sys@4.0.2:    82 |   __host__ __device__ constexpr Fp(uint32_t val, bool ignore) : val(val) {}
+warning: risc0-circuit-recursion-sys@4.0.2:       |                            ~~~~~^~~~~~
+warning: risc0-circuit-recursion-sys@4.0.2: kernels/cuda/ffi.cu: In member function 'void HostExecContext::verifyWom(uint32_t)':
+warning: risc0-circuit-recursion-sys@4.0.2: kernels/cuda/ffi.cu:227:25: warning: unused parameter 'mode' [-Wunused-parameter]
+warning: risc0-circuit-recursion-sys@4.0.2:   227 |   void verifyWom(uint32_t mode) {
+warning: risc0-circuit-recursion-sys@4.0.2:       |                ~~~~~~~~~^~~~
+warning: risc0-circuit-recursion-sys@4.0.2: /home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/sys/kernels/zkp/cuda/fp.h: In constructor 'constexpr Fp::Fp(uint32_t, bool)':
+warning: risc0-circuit-recursion-sys@4.0.2: /home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/sys/kernels/zkp/cuda/fp.h:82:33: warning: unused parameter 'ignore' [-Wunused-parameter]
+warning: risc0-circuit-recursion-sys@4.0.2:    82 |   __host__ __device__ constexpr Fp(uint32_t val, bool ignore) : val(val) {}
+warning: risc0-circuit-recursion-sys@4.0.2:       |                            ~~~~~^~~~~~
+warning: risc0-circuit-recursion-sys@4.0.2: /home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/sys/kernels/zkp/cuda/fp.h: In constructor 'constexpr Fp::Fp(uint32_t, bool)':
+warning: risc0-circuit-recursion-sys@4.0.2: /home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/sys/kernels/zkp/cuda/fp.h:82:33: warning: unused parameter 'ignore' [-Wunused-parameter]
+warning: risc0-circuit-recursion-sys@4.0.2:    82 |   __host__ __device__ constexpr Fp(uint32_t val, bool ignore) : val(val) {}
+warning: risc0-circuit-recursion-sys@4.0.2:       |                            ~~~~~^~~~~~
+warning: risc0-circuit-recursion-sys@4.0.2: /home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/sys/kernels/zkp/cuda/fp.h: In constructor 'constexpr Fp::Fp(uint32_t, bool)':
+warning: risc0-circuit-recursion-sys@4.0.2: /home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/sys/kernels/zkp/cuda/fp.h:82:33: warning: unused parameter 'ignore' [-Wunused-parameter]
+warning: risc0-circuit-recursion-sys@4.0.2:    82 |   __host__ __device__ constexpr Fp(uint32_t val, bool ignore) : val(val) {}
+warning: risc0-circuit-recursion-sys@4.0.2:       |                            ~~~~~^~~~~~
+   Compiling risc0-circuit-rv32im v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/rv32im)
+   Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+   Compiling json-core v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/json/core)
+   Compiling digital-signature-core v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/digital-signature/core)
+   Compiling waldo-core v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/waldo/core)
+   Compiling wordle-core v1.0.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/wordle/core)
+    Finished `release` profile [optimized + debuginfo] target(s) in 18m 29s
+     Running unittests src/lib.rs (examples/target/release/deps/browser_prove-5a6a7fc63bfb6a77)
+
+running 1 test
+native_prove name=multi_test/poseidon2_basic elapsed=545.336738ms segments=1 user_cycles=3553 total_cycles=32768
+test native_stats_tests::native_poseidon2_basic_stats ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; finished in 0.55s
+

@@ -1,0 +1,169 @@
+Set timeout to 600 seconds...
+Executing bindgen...                                                                                Running headless tests in Chrome on `http://127.0.0.1:45069/`
+Try find `webdriver.json` for configure browser's capabilities:
+Ok
+Starting new webdriver session...                 Visiting http://127.0.0.1:43919...                Loading page elements...                          Waiting for test to finish...                                                                       using deprecated parameters for the initialization function; pass a single object instead
+running 1 test
+browser-prove:webgpu-limits max_buffer_size=1073741824 max_storage_buffer_binding_size=1073741824 max_compute_workgroup_storage_size=49152
+browser-prove:start hello-world
+browser-prove:stage start execute
+browser-prove:stage done execute elapsed_ms=26
+browser-prove:stage start prove_session_async segments=1 pending_keccaks=0 assumptions=0
+browser-prove:stage start prove_segment_async index=0 po2=15 user_cycles=3560
+browser-prove:stage start segment_preflight index=0 po2=15 user_cycles=3560
+browser-prove:stage done segment_preflight index=0 po2=15 user_cycles=3560 elapsed_ms=21
+browser-prove:stage start prove_segment_core_async index=0 po2=15
+browser-prove:stage start segment_prove_core_async index=0 po2=15
+browser-prove:stage start rv32im_witgen mode=parallel cycles=32768 txns=29799 bigint_bytes=0 data_rows=32768 data_cols=211
+browser-prove:stage done rv32im_witgen mode=parallel cycles=32768 txns=29799 bigint_bytes=0 data_rows=32768 data_cols=211 elapsed_ms=79.000
+browser-prove:stage start rv32im_accumulate cycles=32768 data_rows=32768 accum_rows=32768
+browser-prove:stage done rv32im_accumulate cycles=32768 data_rows=32768 accum_rows=32768 elapsed_ms=307.000
+browser-prove:stage start eval_check_interpreter_submit domain=131072 dispatch_count=131072 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32
+browser-prove:stage done eval_check_interpreter_submit domain=131072 dispatch_count=131072 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32 elapsed_ms=0.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=108.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=4.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=93.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=1.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=27.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=1.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=0.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=0.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=0.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=169.000
+browser-prove:stage done segment_prove_core_async index=0 po2=15 elapsed_ms=998
+browser-prove:stage start verify_segment index=0
+browser-prove:stage done verify_segment index=0 elapsed_ms=13
+browser-prove:stage done prove_segment_core_async index=0 po2=15 elapsed_ms=1012
+browser-prove:stage done prove_segment_async index=0 po2=15 user_cycles=3560 elapsed_ms=1033
+browser-prove:stage start keccak_receipts_root
+browser-prove:stage done keccak_receipts_root elapsed_ms=0
+browser-prove:stage start verify_composite
+browser-prove:stage done verify_composite elapsed_ms=13
+browser-prove:stage start composite_to_succinct_async
+browser-prove:stage start lift_async segment_index=0
+browser-prove:stage start lift_prove_async segment_index=0
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=121426 wom=268827 iops=44719
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=121426 wom=268827 iops=44719 elapsed_ms=210.000
+browser-prove:stage start recursion_accumulate work_cycles=121426 total_cycles=262144
+browser-prove:stage done recursion_accumulate work_cycles=121426 total_cycles=262144 elapsed_ms=203.000
+browser-prove:stage start eval_check_base_private_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=12359 fp_slots=1001 mix_slots=10 workgroup_size=32
+browser-prove:stage done eval_check_base_private_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=12359 fp_slots=1001 mix_slots=10 workgroup_size=32 elapsed_ms=1.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage done finalize_async check_group elapsed_ms=113.000
+browser-prove:stage start finalize_async check_commit
+browser-prove:stage done finalize_async check_commit elapsed_ms=3.000
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=669.000
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=1.000
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=205.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=6.000
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=0.000
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=0.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=0.000
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage done finalize_async fri_prove elapsed_ms=890.000
+browser-prove:stage done lift_prove_async segment_index=0 elapsed_ms=2742
+browser-prove:stage start verify_lift
+browser-prove:stage done verify_lift elapsed_ms=15
+browser-prove:stage done lift_async segment_index=0 elapsed_ms=2757
+browser-prove:stage done composite_to_succinct_async elapsed_ms=2757
+browser-prove:stage done prove_session_async segments=1 pending_keccaks=0 assumptions=0 elapsed_ms=3803
+browser-prove:done hello-world: segments=1 user_cycles=3560 total_cycles=32768
+browser-prove:webgpu hello-world: gpu_dispatches=306 cpu_mirrors=11 cpu_fallbacks=1 cpu_only_ops=0 uploads=750 upload_bytes=442553300 device_copies=8 device_copy_bytes=212208640 readbacks=62 readback_bytes=431840 buffers=818 buffer_bytes=1736496204
+browser-prove:webgpu-op hello-world: op=batch_bit_reverse gpu_dispatches=12 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op hello-world: op=batch_evaluate_any gpu_dispatches=8 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op hello-world: op=batch_expand_into_evaluate_ntt gpu_dispatches=13 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op hello-world: op=batch_interpolate_ntt gpu_dispatches=8 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op hello-world: op=combos_divide gpu_dispatches=2 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op hello-world: op=combos_prepare gpu_dispatches=2 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op hello-world: op=eltwise_copy_elem gpu_dispatches=8 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op hello-world: op=eltwise_copy_elem_slice gpu_dispatches=2 cpu_mirrors=2 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op hello-world: op=eltwise_sum_extelem gpu_dispatches=2 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op hello-world: op=eltwise_zeroize_elem gpu_dispatches=8 cpu_mirrors=8 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op hello-world: op=eval_check gpu_dispatches=2 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op hello-world: op=fri_fold gpu_dispatches=5 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op hello-world: op=hash_fold gpu_dispatches=206 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op hello-world: op=hash_rows gpu_dispatches=13 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op hello-world: op=mix_poly_coeffs gpu_dispatches=8 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op hello-world: op=scatter gpu_dispatches=1 cpu_mirrors=1 cpu_fallbacks=1 cpu_only_ops=0
+browser-prove:webgpu-op hello-world: op=zk_shift gpu_dispatches=6 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-upload hello-world: source=accum uploads=3 upload_bytes=38666240
+browser-prove:webgpu-upload hello-world: source=code uploads=1 upload_bytes=131072
+browser-prove:webgpu-upload hello-world: source=combos uploads=3 upload_bytes=27787264
+browser-prove:webgpu-upload hello-world: source=ctrl uploads=1 upload_bytes=24117248
+browser-prove:webgpu-upload hello-world: source=data uploads=12 upload_bytes=189530112
+browser-prove:webgpu-upload hello-world: source=global uploads=5 upload_bytes=1104
+browser-prove:webgpu-upload hello-world: source=mix uploads=2 upload_bytes=224
+browser-prove:webgpu-upload hello-world: source=nodes uploads=17 upload_bytes=153509888
+browser-prove:webgpu-upload hello-world: source=out uploads=8 upload_bytes=23440
+browser-prove:webgpu-upload hello-world: source=out_coeffs uploads=5 upload_bytes=314368
+browser-prove:webgpu-upload hello-world: source=webgpu_batch_bit_reverse_params uploads=12 upload_bytes=192
+browser-prove:webgpu-upload hello-world: source=webgpu_batch_evaluate_any_params uploads=8 upload_bytes=256
+browser-prove:webgpu-upload hello-world: source=webgpu_batch_expand_params uploads=13 upload_bytes=416
+browser-prove:webgpu-upload hello-world: source=webgpu_combos_divide_chunk_indices uploads=2 upload_bytes=44
+browser-prove:webgpu-upload hello-world: source=webgpu_combos_divide_chunk_offsets uploads=2 upload_bytes=52
+browser-prove:webgpu-upload hello-world: source=webgpu_combos_divide_params uploads=2 upload_bytes=64
+browser-prove:webgpu-upload hello-world: source=webgpu_combos_divide_pows uploads=2 upload_bytes=576
+browser-prove:webgpu-upload hello-world: source=webgpu_combos_prepare_coeff_u uploads=2 upload_bytes=23440
+browser-prove:webgpu-upload hello-world: source=webgpu_combos_prepare_mix_pows uploads=2 upload_bytes=8160
+browser-prove:webgpu-upload hello-world: source=webgpu_combos_prepare_params uploads=2 upload_bytes=96
+browser-prove:webgpu-upload hello-world: source=webgpu_combos_prepare_reg_combo_ids uploads=2 upload_bytes=1912
+browser-prove:webgpu-upload hello-world: source=webgpu_combos_prepare_reg_sizes uploads=2 upload_bytes=1912
+browser-prove:webgpu-upload hello-world: source=webgpu_eltwise_copy_elem_slice_from uploads=2 upload_bytes=573440
+browser-prove:webgpu-upload hello-world: source=webgpu_eltwise_copy_elem_slice_params uploads=2 upload_bytes=64
+browser-prove:webgpu-upload hello-world: source=webgpu_eltwise_sum_extelem_params uploads=2 upload_bytes=32
+browser-prove:webgpu-upload hello-world: source=webgpu_eval_check_base_interpreter_instructions uploads=1 upload_bytes=395488
+browser-prove:webgpu-upload hello-world: source=webgpu_eval_check_base_interpreter_mix_pows uploads=1 upload_bytes=19664
+browser-prove:webgpu-upload hello-world: source=webgpu_eval_check_interpreter_instructions uploads=1 upload_bytes=646464
+browser-prove:webgpu-upload hello-world: source=webgpu_eval_check_interpreter_mix_pows uploads=1 upload_bytes=103456
+browser-prove:webgpu-upload hello-world: source=webgpu_eval_check_interpreter_params uploads=2 upload_bytes=192
+browser-prove:webgpu-upload hello-world: source=webgpu_fri_fold_params uploads=5 upload_bytes=160
+browser-prove:webgpu-upload hello-world: source=webgpu_mix_poly_coeffs_params uploads=8 upload_bytes=512
+browser-prove:webgpu-upload hello-world: source=webgpu_ntt_normalize_params uploads=8 upload_bytes=128
+browser-prove:webgpu-upload hello-world: source=webgpu_ntt_roots_fwd uploads=13 upload_bytes=1456
+browser-prove:webgpu-upload hello-world: source=webgpu_ntt_roots_rev uploads=8 upload_bytes=896
+browser-prove:webgpu-upload hello-world: source=webgpu_ntt_step_params uploads=336 upload_bytes=10752
+browser-prove:webgpu-upload hello-world: source=webgpu_poseidon2_fold_params uploads=206 upload_bytes=6592
+browser-prove:webgpu-upload hello-world: source=webgpu_poseidon2_rows_params uploads=13 upload_bytes=416
+browser-prove:webgpu-upload hello-world: source=webgpu_scatter_offsets uploads=1 upload_bytes=3322028
+browser-prove:webgpu-upload hello-world: source=webgpu_scatter_params uploads=1 upload_bytes=16
+browser-prove:webgpu-upload hello-world: source=webgpu_scatter_values uploads=1 upload_bytes=3322028
+browser-prove:webgpu-upload hello-world: source=webgpu_zk_shift_params uploads=6 upload_bytes=96
+browser-prove:webgpu-upload hello-world: source=which uploads=16 upload_bytes=7900
+browser-prove:webgpu-upload hello-world: source=xs uploads=8 upload_bytes=23440
+browser-prove:webgpu-readback hello-world: source=evaluated readbacks=13 readback_bytes=166000
+browser-prove:webgpu-readback hello-world: source=final_coeffs readbacks=2 readback_bytes=3072
+browser-prove:webgpu-readback hello-world: source=nodes readbacks=39 readback_bytes=239328
+browser-prove:webgpu-readback hello-world: source=out readbacks=8 readback_bytes=23440
+test tests::hello_world_succinct_receipt_verifies ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 75 filtered out; finished in 3.91s
+                                                  

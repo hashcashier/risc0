@@ -51,18 +51,32 @@ For each fixture:
 - `cpu_only_ops = 0` on every Chrome run (regression guard).
 - Cycle count matches between native and Chrome.
 
-## Summary table (to be populated in Phase 4)
+## Summary table (captured 2026-05-12)
 
-| Fixture | Native CUDA (s) | Chrome WebGPU (s) | Ratio | Segments | User cycles | gpu_dispatches | cpu_fallbacks |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `risc0-zkvm-methods/cfg` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
-| `hello-world` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
-| `json` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
-| `multi_test/poseidon2_basic` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
-| `multi_test/libm` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
-| `multi_test/keccak_union_small` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
+Hardware: RTX 5090 (32 GB, SM120/Blackwell, CUDA 13.0), Chrome 148.0.7778.96, ChromeDriver 148.0.7778.97, headless w/ `enable-unsafe-webgpu enable-features=Vulkan use-angle=vulkan`. Negotiated WebGPU limits: `max_buffer_size=1073741824`, `max_storage_buffer_binding_size=1073741824`, `max_compute_workgroup_storage_size=49152`. Hermes vLLM service was inactive during these runs (freed GPU).
 
-Reference baselines (from pre-pause `docs/wasm-webgpu-cuda-comparison.md` for sanity-check during Phase 4 capture):
-- `multi_test/poseidon2_basic`: 426 ms CUDA / 4.03 s Chrome (≈ 9.4×, 1 seg, 3598 user, 32768 total)
-- `multi_test/libm`: 436 ms CUDA / 214.08 s Chrome (≈ 491×, 1 seg, 3373 user, 32768 total)
-- `multi_test/keccak_union_small`: 7.47 s CUDA / 441.14 s Chrome (≈ 59×, 4 segs, 747310 user, 917504 total)
+| Fixture | Native CUDA | Chrome WebGPU | Ratio | Segments | User cycles | gpu_dispatches | cpu_fallbacks | cpu_only_ops |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `risc0-zkvm-methods/cfg` | 499.5 ms | 3.82 s | **7.6×** | 1 | 2269 | 306 | 1 (scatter) | 0 |
+| `hello-world` | 483.5 ms | 3.80 s | **7.9×** | 1 | 3560 | 306 | 1 (scatter) | 0 |
+| `json` | 521.1 ms | 4.58 s | **8.8×** | 1 | 13319 | 312 | 1 (scatter) | 0 |
+| `multi_test/poseidon2_basic` | 545.3 ms (cold) / 244.9 ms (warm) | 3.95 s | **7.2× / 16.1×** | 1 | 3553 | 306 | 1 (scatter) | 0 |
+| `multi_test/libm` | 510.0 ms | 3.80 s | **7.5×** | 1 | 3328 | 306 | 1 (scatter) | 0 |
+| `multi_test/keccak_union_small` | 7.748 s | 121.99 s | **15.7×** | 4 | 747265 | 6022 | 4 (scatter + 3 keccak eval_check) | 0 |
+
+Per-fixture invariants confirmed:
+- Receipt verifies through existing verifier on every fixture.
+- Cycle counts match between native CUDA and Chrome WebGPU.
+- `cpu_only_ops = 0` on every Chrome run.
+- WebGPU negotiated 1 GiB buffer + 1 GiB storage-binding + 49 KiB workgroup-storage limits as expected.
+
+Reference baselines (from pre-pause `docs/wasm-webgpu-cuda-comparison.md` for delta-vs-AS-IS visibility):
+- `multi_test/poseidon2_basic`: was 426 ms CUDA / 4.03 s Chrome ≈ 9.4×; **now 7.2× (cold) — improvement**.
+- `multi_test/libm`: was 436 ms CUDA / 214.08 s Chrome ≈ 491×; **now 7.5× — dramatic improvement (async/GPU-authoritative path now in effect for recursion eval_check)**.
+- `multi_test/keccak_union_small`: was 7.47 s CUDA / 441.14 s Chrome ≈ 59×; **now 15.7× — significant improvement**.
+
+Bonus native CUDA baselines (for the deferred-fixture matrix R9):
+- `multi_test/rsa_compat`: 209.14 s, 407 segments, 91,535,630 user cycles, 106,463,232 total cycles.
+- `multi_test/keccak_union` (KeccakUnion(3)): 20.68 s, 11 segments, 2,230,685 user cycles, 2,752,512 total cycles.
+
+The remaining R10 work is no longer to close a 491× gap on libm — that already happened. The real residuals are now ~7-9× on small fixtures (smoke suite) and ~15× on keccak-heavy. SP2 (rv32im staged WGSL), SP3 (recursion staged WGSL + tiled data group), and SP6 (keccak staged WGSL) remain the levers to drive these toward 1.0×.
