@@ -90,7 +90,7 @@ zero CPU-only HAL operations.
 | `ecdsa/k256` | 2 segments, 343611 user cycles, 524288 total cycles, 1.08389501s | Passed, same cycles |
 | `ecdsa/p256` | 2 segments, 232373 user cycles, 327680 total cycles, 978.112464ms | Passed, same cycles |
 | `groth16-verifier` | 914 segments, 180291710 user cycles, 239370240 total cycles, 462.439128141s | Browser run deferred until remaining eval_check/readback and oversized-buffer bottlenecks are addressed |
-| `xgboost` | 11 segments, 2294908 user cycles, 2883584 total cycles, 5.702544275s | Browser run deferred until remaining eval_check/readback and oversized-buffer bottlenecks are addressed |
+| `xgboost` | 11 segments, 2294908 user cycles, 2883584 total cycles, 5.702544275s | **Attempted 2026-05-12 on RTX 5090 + Chrome 148: failed at `verify lift` during composite-to-succinct after prove_session_async completed in 103.585s (each per-segment `lift_prove_async ≈ 2.57s`, segment 8 anomalously short at 642ms / verify_lift 1ms). Receipt rejected before succinct compression.** Root cause not yet isolated — likely a precision/transcript issue at multi-segment lift boundary. Re-attempt after R5/R6 work plus a focused root-cause investigation. |
 | `bn254` | 189 segments, 37989643 user cycles, 49348608 total cycles, 100.237964323s | Browser run deferred until remaining eval_check/readback and oversized-buffer bottlenecks are addressed |
 
 ## Internal Parity Matrix
