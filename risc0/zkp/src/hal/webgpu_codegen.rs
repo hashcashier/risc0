@@ -420,13 +420,48 @@ pub fn staged_kernel_from_def(name: &str, def: &PolyExtStepDef) -> StagedKernel 
         .expect("auto-mode never returns ConstExtInBaseField")
 }
 
+/// Static WGSL prelude that the staged kernel composes with the per-DEF
+/// body emitted by [`WgslEmitter`]. The prelude declares the bindings,
+/// params struct, field-arithmetic helpers (`add`/`sub`/`mul` and
+/// `ext_add`/`ext_sub`/`ext_mul`/`ext_scale`), the read helpers
+/// (`read_tap_scalar`/`read_tap_ext`/`read_global_scalar`/`read_global_ext`),
+/// the mix-power loader (`load_mix_pow`), and the per-cycle output writer
+/// (`write_check`).
+///
+/// The prelude binding layout intentionally matches the runtime
+/// interpreter's at `webgpu.rs:EVAL_CHECK_BASE_INTERPRETER_WGSL`, MINUS
+/// the `instrs` binding and `instr_*` params (the staged kernel embeds
+/// the DEF inline, so there's no instruction stream to read). When SP3's
+/// dispatch wiring lands, the same `Params` UBO can be reused — staged
+/// dispatches simply leave `instr_*` fields ignored.
+pub const STAGED_EVAL_CHECK_PRELUDE_WGSL: &str = include_str!("webgpu_codegen/prelude.wgsl");
+
+/// Emit a complete, ready-to-compile WGSL shader for an arbitrary
+/// `PolyExtStepDef` in the chosen `field_mode`. The result is the
+/// [`STAGED_EVAL_CHECK_PRELUDE_WGSL`] prelude followed by the per-DEF
+/// body from [`WgslEmitter`]. Callers feed this to
+/// `WebGpuHal::create_compute_kernel` and dispatch on the same bindings
+/// as the runtime interpreter (sans `instrs`).
+pub fn staged_full_kernel_wgsl(
+    name: &str,
+    def: &PolyExtStepDef,
+    field_mode: FieldMode,
+) -> Result<String, CodegenError> {
+    let body_kernel = staged_kernel_from_def_with_mode(name, def, field_mode)?;
+    let mut full = String::with_capacity(STAGED_EVAL_CHECK_PRELUDE_WGSL.len() + body_kernel.wgsl_source.len() + 64);
+    full.push_str(STAGED_EVAL_CHECK_PRELUDE_WGSL);
+    full.push('\n');
+    full.push_str(&body_kernel.wgsl_source);
+    Ok(full)
+}
+
 /// rv32im staged-WGSL `eval_check` generator.
 ///
 /// rv32im is a pure base-field circuit (no `ConstExt` steps in its DEF), so
 /// the generator unconditionally uses `FieldMode::Base` to mirror the
 /// runtime base-field interpreter's `fp[lane][slot]: u32` slot layout.
 ///
-/// At SP3 iter 2 this is still a scaffold: the rv32im production DEF is
+/// At SP3 iter 3 this is still a scaffold: the rv32im production DEF is
 /// ~20k ops and emitting one straight-line kernel may exceed WGSL shader
 /// length / compile-time budgets in Chrome. Production wiring + multi-stage
 /// split (mirroring the 4-file CUDA `eval_check_{0,1,2,3}.cu` layout) is
@@ -640,6 +675,81 @@ mod tests {
                 "rv32im_codegen_for_po2({po2}) is empty until SP3 follow-on lands the multi-stage split and dispatch wiring"
             );
         }
+    }
+
+    #[test]
+    fn prelude_declares_all_helper_functions_emitter_calls() {
+        let prelude = STAGED_EVAL_CHECK_PRELUDE_WGSL;
+        // Scalar arithmetic.
+        assert!(prelude.contains("fn add(lhs: u32, rhs: u32) -> u32"));
+        assert!(prelude.contains("fn sub(lhs: u32, rhs: u32) -> u32"));
+        assert!(prelude.contains("fn mul(lhs: u32, rhs: u32) -> u32"));
+        // Extension arithmetic.
+        assert!(prelude.contains("fn ext_add(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32>"));
+        assert!(prelude.contains("fn ext_sub(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32>"));
+        assert!(prelude.contains("fn ext_mul(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32>"));
+        assert!(prelude.contains("fn ext_scale(lhs: vec4<u32>, rhs: u32) -> vec4<u32>"));
+        // Tap / global readers.
+        assert!(prelude.contains("fn read_tap_scalar(tap: u32, cycle: u32) -> u32"));
+        assert!(prelude.contains("fn read_tap_ext(tap: u32, cycle: u32) -> vec4<u32>"));
+        assert!(prelude.contains("fn read_global_scalar(arg: u32, offset: u32) -> u32"));
+        assert!(prelude.contains("fn read_global_ext(arg: u32, offset: u32) -> vec4<u32>"));
+        // Mix-power loader and check writer.
+        assert!(prelude.contains("fn load_mix_pow(mix_idx: u32) -> vec4<u32>"));
+        assert!(prelude.contains("fn write_check(cycle: u32, val: vec4<u32>)"));
+    }
+
+    #[test]
+    fn prelude_binds_same_layout_as_runtime_interpreter_minus_instrs() {
+        let prelude = STAGED_EVAL_CHECK_PRELUDE_WGSL;
+        // Same eight active bindings as the interpreter; binding 6 (`instrs`)
+        // intentionally skipped.
+        assert!(prelude.contains("@group(0) @binding(0) var<storage, read_write> check:"));
+        assert!(prelude.contains("@group(0) @binding(1) var<storage, read> group0:"));
+        assert!(prelude.contains("@group(0) @binding(2) var<storage, read> group1:"));
+        assert!(prelude.contains("@group(0) @binding(3) var<storage, read> group2:"));
+        assert!(prelude.contains("@group(0) @binding(4) var<storage, read> global0:"));
+        assert!(prelude.contains("@group(0) @binding(5) var<storage, read> global1:"));
+        assert!(prelude.contains("@group(0) @binding(7) var<storage, read> mix_pows:"));
+        assert!(prelude.contains("@group(0) @binding(8) var<uniform> params:"));
+        assert!(
+            !prelude.contains("@group(0) @binding(6) "),
+            "binding 6 (instrs) is intentionally absent from the staged prelude"
+        );
+    }
+
+    #[test]
+    fn full_kernel_concatenates_prelude_then_body_for_base_field_def() {
+        let full =
+            staged_full_kernel_wgsl("tiny", &TINY_DEF, FieldMode::Base).expect("Base ok for TINY_DEF");
+        // Prelude appears first.
+        let prelude_anchor = "fn write_check(cycle: u32, val: vec4<u32>)";
+        let body_anchor = "@compute @workgroup_size(64)";
+        let prelude_pos = full.find(prelude_anchor).expect("prelude present");
+        let body_pos = full.find(body_anchor).expect("emitter body present");
+        assert!(
+            prelude_pos < body_pos,
+            "prelude must precede emitter body"
+        );
+        // Body uses the scalar `add` helper from the prelude.
+        assert!(full.contains("fp[2] = add(fp[0], fp[1]);"));
+    }
+
+    #[test]
+    fn full_kernel_rejects_const_ext_in_base_mode_via_codegen_error() {
+        let err = staged_full_kernel_wgsl("full_base", &FULL_DEF, FieldMode::Base);
+        assert_eq!(err, Err(CodegenError::ConstExtInBaseField));
+    }
+
+    #[test]
+    fn full_kernel_assembles_for_ext_field_def() {
+        let full = staged_full_kernel_wgsl("full_ext", &FULL_DEF, FieldMode::Ext)
+            .expect("Ext mode accepts ConstExt");
+        // Prelude helpers + body usage both present.
+        assert!(full.contains("fn ext_mul(lhs: vec4<u32>, rhs: vec4<u32>)"));
+        assert!(full.contains("fp[6] = ext_mul(fp[5], fp[3]);"));
+        assert!(full.contains("@compute @workgroup_size(64)"));
+        assert!(full.contains("write_check(cycle, mix_tot[2]);"));
     }
 
     /// Structural-parity check: the generated kernel's slot layout and
