@@ -157,24 +157,47 @@ fn ext_scale(lhs: vec4<u32>, rhs: u32) -> vec4<u32> {
 
 // ----- Tap / global reads -----------------------------------------------
 //
-// The emitter calls `read_tap_scalar(tap, cycle)` etc. with a *tap index*.
-// Resolving that index to (group, offset, back) requires per-circuit tap
-// information that the static prelude does not embed. SP3 iter 4 will
-// either (a) emit tap reads with the resolved (group, offset, back) baked
-// inline, removing the need for these helpers, or (b) populate a small
-// `tap_table` storage buffer at HAL init that these helpers index. Either
-// way the helper signature here is provisional and will be revised before
-// dispatch wiring lands. For now they panic-loud via the WGSL equivalent
-// (return a sentinel) so a mistaken hot-path call surfaces in QA.
+// The emitter resolves `PolyExtStep::Get(tap_idx)` to a concrete
+// `(group, offset, back_inv_rate)` triple at codegen time and emits one
+// of `read_g{0,1,2}_{scalar,ext}({offset}u, {back_inv_rate}u, cycle)`.
+// Each helper indexes its dedicated group binding using the same chunk
+// math as the runtime interpreter at
+// `webgpu.rs:EVAL_CHECK_BASE_INTERPRETER_WGSL` case `2u` (Get).
 
-fn read_tap_scalar(tap: u32, cycle: u32) -> u32 {
-    // SP3 iter 4 will replace this with a real tap-resolution path.
-    return 0u;
+fn read_g0_scalar(offset: u32, back_inv_rate: u32, cycle: u32) -> u32 {
+    let row = (cycle + params.domain - (back_inv_rate % params.domain)) % params.domain;
+    let local_row =
+        (row + params.domain - (params.group0_chunk_base % params.domain)) % params.domain;
+    return group0.data[params.group0_base + offset * params.group0_chunk_rows + local_row];
 }
 
-fn read_tap_ext(tap: u32, cycle: u32) -> vec4<u32> {
-    // SP3 iter 4: real tap-resolution.
-    return vec4<u32>(0u, 0u, 0u, 0u);
+fn read_g1_scalar(offset: u32, back_inv_rate: u32, cycle: u32) -> u32 {
+    let row = (cycle + params.domain - (back_inv_rate % params.domain)) % params.domain;
+    let local_row =
+        (row + params.domain - (params.group1_chunk_base % params.domain)) % params.domain;
+    return group1.data[params.group1_base + offset * params.group1_chunk_rows + local_row];
+}
+
+fn read_g2_scalar(offset: u32, back_inv_rate: u32, cycle: u32) -> u32 {
+    let row = (cycle + params.domain - (back_inv_rate % params.domain)) % params.domain;
+    let local_row =
+        (row + params.domain - (params.group2_chunk_base % params.domain)) % params.domain;
+    return group2.data[params.group2_base + offset * params.group2_chunk_rows + local_row];
+}
+
+// Extension variants embed the BabyBear scalar into the canonical
+// `(x, 0, 0, 0)` BabyBearExt encoding, matching
+// `F::ExtElem::from_subfield(F::Elem)`.
+fn read_g0_ext(offset: u32, back_inv_rate: u32, cycle: u32) -> vec4<u32> {
+    return vec4<u32>(read_g0_scalar(offset, back_inv_rate, cycle), 0u, 0u, 0u);
+}
+
+fn read_g1_ext(offset: u32, back_inv_rate: u32, cycle: u32) -> vec4<u32> {
+    return vec4<u32>(read_g1_scalar(offset, back_inv_rate, cycle), 0u, 0u, 0u);
+}
+
+fn read_g2_ext(offset: u32, back_inv_rate: u32, cycle: u32) -> vec4<u32> {
+    return vec4<u32>(read_g2_scalar(offset, back_inv_rate, cycle), 0u, 0u, 0u);
 }
 
 fn read_global_scalar(arg: u32, offset: u32) -> u32 {

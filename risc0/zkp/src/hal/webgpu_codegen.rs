@@ -98,6 +98,29 @@ pub enum CodegenError {
     /// `FieldMode::Base`, where `fp` slots are scalar `u32`s and cannot
     /// hold a `vec4<u32>` constant.
     ConstExtInBaseField,
+    /// The DEF references tap index `tap_idx` via `PolyExtStep::Get`, but
+    /// the caller's tap table has fewer entries.
+    TapIndexOutOfRange { tap_idx: usize, taps_len: usize },
+    /// The DEF references tap with `group > 2`, but only 3 group bindings
+    /// (`group0`/`group1`/`group2`) are wired by the prelude.
+    TapGroupOutOfRange { tap_idx: usize, group: u32 },
+}
+
+/// Per-tap addressing info that the emitter inlines at the `Get(tap_idx)`
+/// site. Decouples the codegen module from `risc0_zkp::taps::TapSet` so
+/// unit tests can supply hand-rolled tap tables without depending on a
+/// real circuit's TapSet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmitterTap {
+    /// Register-group index: 0, 1, or 2 (matches the prelude's
+    /// `group0`/`group1`/`group2` bindings).
+    pub group: u32,
+    /// Column offset within the group's flat layout.
+    pub offset: u32,
+    /// `tap.back() * INV_RATE` — the row-back distance in domain steps.
+    /// Pre-multiplied by `INV_RATE` to match what the runtime interpreter
+    /// stores in its opcode word.
+    pub back_inv_rate: u32,
 }
 
 /// Compute `(fp_expected, mix_expected)` for a DEF without depending on the
@@ -134,23 +157,43 @@ pub fn def_is_base_field(def: &PolyExtStepDef) -> bool {
         .any(|op| matches!(op, PolyExtStep::ConstExt(..)))
 }
 
-struct WgslEmitter {
+struct WgslEmitter<'a> {
     body: String,
     field_mode: FieldMode,
     fp_idx: usize,
     mix_idx: usize,
     mix_exps: Vec<usize>,
+    taps: &'a [EmitterTap],
 }
 
-impl WgslEmitter {
-    fn new(def: &PolyExtStepDef, field_mode: FieldMode) -> Self {
+impl<'a> WgslEmitter<'a> {
+    fn new(def: &PolyExtStepDef, taps: &'a [EmitterTap], field_mode: FieldMode) -> Self {
         Self {
             body: String::new(),
             field_mode,
             fp_idx: 0,
             mix_idx: 0,
             mix_exps: def_mix_exponents(def),
+            taps,
         }
+    }
+
+    fn resolve_tap(&self, tap_idx: usize) -> Result<EmitterTap, CodegenError> {
+        let tap = self
+            .taps
+            .get(tap_idx)
+            .copied()
+            .ok_or(CodegenError::TapIndexOutOfRange {
+                tap_idx,
+                taps_len: self.taps.len(),
+            })?;
+        if tap.group > 2 {
+            return Err(CodegenError::TapGroupOutOfRange {
+                tap_idx,
+                group: tap.group,
+            });
+        }
+        Ok(tap)
     }
 
     fn emit(&mut self, idx: usize, op: &PolyExtStep) -> Result<(), CodegenError> {
@@ -180,22 +223,26 @@ impl WgslEmitter {
                 .unwrap();
                 writeln!(self.body, "  fp[{n}] = vec4<u32>({a}u, {b}u, {c}u, {d}u);").unwrap();
             }
-            (PolyExtStep::Get(tap), mode) => {
+            (PolyExtStep::Get(tap_idx), mode) => {
+                let tap = self.resolve_tap(*tap_idx)?;
                 let n = self.fp_idx;
                 self.fp_idx += 1;
-                writeln!(self.body, "  // [{idx}] fp[{n}] = Get(tap={tap})").unwrap();
-                match mode {
-                    FieldMode::Base => writeln!(
-                        self.body,
-                        "  fp[{n}] = read_tap_scalar({tap}u, cycle);"
-                    )
-                    .unwrap(),
-                    FieldMode::Ext => writeln!(
-                        self.body,
-                        "  fp[{n}] = read_tap_ext({tap}u, cycle);"
-                    )
-                    .unwrap(),
+                writeln!(
+                    self.body,
+                    "  // [{idx}] fp[{n}] = Get(tap={tap_idx}) -> g{}_offset={}_back={}",
+                    tap.group, tap.offset, tap.back_inv_rate
+                )
+                .unwrap();
+                let suffix = match mode {
+                    FieldMode::Base => "scalar",
+                    FieldMode::Ext => "ext",
                 };
+                writeln!(
+                    self.body,
+                    "  fp[{n}] = read_g{}_{suffix}({}u, {}u, cycle);",
+                    tap.group, tap.offset, tap.back_inv_rate
+                )
+                .unwrap();
             }
             (PolyExtStep::GetGlobal(arg, off), mode) => {
                 let n = self.fp_idx;
@@ -205,18 +252,15 @@ impl WgslEmitter {
                     "  // [{idx}] fp[{n}] = GetGlobal(arg={arg}, off={off})"
                 )
                 .unwrap();
-                match mode {
-                    FieldMode::Base => writeln!(
-                        self.body,
-                        "  fp[{n}] = read_global_scalar({arg}u, {off}u);"
-                    )
-                    .unwrap(),
-                    FieldMode::Ext => writeln!(
-                        self.body,
-                        "  fp[{n}] = read_global_ext({arg}u, {off}u);"
-                    )
-                    .unwrap(),
+                let suffix = match mode {
+                    FieldMode::Base => "scalar",
+                    FieldMode::Ext => "ext",
                 };
+                writeln!(
+                    self.body,
+                    "  fp[{n}] = read_global_{suffix}({arg}u, {off}u);"
+                )
+                .unwrap();
             }
             (PolyExtStep::Add(x, y), FieldMode::Base) => {
                 let n = self.fp_idx;
@@ -381,20 +425,29 @@ impl WgslEmitter {
 }
 
 /// Emit a staged WGSL kernel for an arbitrary `PolyExtStepDef` in the
-/// specified `field_mode`. The result's `wgsl_source` is the kernel body
-/// with helper references; the runtime prelude (bindings, params,
-/// arithmetic helpers, read/write helpers) is contributed by `webgpu.rs`
-/// when the kernel is linked into a pipeline.
+/// specified `field_mode`. The `taps` slice resolves every
+/// `PolyExtStep::Get(tap_idx)` to a concrete `(group, offset, back)`
+/// triple that the emitter inlines at the Get site. Tests can pass a
+/// hand-rolled slice; production wiring extracts it from
+/// `risc0_zkp::taps::TapSet` at dispatch time.
 ///
-/// Returns `Err(CodegenError::ConstExtInBaseField)` when the DEF requires
-/// extension constants but the caller requested base-field mode.
+/// The result's `wgsl_source` is the kernel body; the runtime prelude
+/// (bindings, params, arithmetic helpers, per-group readers) is
+/// concatenated by `staged_full_kernel_wgsl` (or by the dispatch wiring
+/// when SP3 iter 5 lands).
+///
+/// Returns `CodegenError::ConstExtInBaseField` if the DEF needs ext
+/// constants under Base mode, or `CodegenError::TapIndexOutOfRange` /
+/// `TapGroupOutOfRange` if any `Get` resolves outside the supplied table
+/// or the 3 supported group bindings.
 pub fn staged_kernel_from_def_with_mode(
     name: &str,
     def: &PolyExtStepDef,
+    taps: &[EmitterTap],
     field_mode: FieldMode,
 ) -> Result<StagedKernel, CodegenError> {
     let (fp_expected, mix_expected) = def_var_counts(def);
-    let mut emitter = WgslEmitter::new(def, field_mode);
+    let mut emitter = WgslEmitter::new(def, taps, field_mode);
     for (idx, op) in def.block.iter().enumerate() {
         emitter.emit(idx, op)?;
     }
@@ -410,14 +463,20 @@ pub fn staged_kernel_from_def_with_mode(
 }
 
 /// Convenience: pick `FieldMode::Base` when possible, else `FieldMode::Ext`.
-pub fn staged_kernel_from_def(name: &str, def: &PolyExtStepDef) -> StagedKernel {
+/// Propagates `CodegenError::TapIndexOutOfRange` / `TapGroupOutOfRange`
+/// if the tap table is incomplete or has out-of-range groups; never
+/// returns `ConstExtInBaseField` (the mode is auto-selected).
+pub fn staged_kernel_from_def(
+    name: &str,
+    def: &PolyExtStepDef,
+    taps: &[EmitterTap],
+) -> Result<StagedKernel, CodegenError> {
     let mode = if def_is_base_field(def) {
         FieldMode::Base
     } else {
         FieldMode::Ext
     };
-    staged_kernel_from_def_with_mode(name, def, mode)
-        .expect("auto-mode never returns ConstExtInBaseField")
+    staged_kernel_from_def_with_mode(name, def, taps, mode)
 }
 
 /// Static WGSL prelude that the staged kernel composes with the per-DEF
@@ -445,9 +504,10 @@ pub const STAGED_EVAL_CHECK_PRELUDE_WGSL: &str = include_str!("webgpu_codegen/pr
 pub fn staged_full_kernel_wgsl(
     name: &str,
     def: &PolyExtStepDef,
+    taps: &[EmitterTap],
     field_mode: FieldMode,
 ) -> Result<String, CodegenError> {
-    let body_kernel = staged_kernel_from_def_with_mode(name, def, field_mode)?;
+    let body_kernel = staged_kernel_from_def_with_mode(name, def, taps, field_mode)?;
     let mut full = String::with_capacity(STAGED_EVAL_CHECK_PRELUDE_WGSL.len() + body_kernel.wgsl_source.len() + 64);
     full.push_str(STAGED_EVAL_CHECK_PRELUDE_WGSL);
     full.push('\n');
@@ -514,6 +574,22 @@ mod tests {
         ret: 2,
     };
 
+    /// Tap table that covers the indices referenced by `FULL_DEF` and the
+    /// reusable Get-only DEFs below. Indices 0-9 are populated so that
+    /// `Get(5)` and `Get(3)` both resolve cleanly.
+    static TEST_TAPS: &[EmitterTap] = &[
+        EmitterTap { group: 0, offset: 0, back_inv_rate: 0 },
+        EmitterTap { group: 1, offset: 1, back_inv_rate: 0 },
+        EmitterTap { group: 2, offset: 2, back_inv_rate: 0 },
+        EmitterTap { group: 0, offset: 3, back_inv_rate: 4 },
+        EmitterTap { group: 1, offset: 4, back_inv_rate: 4 },
+        EmitterTap { group: 2, offset: 5, back_inv_rate: 0 },
+        EmitterTap { group: 0, offset: 6, back_inv_rate: 0 },
+        EmitterTap { group: 1, offset: 7, back_inv_rate: 0 },
+        EmitterTap { group: 2, offset: 8, back_inv_rate: 0 },
+        EmitterTap { group: 0, offset: 9, back_inv_rate: 0 },
+    ];
+
     #[test]
     fn def_var_counts_match_polyext_expected() {
         let (fp, mix) = def_var_counts(&TINY_DEF);
@@ -539,17 +615,13 @@ mod tests {
     #[test]
     fn base_field_emits_scalar_add_sub_mul_for_tiny_def() {
         let kernel =
-            staged_kernel_from_def_with_mode("tiny_base", &TINY_DEF, FieldMode::Base).unwrap();
+            staged_kernel_from_def_with_mode("tiny_base", &TINY_DEF, &[], FieldMode::Base).unwrap();
         assert_eq!(kernel.field_mode, FieldMode::Base);
-        // fp array declared as u32 scalars, not vec4.
         assert!(kernel.wgsl_source.contains("var fp: array<u32, 3>"));
-        // Const emits a scalar literal, not a vec4.
         assert!(kernel.wgsl_source.contains("fp[0] = 7u;"));
         assert!(kernel.wgsl_source.contains("fp[1] = 3u;"));
-        // Add uses the scalar `add`, not `ext_add`.
         assert!(kernel.wgsl_source.contains("fp[2] = add(fp[0], fp[1]);"));
         assert!(!kernel.wgsl_source.contains("fp[2] = ext_add"));
-        // AndEqz combines scalar `fp[inner]` with vec4 `mix_mul[chain]` via ext_scale.
         assert!(
             kernel
                 .wgsl_source
@@ -561,21 +633,18 @@ mod tests {
     #[test]
     fn ext_field_emits_vec4_for_full_def() {
         let kernel =
-            staged_kernel_from_def_with_mode("full_ext", &FULL_DEF, FieldMode::Ext).unwrap();
+            staged_kernel_from_def_with_mode("full_ext", &FULL_DEF, TEST_TAPS, FieldMode::Ext)
+                .unwrap();
         assert_eq!(kernel.field_mode, FieldMode::Ext);
-        // fp array declared as vec4<u32>.
         assert!(kernel.wgsl_source.contains("var fp: array<vec4<u32>, 7>"));
-        // ConstExt emits a vec4.
         assert!(
             kernel
                 .wgsl_source
                 .contains("fp[1] = vec4<u32>(1u, 2u, 3u, 4u);")
         );
-        // Add/Sub/Mul all use ext_* helpers.
         assert!(kernel.wgsl_source.contains("fp[4] = ext_add(fp[0], fp[2]);"));
         assert!(kernel.wgsl_source.contains("fp[5] = ext_sub(fp[4], fp[1]);"));
         assert!(kernel.wgsl_source.contains("fp[6] = ext_mul(fp[5], fp[3]);"));
-        // AndEqz under Ext uses full ext_mul (not ext_scale).
         assert!(
             kernel
                 .wgsl_source
@@ -586,52 +655,105 @@ mod tests {
 
     #[test]
     fn base_field_rejects_const_ext() {
-        let err = staged_kernel_from_def_with_mode("full_base", &FULL_DEF, FieldMode::Base);
+        let err = staged_kernel_from_def_with_mode(
+            "full_base",
+            &FULL_DEF,
+            TEST_TAPS,
+            FieldMode::Base,
+        );
         assert_eq!(err, Err(CodegenError::ConstExtInBaseField));
     }
 
     #[test]
+    fn tap_index_out_of_range_surfaces_error() {
+        // FULL_DEF has Get(5) but we supply only 3 taps.
+        let err =
+            staged_kernel_from_def_with_mode("oob", &FULL_DEF, &TEST_TAPS[..3], FieldMode::Ext);
+        assert_eq!(
+            err,
+            Err(CodegenError::TapIndexOutOfRange {
+                tap_idx: 5,
+                taps_len: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn tap_group_out_of_range_surfaces_error() {
+        static BAD_TAPS: &[EmitterTap] = &[EmitterTap {
+            group: 7,
+            offset: 0,
+            back_inv_rate: 0,
+        }];
+        static GET_DEF: PolyExtStepDef = PolyExtStepDef {
+            block: &[PolyExtStep::Get(0), PolyExtStep::True],
+            ret: 0,
+        };
+        let err = staged_kernel_from_def_with_mode("bad_group", &GET_DEF, BAD_TAPS, FieldMode::Base);
+        assert_eq!(
+            err,
+            Err(CodegenError::TapGroupOutOfRange { tap_idx: 0, group: 7 })
+        );
+    }
+
+    #[test]
     fn auto_mode_picks_base_for_const_only_def_and_ext_for_const_ext_def() {
-        let tiny = staged_kernel_from_def("tiny_auto", &TINY_DEF);
+        let tiny = staged_kernel_from_def("tiny_auto", &TINY_DEF, &[]).unwrap();
         assert_eq!(tiny.field_mode, FieldMode::Base);
-        let full = staged_kernel_from_def("full_auto", &FULL_DEF);
+        let full = staged_kernel_from_def("full_auto", &FULL_DEF, TEST_TAPS).unwrap();
         assert_eq!(full.field_mode, FieldMode::Ext);
     }
 
     #[test]
-    fn read_tap_and_global_helpers_specialize_per_mode() {
-        let base =
-            staged_kernel_from_def_with_mode("base", &TINY_DEF, FieldMode::Base).unwrap();
-        // TINY_DEF has no Get/GetGlobal, so neither helper is referenced.
-        assert!(!base.wgsl_source.contains("read_tap_scalar"));
-        assert!(!base.wgsl_source.contains("read_tap_ext"));
-
-        // Construct a def that uses Get + GetGlobal under Base mode.
-        static BASE_GET_BLOCK: &[PolyExtStep] = &[
-            PolyExtStep::Get(3),
-            PolyExtStep::GetGlobal(1, 4),
-            PolyExtStep::True,
-        ];
-        static BASE_GET_DEF: PolyExtStepDef = PolyExtStepDef {
-            block: BASE_GET_BLOCK,
+    fn get_emits_per_group_helper_with_inlined_offset_and_back() {
+        // Single-Get DEF under Base mode: tap 0 -> g1, offset 1, back_inv_rate 0
+        // per TEST_TAPS[0]. Wait — TEST_TAPS[0] is g0; let me pick tap 1 which is g1.
+        static GET_BLOCK: &[PolyExtStep] = &[PolyExtStep::Get(1), PolyExtStep::True];
+        static GET_DEF: PolyExtStepDef = PolyExtStepDef {
+            block: GET_BLOCK,
             ret: 0,
         };
-        let base_get =
-            staged_kernel_from_def_with_mode("base_get", &BASE_GET_DEF, FieldMode::Base).unwrap();
-        assert!(base_get.wgsl_source.contains("read_tap_scalar(3u, cycle)"));
-        assert!(base_get.wgsl_source.contains("read_global_scalar(1u, 4u)"));
-        assert!(!base_get.wgsl_source.contains("read_tap_ext"));
-        assert!(!base_get.wgsl_source.contains("read_global_ext"));
+        let kernel = staged_kernel_from_def_with_mode(
+            "get_base",
+            &GET_DEF,
+            TEST_TAPS,
+            FieldMode::Base,
+        )
+        .unwrap();
+        // TEST_TAPS[1] = { group: 1, offset: 1, back_inv_rate: 0 }
+        assert!(
+            kernel.wgsl_source.contains("read_g1_scalar(1u, 0u, cycle)"),
+            "Get(1) under Base mode must resolve to read_g1_scalar with inlined offset+back"
+        );
+        // Confirm placeholder `read_tap_scalar(...)` is gone.
+        assert!(!kernel.wgsl_source.contains("read_tap_scalar"));
 
-        let ext_get =
-            staged_kernel_from_def_with_mode("ext_get", &BASE_GET_DEF, FieldMode::Ext).unwrap();
-        assert!(ext_get.wgsl_source.contains("read_tap_ext(3u, cycle)"));
-        assert!(ext_get.wgsl_source.contains("read_global_ext(1u, 4u)"));
+        let kernel_ext =
+            staged_kernel_from_def_with_mode("get_ext", &GET_DEF, TEST_TAPS, FieldMode::Ext)
+                .unwrap();
+        assert!(kernel_ext.wgsl_source.contains("read_g1_ext(1u, 0u, cycle)"));
+    }
+
+    #[test]
+    fn get_global_specializes_per_mode() {
+        static GG_BLOCK: &[PolyExtStep] = &[PolyExtStep::GetGlobal(1, 4), PolyExtStep::True];
+        static GG_DEF: PolyExtStepDef = PolyExtStepDef {
+            block: GG_BLOCK,
+            ret: 0,
+        };
+        let base =
+            staged_kernel_from_def_with_mode("gg_base", &GG_DEF, &[], FieldMode::Base).unwrap();
+        assert!(base.wgsl_source.contains("read_global_scalar(1u, 4u)"));
+        assert!(!base.wgsl_source.contains("read_global_ext"));
+
+        let ext =
+            staged_kernel_from_def_with_mode("gg_ext", &GG_DEF, &[], FieldMode::Ext).unwrap();
+        assert!(ext.wgsl_source.contains("read_global_ext(1u, 4u)"));
     }
 
     #[test]
     fn staged_kernel_emits_one_line_per_step_with_op_comment() {
-        let kernel = staged_kernel_from_def("tiny", &TINY_DEF);
+        let kernel = staged_kernel_from_def("tiny", &TINY_DEF, &[]).unwrap();
         for (idx, op) in TINY_DEF.block.iter().enumerate() {
             let op_label = match op {
                 PolyExtStep::Const(v) => format!("Const({v})"),
@@ -648,7 +770,7 @@ mod tests {
 
     #[test]
     fn staged_kernel_writes_ret_mix_tot_to_check_buffer() {
-        let kernel = staged_kernel_from_def("tiny", &TINY_DEF);
+        let kernel = staged_kernel_from_def("tiny", &TINY_DEF, &[]).unwrap();
         assert!(
             kernel.wgsl_source.contains("write_check(cycle, mix_tot[1]);"),
             "ret = 1 means we write mix_tot[1] to the check buffer at cycle"
@@ -657,8 +779,16 @@ mod tests {
 
     #[test]
     fn ext_mode_uses_ext_helpers_for_all_arithmetic_ops_for_full_def() {
-        let kernel = staged_kernel_from_def_with_mode("full", &FULL_DEF, FieldMode::Ext).unwrap();
-        for token in ["ext_add(", "ext_sub(", "ext_mul(", "read_tap_ext(", "read_global_ext(", "load_mix_pow("] {
+        let kernel = staged_kernel_from_def_with_mode("full", &FULL_DEF, TEST_TAPS, FieldMode::Ext)
+            .unwrap();
+        for token in [
+            "ext_add(",
+            "ext_sub(",
+            "ext_mul(",
+            "read_g2_ext(",     // FULL_DEF Get(5) -> TEST_TAPS[5] = g2
+            "read_global_ext(",
+            "load_mix_pow(",
+        ] {
             assert!(
                 kernel.wgsl_source.contains(token),
                 "FULL_DEF under Ext mode must emit '{token}' at least once"
@@ -689,12 +819,30 @@ mod tests {
         assert!(prelude.contains("fn ext_sub(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32>"));
         assert!(prelude.contains("fn ext_mul(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32>"));
         assert!(prelude.contains("fn ext_scale(lhs: vec4<u32>, rhs: u32) -> vec4<u32>"));
-        // Tap / global readers.
-        assert!(prelude.contains("fn read_tap_scalar(tap: u32, cycle: u32) -> u32"));
-        assert!(prelude.contains("fn read_tap_ext(tap: u32, cycle: u32) -> vec4<u32>"));
+        // Per-group tap readers (one per group, in both modes).
+        for g in 0..3u32 {
+            assert!(
+                prelude.contains(&format!(
+                    "fn read_g{g}_scalar(offset: u32, back_inv_rate: u32, cycle: u32) -> u32"
+                )),
+                "prelude missing read_g{g}_scalar"
+            );
+            assert!(
+                prelude.contains(&format!(
+                    "fn read_g{g}_ext(offset: u32, back_inv_rate: u32, cycle: u32) -> vec4<u32>"
+                )),
+                "prelude missing read_g{g}_ext"
+            );
+        }
+        // Placeholder helpers from iter 3 are gone.
+        assert!(
+            !prelude.contains("fn read_tap_scalar"),
+            "iter 4 replaces placeholder read_tap_scalar with read_g{{0,1,2}}_scalar"
+        );
+        assert!(!prelude.contains("fn read_tap_ext"));
+        // Global readers and mix-power loader and check writer.
         assert!(prelude.contains("fn read_global_scalar(arg: u32, offset: u32) -> u32"));
         assert!(prelude.contains("fn read_global_ext(arg: u32, offset: u32) -> vec4<u32>"));
-        // Mix-power loader and check writer.
         assert!(prelude.contains("fn load_mix_pow(mix_idx: u32) -> vec4<u32>"));
         assert!(prelude.contains("fn write_check(cycle: u32, val: vec4<u32>)"));
     }
@@ -720,36 +868,32 @@ mod tests {
 
     #[test]
     fn full_kernel_concatenates_prelude_then_body_for_base_field_def() {
-        let full =
-            staged_full_kernel_wgsl("tiny", &TINY_DEF, FieldMode::Base).expect("Base ok for TINY_DEF");
-        // Prelude appears first.
+        let full = staged_full_kernel_wgsl("tiny", &TINY_DEF, &[], FieldMode::Base)
+            .expect("Base ok for TINY_DEF (no Get ops)");
         let prelude_anchor = "fn write_check(cycle: u32, val: vec4<u32>)";
         let body_anchor = "@compute @workgroup_size(64)";
         let prelude_pos = full.find(prelude_anchor).expect("prelude present");
         let body_pos = full.find(body_anchor).expect("emitter body present");
-        assert!(
-            prelude_pos < body_pos,
-            "prelude must precede emitter body"
-        );
-        // Body uses the scalar `add` helper from the prelude.
+        assert!(prelude_pos < body_pos, "prelude must precede emitter body");
         assert!(full.contains("fp[2] = add(fp[0], fp[1]);"));
     }
 
     #[test]
     fn full_kernel_rejects_const_ext_in_base_mode_via_codegen_error() {
-        let err = staged_full_kernel_wgsl("full_base", &FULL_DEF, FieldMode::Base);
+        let err = staged_full_kernel_wgsl("full_base", &FULL_DEF, TEST_TAPS, FieldMode::Base);
         assert_eq!(err, Err(CodegenError::ConstExtInBaseField));
     }
 
     #[test]
     fn full_kernel_assembles_for_ext_field_def() {
-        let full = staged_full_kernel_wgsl("full_ext", &FULL_DEF, FieldMode::Ext)
+        let full = staged_full_kernel_wgsl("full_ext", &FULL_DEF, TEST_TAPS, FieldMode::Ext)
             .expect("Ext mode accepts ConstExt");
-        // Prelude helpers + body usage both present.
         assert!(full.contains("fn ext_mul(lhs: vec4<u32>, rhs: vec4<u32>)"));
         assert!(full.contains("fp[6] = ext_mul(fp[5], fp[3]);"));
         assert!(full.contains("@compute @workgroup_size(64)"));
         assert!(full.contains("write_check(cycle, mix_tot[2]);"));
+        // Get(5) -> TEST_TAPS[5] = g2, offset 5, back 0 — should reference read_g2_ext.
+        assert!(full.contains("read_g2_ext(5u, 0u, cycle)"));
     }
 
     /// Structural-parity check: the generated kernel's slot layout and
@@ -762,7 +906,7 @@ mod tests {
     fn structural_parity_matches_polyext_for_tiny_def_under_base_mode() {
         let (fp_expected, mix_expected) = def_var_counts(&TINY_DEF);
         let exps = def_mix_exponents(&TINY_DEF);
-        let kernel = staged_kernel_from_def("tiny", &TINY_DEF);
+        let kernel = staged_kernel_from_def("tiny", &TINY_DEF, &[]).unwrap();
         assert_eq!(kernel.fp_slots, fp_expected);
         assert_eq!(kernel.mix_slots, mix_expected);
         for (n, exp) in exps.iter().enumerate() {
