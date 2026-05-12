@@ -55,7 +55,7 @@ use crate::{
 /// Target chunk size for multi-stage staged WGSL emission. Chosen so the
 /// rv32im production DEF (~20k ops) emits ~4 stages, mirroring the CUDA
 /// `eval_check_{0,1,2,3}.cu` layout the runtime interpreter parallels.
-const SP3_STAGED_TARGET_CHUNK_OPS: usize = 5000;
+const SP3_STAGED_TARGET_CHUNK_OPS: usize = 10000;
 
 /// SP3 iter 7d: number of cycles processed per scratch-buffer tile. The
 /// scratch buffer is sized to `tile_size * stride * 4 B` regardless of
