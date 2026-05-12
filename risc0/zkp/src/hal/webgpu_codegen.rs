@@ -226,49 +226,43 @@ pub struct StagedKernel {
     pub wgsl_source: String,
 }
 
-/// SP3 iter 7m: budget (in bytes) we assume for per-workgroup private
-/// memory when picking `workgroup_size`. The WebGPU adapter exposes
-/// `max_compute_workgroup_storage_size` at runtime (typically 48 KiB
-/// on production GPUs and on our 5090 — see the
-/// `browser-prove:webgpu-limits` log). The codegen runs at host-side
-/// build time without an adapter handle, so we use this constant as a
-/// safe lower bound that matches the spec-required minimum.
+/// SP3 iter 7p: default `workgroup_size` for the staged eval_check
+/// kernel. Mirrors the runtime interpreter's Ext-mode dispatch
+/// (`WEBGPU_EVAL_CHECK_INTERPRETER_WORKGROUP_SIZE` in `webgpu.rs`).
+/// Function-scope `var` arrays are per-thread private memory —
+/// drivers spill to per-thread local memory automatically — so we
+/// don't bound the per-thread footprint here. The size of 32 covers
+/// Nvidia's 32-wide warp and is the empirically validated choice in
+/// the existing interpreter path for the same DEFs.
+pub const WEBGPU_STAGED_WORKGROUP_SIZE: u32 = 32;
+
+/// SP3 iter 7p: bytes-per-thread budget used for *workgroup-shared*
+/// scratch in Base mode. The interpreter falls back to a
+/// `var<workgroup>` scratch when fp_slots are too large for
+/// per-thread `var` to be a clean win; we don't currently emit a
+/// workgroup-scratch path from the staged emitter, so the codegen
+/// just returns the constant `WEBGPU_STAGED_WORKGROUP_SIZE`. Left
+/// here documenting the budget for any future workgroup-scratch
+/// variant.
+#[allow(dead_code)]
 pub const WEBGPU_COMPUTE_WORKGROUP_STORAGE_BUDGET: u32 = 49152;
 
-/// SP3 iter 7m: cap on `workgroup_size` even when private memory
-/// allows more. 64 threads/workgroup is the typical sweet spot for
-/// WGSL compute on desktop GPUs — covers Nvidia's 32-wide warp and
-/// AMD's 64-wide wavefront, and avoids over-large workgroups that
-/// can stall on register pressure.
-pub const WEBGPU_COMPUTE_WORKGROUP_SIZE_CAP: u32 = 64;
-
-/// SP3 iter 7m: pick a `workgroup_size` that lets each stage's
-/// per-thread `fp` / `mix_tot` / `mix_mul` private arrays fit inside
-/// the adapter's per-workgroup storage budget. Returned value is a
-/// power of two in `[1, WEBGPU_COMPUTE_WORKGROUP_SIZE_CAP]`.
+/// SP3 iter 7p: return the staged kernel's workgroup_size. Per-thread
+/// state (`fp` / `mix_tot` / `mix_mul`) lives in WGSL function-scope
+/// `var` arrays — driver-managed per-thread private memory — so we
+/// don't divide by per-thread byte footprint the way a
+/// workgroup-shared budget would. Matches the runtime interpreter's
+/// Ext-mode pipeline.
 fn choose_workgroup_size(
     field_mode: FieldMode,
     fp_slots: usize,
     mix_slots: usize,
 ) -> u32 {
-    let fp_bytes_per_thread = match field_mode {
-        FieldMode::Base => fp_slots * 4,
-        FieldMode::Ext => fp_slots * 16,
-    };
-    // `mix_tot` and `mix_mul` are each `array<vec4<u32>, mix_slots>`,
-    // 16 bytes per slot, two arrays per thread.
-    let mix_bytes_per_thread = mix_slots * 32;
-    let per_thread = (fp_bytes_per_thread + mix_bytes_per_thread).max(1) as u32;
-    let max_by_budget = (WEBGPU_COMPUTE_WORKGROUP_STORAGE_BUDGET / per_thread)
-        .max(1)
-        .min(WEBGPU_COMPUTE_WORKGROUP_SIZE_CAP);
-    // Floor to power of two so dispatch math stays simple
-    // (`tile_size % workgroup_size == 0` for typical tile sizes).
-    let mut w: u32 = 1;
-    while w * 2 <= max_by_budget {
-        w *= 2;
-    }
-    w
+    // Inputs are kept for future per-stage tuning hooks (e.g., a
+    // workgroup-shared scratch variant for very large DEFs would
+    // gate `workgroup_size` on `fp_slots` / `mix_slots`).
+    let _ = (field_mode, fp_slots, mix_slots);
+    WEBGPU_STAGED_WORKGROUP_SIZE
 }
 
 /// Errors that prevent generating a staged kernel for a DEF under a given
