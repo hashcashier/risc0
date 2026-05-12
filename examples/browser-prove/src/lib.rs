@@ -1285,22 +1285,29 @@ mod tests {
 
     /// SP3 staged-WGSL `eval_check` runtime parity test.
     ///
-    /// Enables `staged_eval_check_enabled` and runs poseidon2_basic. iter 5
-    /// confirmed via this test that the staged path is correctly wired (6
-    /// `eval_check_staged_submit` markers fire on the prove path, zero
-    /// fall-through markers, zero `webgpu-uncaptured-error` events), but
-    /// the kernel itself exhausts GPU private-memory limits on the
-    /// production rv32im DEF (~15k fp slots × 64 threads/workgroup ≫ Chrome
-    /// Dawn's per-workgroup budget). Result: kernel dispatches submit but
-    /// the device errors on a later readback with `AbortError: mapAsync …
-    /// external Instance reference no longer exists`, i.e., the device
-    /// effectively died from running an out-of-bounds private-memory
-    /// kernel. Fix: SP3 iter 6 lands slot-reuse in the emitter (mirroring
-    /// the interpreter's `eval_check_last_uses` + `EvalCheckSlotAllocator`
-    /// logic), which bounds fp_slots to the live set (~927 for rv32im).
-    /// This test is `#[ignore]`'d until iter 6 unignores it.
+    /// iter 5 wired the dispatch; iter 6 ported the runtime interpreter's
+    /// slot-allocation discipline (`eval_check_last_uses` +
+    /// `EvalCheckSlotAllocator`) into the codegen module so the emitted
+    /// kernel reuses `fp` / `mix_tot` / `mix_mul` slots — `fp_slots` drops
+    /// from ~15k (one per PolyExtStep) to ~927 (the live set) for rv32im,
+    /// matching the runtime interpreter's allocation. The kernel uses
+    /// `@compute @workgroup_size(1)` to bound per-thread private memory.
+    ///
+    /// **iter 6 result** (`evidence/logs/sp3-iter6-staged-1778632000.txt`):
+    /// the kernel compiles and dispatches cleanly (6 `eval_check_staged_submit`
+    /// markers, 0 `webgpu-uncaptured-error` events, 0 fall-throughs), but
+    /// the prove pipeline still aborts on a later `mapAsync` with
+    /// `AbortError: external Instance reference no longer exists`.
+    /// 150 s wall time (vs 318 s on iter 5 — slot allocation halved the
+    /// per-cycle GPU work, so iter 6 is structurally correct), but the
+    /// straight-line 20k-op kernel still exhausts the test environment's
+    /// per-dispatch budget (likely SwiftShader headless-Chrome timeout
+    /// or TDR on the actual GPU). **iter 7** lands the multi-stage split
+    /// that chunks the DEF into ~1k-op stages joined via a scratch
+    /// storage buffer, mirroring CUDA's 4-file `eval_check_{0,1,2,3}.cu`
+    /// layout. Until that lands, this test stays `#[ignore]`'d.
     #[wasm_bindgen_test(async)]
-    #[ignore = "SP3 iter 6 prerequisite: slot allocation not yet in the emitter; staged kernel exhausts GPU private memory on rv32im DEF"]
+    #[ignore = "SP3 iter 7 prerequisite: multi-stage split for 20k-op rv32im DEF; single-kernel exhausts GPU per-dispatch budget"]
     async fn poseidon2_basic_async_staged_eval_check_verifies() {
         use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
 

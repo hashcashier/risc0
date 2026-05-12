@@ -48,7 +48,137 @@ use alloc::{
 };
 use core::fmt::Write as _;
 
+use anyhow::{anyhow, ensure, Result};
+
 use crate::adapter::{PolyExtStep, PolyExtStepDef};
+
+// ============================================================================
+// Slot allocation primitives shared with the runtime interpreter in
+// `risc0/zkp/src/hal/webgpu.rs`. Kept in this module (not in `webgpu.rs`)
+// because `webgpu.rs` is wasm32-only while this module is feature-gated
+// only by `webgpu` — the slot-allocation logic itself is pure Rust and is
+// reused by the staged-WGSL emitter below to keep `fp_slots` / `mix_slots`
+// bounded by the live set rather than `block.len()`.
+// ============================================================================
+
+/// Pool allocator that hands out the lowest free slot index, mirroring the
+/// register-renaming pattern that `eval_check_interpreter_instructions_with_limit`
+/// uses to keep the runtime interpreter's `fp[]` / `mix_tot[]` / `mix_mul[]`
+/// arrays bounded by the live working set rather than `block.len()`.
+#[derive(Default)]
+pub(crate) struct EvalCheckSlotAllocator {
+    free: Vec<usize>,
+    next: usize,
+    max: usize,
+}
+
+impl EvalCheckSlotAllocator {
+    pub(crate) fn alloc(&mut self) -> usize {
+        let slot = self.free.pop().unwrap_or_else(|| {
+            let slot = self.next;
+            self.next += 1;
+            self.max = self.max.max(self.next);
+            slot
+        });
+        self.max = self.max.max(slot + 1);
+        slot
+    }
+
+    pub(crate) fn free(&mut self, slot: usize) {
+        self.free.push(slot);
+    }
+
+    /// High-water mark of slot indices ever allocated. The kernel sizes
+    /// its `fp` / `mix_tot` / `mix_mul` local arrays to this count.
+    pub(crate) fn max_used(&self) -> usize {
+        self.max
+    }
+}
+
+pub(crate) fn eval_check_note_last(
+    last_uses: &mut Vec<Option<usize>>,
+    var: usize,
+    op_idx: usize,
+) {
+    if var >= last_uses.len() {
+        last_uses.resize(var + 1, None);
+    }
+    last_uses[var] = Some(op_idx);
+}
+
+/// Per-var last-use indices for both fp and mix vars, matching the
+/// runtime interpreter's allocation discipline byte-for-byte. The ret
+/// mix var's last use is set to `usize::MAX` so its slot stays live
+/// through the entire program (the kernel writes it to the check buffer
+/// at the end).
+pub(crate) fn eval_check_last_uses(
+    def: &PolyExtStepDef,
+) -> Result<(Vec<Option<usize>>, Vec<Option<usize>>, usize, usize)> {
+    let mut last_fp = Vec::new();
+    let mut last_mix = Vec::new();
+    let mut fp_count = 0usize;
+    let mut mix_count = 0usize;
+
+    for (op_idx, op) in def.block.iter().enumerate() {
+        match op {
+            PolyExtStep::Const(_)
+            | PolyExtStep::ConstExt(_, _, _, _)
+            | PolyExtStep::Get(_)
+            | PolyExtStep::GetGlobal(_, _) => {
+                fp_count += 1;
+                last_fp.resize(last_fp.len().max(fp_count), None);
+            }
+            PolyExtStep::Add(lhs, rhs)
+            | PolyExtStep::Sub(lhs, rhs)
+            | PolyExtStep::Mul(lhs, rhs) => {
+                eval_check_note_last(&mut last_fp, *lhs, op_idx);
+                eval_check_note_last(&mut last_fp, *rhs, op_idx);
+                fp_count += 1;
+                last_fp.resize(last_fp.len().max(fp_count), None);
+            }
+            PolyExtStep::True => {
+                mix_count += 1;
+                last_mix.resize(last_mix.len().max(mix_count), None);
+            }
+            PolyExtStep::AndEqz(chain, inner) => {
+                eval_check_note_last(&mut last_mix, *chain, op_idx);
+                eval_check_note_last(&mut last_fp, *inner, op_idx);
+                mix_count += 1;
+                last_mix.resize(last_mix.len().max(mix_count), None);
+            }
+            PolyExtStep::AndCond(chain, cond, inner) => {
+                eval_check_note_last(&mut last_mix, *chain, op_idx);
+                eval_check_note_last(&mut last_fp, *cond, op_idx);
+                eval_check_note_last(&mut last_mix, *inner, op_idx);
+                mix_count += 1;
+                last_mix.resize(last_mix.len().max(mix_count), None);
+            }
+        }
+    }
+
+    ensure!(
+        def.ret < mix_count,
+        "poly_ext return mix index {} exceeds generated mix count {}",
+        def.ret,
+        mix_count
+    );
+    last_mix[def.ret] = Some(usize::MAX);
+    Ok((last_fp, last_mix, fp_count, mix_count))
+}
+
+pub(crate) fn eval_check_fp_slot(slots: &[Option<usize>], var: usize) -> Result<usize> {
+    slots
+        .get(var)
+        .and_then(|slot| *slot)
+        .ok_or_else(|| anyhow!("poly_ext fp var {var} is not live"))
+}
+
+pub(crate) fn eval_check_mix_slot(slots: &[Option<usize>], var: usize) -> Result<usize> {
+    slots
+        .get(var)
+        .and_then(|slot| *slot)
+        .ok_or_else(|| anyhow!("poly_ext mix var {var} is not live"))
+}
 
 /// Field-type discipline that the emitted kernel will use for `fp` slots.
 /// Mirrors the runtime interpreter's `base_field` flag.
@@ -103,6 +233,13 @@ pub enum CodegenError {
     /// The DEF references tap with `group > 2`, but only 3 group bindings
     /// (`group0`/`group1`/`group2`) are wired by the prelude.
     TapGroupOutOfRange { tap_idx: usize, group: u32 },
+    /// `eval_check_last_uses` rejected the DEF (e.g., `ret` mix index
+    /// out of range). The string is the underlying anyhow error.
+    LastUseAnalysisFailed(String),
+    /// The DEF references an fp or mix var whose slot was already freed
+    /// (the prior consumer hit the var's last-use and reclaimed it). A
+    /// well-formed DEF from `risc0_zkp::adapter` won't produce this.
+    VarNotLive(String),
 }
 
 /// Per-tap addressing info that the emitter inlines at the `Get(tap_idx)`
@@ -156,24 +293,134 @@ pub fn def_is_base_field(def: &PolyExtStepDef) -> bool {
         .any(|op| matches!(op, PolyExtStep::ConstExt(..)))
 }
 
+/// Internal state for emitting a single staged WGSL kernel from a DEF.
+///
+/// iter 6 (slot allocation):
+/// - `fp_alloc` / `mix_alloc` hand out lowest free slot indices, mirroring
+///   the runtime interpreter's allocation discipline.
+/// - `fp_slot_map[var_idx]` records which physical slot was assigned to
+///   the `var_idx`-th fp var (in poly_ext var-index order, i.e., the
+///   order in which `Const`/`Get`/`Add`/etc. ops push fp vars). `None`
+///   means the slot was freed after its last use.
+/// - `mix_slot_map[var_idx]` is the parallel structure for `True` /
+///   `AndEqz` / `AndCond` mix vars.
+/// - `last_fp` / `last_mix` are the last-use op indices computed once at
+///   emitter construction; a slot is freed when the op at `last_fp[var]`
+///   (resp. `last_mix[var]`) finishes consuming it. The `ret` mix var's
+///   last-use is `usize::MAX` so its slot stays live through the program.
+/// - `fp_var_count` / `mix_var_count` track how many vars have been
+///   emitted so far (poly_ext var indexing).
 struct WgslEmitter<'a> {
     body: String,
     field_mode: FieldMode,
-    fp_idx: usize,
-    mix_idx: usize,
+    fp_alloc: EvalCheckSlotAllocator,
+    mix_alloc: EvalCheckSlotAllocator,
+    fp_slot_map: Vec<Option<usize>>,
+    mix_slot_map: Vec<Option<usize>>,
+    last_fp: Vec<Option<usize>>,
+    last_mix: Vec<Option<usize>>,
+    fp_var_count: usize,
+    mix_var_count: usize,
     mix_exps: Vec<usize>,
     taps: &'a [EmitterTap],
 }
 
 impl<'a> WgslEmitter<'a> {
-    fn new(def: &PolyExtStepDef, taps: &'a [EmitterTap], field_mode: FieldMode) -> Self {
-        Self {
+    fn new(
+        def: &PolyExtStepDef,
+        taps: &'a [EmitterTap],
+        field_mode: FieldMode,
+    ) -> Result<Self, CodegenError> {
+        let (last_fp, last_mix, _fp_count, _mix_count) = eval_check_last_uses(def)
+            .map_err(|err| CodegenError::LastUseAnalysisFailed(err.to_string()))?;
+        Ok(Self {
             body: String::new(),
             field_mode,
-            fp_idx: 0,
-            mix_idx: 0,
+            fp_alloc: EvalCheckSlotAllocator::default(),
+            mix_alloc: EvalCheckSlotAllocator::default(),
+            fp_slot_map: Vec::new(),
+            mix_slot_map: Vec::new(),
+            last_fp,
+            last_mix,
+            fp_var_count: 0,
+            mix_var_count: 0,
             mix_exps: def_mix_exponents(def),
             taps,
+        })
+    }
+
+    /// Look up the physical slot a still-live fp var was assigned to.
+    fn fp_slot_for(&self, var: usize) -> Result<usize, CodegenError> {
+        eval_check_fp_slot(&self.fp_slot_map, var)
+            .map_err(|err| CodegenError::VarNotLive(err.to_string()))
+    }
+
+    /// Look up the physical slot a still-live mix var was assigned to.
+    fn mix_slot_for(&self, var: usize) -> Result<usize, CodegenError> {
+        eval_check_mix_slot(&self.mix_slot_map, var)
+            .map_err(|err| CodegenError::VarNotLive(err.to_string()))
+    }
+
+    /// Allocate a fresh fp slot for the next fp var. Returns
+    /// `(var_idx, slot)`. If the var has no future use beyond this op
+    /// (e.g., the program never reads from it), the slot is immediately
+    /// freed and `fp_slot_map[var_idx]` is set to `None`.
+    fn alloc_fp(&mut self, current_op_idx: usize) -> (usize, usize) {
+        let var_idx = self.fp_var_count;
+        self.fp_var_count += 1;
+        let slot = self.fp_alloc.alloc();
+        self.fp_slot_map.push(Some(slot));
+        // If this var is never used downstream (its last_fp entry is
+        // missing or its last use is the producer itself), immediately
+        // free the slot — the kernel still writes to it for side-effect
+        // parity with the interpreter, but the slot is reusable next op.
+        let next_use = self.last_fp.get(var_idx).copied().flatten();
+        if next_use.is_none() {
+            self.fp_slot_map[var_idx] = None;
+            self.fp_alloc.free(slot);
+        }
+        let _ = current_op_idx; // reserved for future ranges-based scheduling
+        (var_idx, slot)
+    }
+
+    fn alloc_mix(&mut self, current_op_idx: usize) -> (usize, usize) {
+        let var_idx = self.mix_var_count;
+        self.mix_var_count += 1;
+        let slot = self.mix_alloc.alloc();
+        self.mix_slot_map.push(Some(slot));
+        let next_use = self.last_mix.get(var_idx).copied().flatten();
+        if next_use.is_none() {
+            self.mix_slot_map[var_idx] = None;
+            self.mix_alloc.free(slot);
+        }
+        let _ = current_op_idx;
+        (var_idx, slot)
+    }
+
+    /// After emitting the op at `op_idx`, free any operand slots whose
+    /// last-use was this op. Mirrors `eval_check_interpreter_instructions_with_limit`'s
+    /// post-emit "free dead operands" pass.
+    fn free_dead_fp_operands(&mut self, op_idx: usize, vars: &[usize]) {
+        for &var in vars {
+            if let Some(Some(last)) = self.last_fp.get(var) {
+                if *last == op_idx {
+                    if let Some(slot) = self.fp_slot_map[var].take() {
+                        self.fp_alloc.free(slot);
+                    }
+                }
+            }
+        }
+    }
+
+    fn free_dead_mix_operands(&mut self, op_idx: usize, vars: &[usize]) {
+        for &var in vars {
+            if let Some(Some(last)) = self.last_mix.get(var) {
+                if *last == op_idx {
+                    if let Some(slot) = self.mix_slot_map[var].take() {
+                        self.mix_alloc.free(slot);
+                    }
+                }
+            }
         }
     }
 
@@ -198,37 +445,33 @@ impl<'a> WgslEmitter<'a> {
     fn emit(&mut self, idx: usize, op: &PolyExtStep) -> Result<(), CodegenError> {
         match (op, self.field_mode) {
             (PolyExtStep::Const(v), FieldMode::Base) => {
-                let n = self.fp_idx;
-                self.fp_idx += 1;
-                writeln!(self.body, "  // [{idx}] fp[{n}] = Const({v})").unwrap();
-                writeln!(self.body, "  fp[{n}] = {v}u;").unwrap();
+                let (var, slot) = self.alloc_fp(idx);
+                writeln!(self.body, "  // [{idx}] fp_var{var} (slot {slot}) = Const({v})").unwrap();
+                writeln!(self.body, "  fp[{slot}] = {v}u;").unwrap();
             }
             (PolyExtStep::Const(v), FieldMode::Ext) => {
-                let n = self.fp_idx;
-                self.fp_idx += 1;
-                writeln!(self.body, "  // [{idx}] fp[{n}] = Const({v})").unwrap();
-                writeln!(self.body, "  fp[{n}] = vec4<u32>({v}u, 0u, 0u, 0u);").unwrap();
+                let (var, slot) = self.alloc_fp(idx);
+                writeln!(self.body, "  // [{idx}] fp_var{var} (slot {slot}) = Const({v})").unwrap();
+                writeln!(self.body, "  fp[{slot}] = vec4<u32>({v}u, 0u, 0u, 0u);").unwrap();
             }
             (PolyExtStep::ConstExt(_, _, _, _), FieldMode::Base) => {
                 return Err(CodegenError::ConstExtInBaseField);
             }
             (PolyExtStep::ConstExt(a, b, c, d), FieldMode::Ext) => {
-                let n = self.fp_idx;
-                self.fp_idx += 1;
+                let (var, slot) = self.alloc_fp(idx);
                 writeln!(
                     self.body,
-                    "  // [{idx}] fp[{n}] = ConstExt({a}, {b}, {c}, {d})"
+                    "  // [{idx}] fp_var{var} (slot {slot}) = ConstExt({a}, {b}, {c}, {d})"
                 )
                 .unwrap();
-                writeln!(self.body, "  fp[{n}] = vec4<u32>({a}u, {b}u, {c}u, {d}u);").unwrap();
+                writeln!(self.body, "  fp[{slot}] = vec4<u32>({a}u, {b}u, {c}u, {d}u);").unwrap();
             }
             (PolyExtStep::Get(tap_idx), mode) => {
                 let tap = self.resolve_tap(*tap_idx)?;
-                let n = self.fp_idx;
-                self.fp_idx += 1;
+                let (var, slot) = self.alloc_fp(idx);
                 writeln!(
                     self.body,
-                    "  // [{idx}] fp[{n}] = Get(tap={tap_idx}) -> g{}_offset={}_back={}",
+                    "  // [{idx}] fp_var{var} (slot {slot}) = Get(tap={tap_idx}) -> g{}_offset={}_back={}",
                     tap.group, tap.offset, tap.back_inv_rate
                 )
                 .unwrap();
@@ -238,17 +481,16 @@ impl<'a> WgslEmitter<'a> {
                 };
                 writeln!(
                     self.body,
-                    "  fp[{n}] = read_g{}_{suffix}({}u, {}u, cycle);",
+                    "  fp[{slot}] = read_g{}_{suffix}({}u, {}u, cycle);",
                     tap.group, tap.offset, tap.back_inv_rate
                 )
                 .unwrap();
             }
             (PolyExtStep::GetGlobal(arg, off), mode) => {
-                let n = self.fp_idx;
-                self.fp_idx += 1;
+                let (var, slot) = self.alloc_fp(idx);
                 writeln!(
                     self.body,
-                    "  // [{idx}] fp[{n}] = GetGlobal(arg={arg}, off={off})"
+                    "  // [{idx}] fp_var{var} (slot {slot}) = GetGlobal(arg={arg}, off={off})"
                 )
                 .unwrap();
                 let suffix = match mode {
@@ -257,167 +499,185 @@ impl<'a> WgslEmitter<'a> {
                 };
                 writeln!(
                     self.body,
-                    "  fp[{n}] = read_global_{suffix}({arg}u, {off}u);"
+                    "  fp[{slot}] = read_global_{suffix}({arg}u, {off}u);"
                 )
                 .unwrap();
             }
-            (PolyExtStep::Add(x, y), FieldMode::Base) => {
-                let n = self.fp_idx;
-                self.fp_idx += 1;
-                writeln!(self.body, "  // [{idx}] fp[{n}] = Add(fp[{x}], fp[{y}])").unwrap();
-                writeln!(self.body, "  fp[{n}] = add(fp[{x}], fp[{y}]);").unwrap();
+            (PolyExtStep::Add(x, y), mode) => {
+                let x_slot = self.fp_slot_for(*x)?;
+                let y_slot = self.fp_slot_for(*y)?;
+                let (var, slot) = self.alloc_fp(idx);
+                let helper = match mode {
+                    FieldMode::Base => "add",
+                    FieldMode::Ext => "ext_add",
+                };
+                writeln!(
+                    self.body,
+                    "  // [{idx}] fp_var{var} (slot {slot}) = Add(fp_var{x}/slot{x_slot}, fp_var{y}/slot{y_slot})"
+                )
+                .unwrap();
+                writeln!(
+                    self.body,
+                    "  fp[{slot}] = {helper}(fp[{x_slot}], fp[{y_slot}]);"
+                )
+                .unwrap();
+                self.free_dead_fp_operands(idx, &[*x, *y]);
             }
-            (PolyExtStep::Add(x, y), FieldMode::Ext) => {
-                let n = self.fp_idx;
-                self.fp_idx += 1;
-                writeln!(self.body, "  // [{idx}] fp[{n}] = Add(fp[{x}], fp[{y}])").unwrap();
-                writeln!(self.body, "  fp[{n}] = ext_add(fp[{x}], fp[{y}]);").unwrap();
+            (PolyExtStep::Sub(x, y), mode) => {
+                let x_slot = self.fp_slot_for(*x)?;
+                let y_slot = self.fp_slot_for(*y)?;
+                let (var, slot) = self.alloc_fp(idx);
+                let helper = match mode {
+                    FieldMode::Base => "sub",
+                    FieldMode::Ext => "ext_sub",
+                };
+                writeln!(
+                    self.body,
+                    "  // [{idx}] fp_var{var} (slot {slot}) = Sub(fp_var{x}/slot{x_slot}, fp_var{y}/slot{y_slot})"
+                )
+                .unwrap();
+                writeln!(
+                    self.body,
+                    "  fp[{slot}] = {helper}(fp[{x_slot}], fp[{y_slot}]);"
+                )
+                .unwrap();
+                self.free_dead_fp_operands(idx, &[*x, *y]);
             }
-            (PolyExtStep::Sub(x, y), FieldMode::Base) => {
-                let n = self.fp_idx;
-                self.fp_idx += 1;
-                writeln!(self.body, "  // [{idx}] fp[{n}] = Sub(fp[{x}], fp[{y}])").unwrap();
-                writeln!(self.body, "  fp[{n}] = sub(fp[{x}], fp[{y}]);").unwrap();
-            }
-            (PolyExtStep::Sub(x, y), FieldMode::Ext) => {
-                let n = self.fp_idx;
-                self.fp_idx += 1;
-                writeln!(self.body, "  // [{idx}] fp[{n}] = Sub(fp[{x}], fp[{y}])").unwrap();
-                writeln!(self.body, "  fp[{n}] = ext_sub(fp[{x}], fp[{y}]);").unwrap();
-            }
-            (PolyExtStep::Mul(x, y), FieldMode::Base) => {
-                let n = self.fp_idx;
-                self.fp_idx += 1;
-                writeln!(self.body, "  // [{idx}] fp[{n}] = Mul(fp[{x}], fp[{y}])").unwrap();
-                writeln!(self.body, "  fp[{n}] = mul(fp[{x}], fp[{y}]);").unwrap();
-            }
-            (PolyExtStep::Mul(x, y), FieldMode::Ext) => {
-                let n = self.fp_idx;
-                self.fp_idx += 1;
-                writeln!(self.body, "  // [{idx}] fp[{n}] = Mul(fp[{x}], fp[{y}])").unwrap();
-                writeln!(self.body, "  fp[{n}] = ext_mul(fp[{x}], fp[{y}]);").unwrap();
+            (PolyExtStep::Mul(x, y), mode) => {
+                let x_slot = self.fp_slot_for(*x)?;
+                let y_slot = self.fp_slot_for(*y)?;
+                let (var, slot) = self.alloc_fp(idx);
+                let helper = match mode {
+                    FieldMode::Base => "mul",
+                    FieldMode::Ext => "ext_mul",
+                };
+                writeln!(
+                    self.body,
+                    "  // [{idx}] fp_var{var} (slot {slot}) = Mul(fp_var{x}/slot{x_slot}, fp_var{y}/slot{y_slot})"
+                )
+                .unwrap();
+                writeln!(
+                    self.body,
+                    "  fp[{slot}] = {helper}(fp[{x_slot}], fp[{y_slot}]);"
+                )
+                .unwrap();
+                self.free_dead_fp_operands(idx, &[*x, *y]);
             }
             (PolyExtStep::True, _) => {
-                let n = self.mix_idx;
-                self.mix_idx += 1;
-                let exp = self.mix_exps[n];
-                writeln!(self.body, "  // [{idx}] mix[{n}] = True (mix_pow exp={exp})").unwrap();
+                let (var, slot) = self.alloc_mix(idx);
+                let exp = self.mix_exps[var];
                 writeln!(
                     self.body,
-                    "  mix_tot[{n}] = vec4<u32>(0u, 0u, 0u, 0u); mix_mul[{n}] = load_mix_pow({exp}u);"
+                    "  // [{idx}] mix_var{var} (slot {slot}) = True (mix_pow exp={exp})"
+                )
+                .unwrap();
+                writeln!(
+                    self.body,
+                    "  mix_tot[{slot}] = vec4<u32>(0u, 0u, 0u, 0u); mix_mul[{slot}] = load_mix_pow({exp}u);"
                 )
                 .unwrap();
             }
-            (PolyExtStep::AndEqz(chain, inner), FieldMode::Base) => {
-                let n = self.mix_idx;
-                self.mix_idx += 1;
-                let exp = self.mix_exps[n];
+            (PolyExtStep::AndEqz(chain, inner), mode) => {
+                let chain_slot = self.mix_slot_for(*chain)?;
+                let inner_slot = self.fp_slot_for(*inner)?;
+                let (var, slot) = self.alloc_mix(idx);
+                let exp = self.mix_exps[var];
+                let inner_combine = match mode {
+                    // Base mode: scalar fp[inner] combined via ext_scale.
+                    FieldMode::Base => format!("ext_scale(mix_mul[{chain_slot}], fp[{inner_slot}])"),
+                    // Ext mode: vec4 fp[inner] combined via full ext_mul.
+                    FieldMode::Ext => format!("ext_mul(mix_mul[{chain_slot}], fp[{inner_slot}])"),
+                };
                 writeln!(
                     self.body,
-                    "  // [{idx}] mix[{n}] = AndEqz(chain=mix[{chain}], inner=fp[{inner}])"
+                    "  // [{idx}] mix_var{var} (slot {slot}) = AndEqz(chain=mix_var{chain}/slot{chain_slot}, inner=fp_var{inner}/slot{inner_slot})"
                 )
                 .unwrap();
-                // Base-field inner: combine vec4 mix_mul[chain] with scalar fp[inner] via ext_scale.
                 writeln!(
                     self.body,
-                    "  mix_tot[{n}] = ext_add(mix_tot[{chain}], ext_scale(mix_mul[{chain}], fp[{inner}])); mix_mul[{n}] = load_mix_pow({exp}u);"
+                    "  mix_tot[{slot}] = ext_add(mix_tot[{chain_slot}], {inner_combine}); mix_mul[{slot}] = load_mix_pow({exp}u);"
                 )
                 .unwrap();
+                self.free_dead_mix_operands(idx, &[*chain]);
+                self.free_dead_fp_operands(idx, &[*inner]);
             }
-            (PolyExtStep::AndEqz(chain, inner), FieldMode::Ext) => {
-                let n = self.mix_idx;
-                self.mix_idx += 1;
-                let exp = self.mix_exps[n];
+            (PolyExtStep::AndCond(chain, cond, inner), mode) => {
+                let chain_slot = self.mix_slot_for(*chain)?;
+                let cond_slot = self.fp_slot_for(*cond)?;
+                let inner_slot = self.mix_slot_for(*inner)?;
+                let (var, slot) = self.alloc_mix(idx);
+                let exp = self.mix_exps[var];
+                let cond_combine = match mode {
+                    FieldMode::Base => format!(
+                        "ext_scale(ext_mul(mix_tot[{inner_slot}], mix_mul[{chain_slot}]), fp[{cond_slot}])"
+                    ),
+                    FieldMode::Ext => format!(
+                        "ext_mul(ext_mul(mix_tot[{inner_slot}], mix_mul[{chain_slot}]), fp[{cond_slot}])"
+                    ),
+                };
                 writeln!(
                     self.body,
-                    "  // [{idx}] mix[{n}] = AndEqz(chain=mix[{chain}], inner=fp[{inner}])"
+                    "  // [{idx}] mix_var{var} (slot {slot}) = AndCond(chain=mix_var{chain}/slot{chain_slot}, cond=fp_var{cond}/slot{cond_slot}, inner=mix_var{inner}/slot{inner_slot})"
                 )
                 .unwrap();
-                // Ext-field inner: full ext_mul of two vec4s.
                 writeln!(
                     self.body,
-                    "  mix_tot[{n}] = ext_add(mix_tot[{chain}], ext_mul(mix_mul[{chain}], fp[{inner}])); mix_mul[{n}] = load_mix_pow({exp}u);"
+                    "  mix_tot[{slot}] = ext_add(mix_tot[{chain_slot}], {cond_combine}); mix_mul[{slot}] = load_mix_pow({exp}u);"
                 )
                 .unwrap();
-            }
-            (PolyExtStep::AndCond(chain, cond, inner), FieldMode::Base) => {
-                let n = self.mix_idx;
-                self.mix_idx += 1;
-                let exp = self.mix_exps[n];
-                writeln!(
-                    self.body,
-                    "  // [{idx}] mix[{n}] = AndCond(chain=mix[{chain}], cond=fp[{cond}], inner=mix[{inner}])"
-                )
-                .unwrap();
-                // Base-field cond: scalar fp[cond] applied via ext_scale to the inner.tot * chain.mul product.
-                writeln!(
-                    self.body,
-                    "  mix_tot[{n}] = ext_add(mix_tot[{chain}], ext_scale(ext_mul(mix_tot[{inner}], mix_mul[{chain}]), fp[{cond}])); mix_mul[{n}] = load_mix_pow({exp}u);"
-                )
-                .unwrap();
-            }
-            (PolyExtStep::AndCond(chain, cond, inner), FieldMode::Ext) => {
-                let n = self.mix_idx;
-                self.mix_idx += 1;
-                let exp = self.mix_exps[n];
-                writeln!(
-                    self.body,
-                    "  // [{idx}] mix[{n}] = AndCond(chain=mix[{chain}], cond=fp[{cond}], inner=mix[{inner}])"
-                )
-                .unwrap();
-                // Ext-field cond: full ext_mul.
-                writeln!(
-                    self.body,
-                    "  mix_tot[{n}] = ext_add(mix_tot[{chain}], ext_mul(ext_mul(mix_tot[{inner}], mix_mul[{chain}]), fp[{cond}])); mix_mul[{n}] = load_mix_pow({exp}u);"
-                )
-                .unwrap();
+                self.free_dead_mix_operands(idx, &[*chain, *inner]);
+                self.free_dead_fp_operands(idx, &[*cond]);
             }
         }
         Ok(())
     }
 
-    fn finalize(
-        mut self,
-        name: &str,
-        fp_expected: usize,
-        mix_expected: usize,
-        ret: usize,
-    ) -> StagedKernel {
-        // Header comment + main entry point. Bindings, params, and arithmetic
-        // helpers come from the runtime prelude shared with the interpreter.
+    /// Materialize the kernel. `ret_slot` is the slot the ret mix var
+    /// was assigned (recorded by `alloc_mix` and persisted via
+    /// `last_mix[ret] = usize::MAX` so it never frees).
+    fn finalize(mut self, name: &str, ret_slot: usize) -> StagedKernel {
+        let fp_slots = self.fp_alloc.max_used().max(1);
+        let mix_slots = self.mix_alloc.max_used().max(1);
         let mut wgsl = String::new();
         writeln!(wgsl, "// staged eval_check kernel: {name}").unwrap();
         writeln!(
             wgsl,
-            "// field_mode = {:?}, fp_slots = {fp_expected}, mix_slots = {mix_expected}, ret = mix[{ret}]",
+            "// field_mode = {:?}, fp_slots = {fp_slots}, mix_slots = {mix_slots}, ret_mix_slot = {ret_slot}",
             self.field_mode
         )
         .unwrap();
         wgsl.push_str(
-            "// runtime prelude (bindings, params, ext_*/add/sub/mul helpers,\n// read_tap_*, read_global_*, load_mix_pow, write_check) provided by webgpu.rs\n",
+            "// runtime prelude (bindings, params, ext_*/add/sub/mul helpers,\n// read_g{0,1,2}_*, read_global_*, load_mix_pow, write_check) is the\n// `STAGED_EVAL_CHECK_PRELUDE_WGSL` constant; this body is appended after it.\n",
         );
-        writeln!(wgsl, "@compute @workgroup_size(64)").unwrap();
+        // SP3 iter 6: workgroup_size = 1. With slot allocation, each
+        // thread's private state is small (fp_slots * 4 B + 2 * mix_slots
+        // * 16 B), but the per-PolyExtStep straight-line code is long
+        // (~20k ops for rv32im). Running each cycle on its own workgroup
+        // lets the GPU schedule thousands of independent thread blocks
+        // without the per-workgroup register-file pressure that a
+        // larger workgroup size would impose. Matches the runtime
+        // interpreter's `private_parallel = true` discipline.
+        writeln!(wgsl, "@compute @workgroup_size(1)").unwrap();
         wgsl.push_str("fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
         wgsl.push_str("  let cycle = gid.x;\n");
         wgsl.push_str("  if (cycle >= params.domain) { return; }\n");
         writeln!(
             wgsl,
-            "  var fp: array<{}, {fp_expected}>;",
+            "  var fp: array<{}, {fp_slots}>;",
             self.field_mode.fp_ty()
         )
         .unwrap();
-        writeln!(wgsl, "  var mix_tot: array<vec4<u32>, {mix_expected}>;").unwrap();
-        writeln!(wgsl, "  var mix_mul: array<vec4<u32>, {mix_expected}>;").unwrap();
+        writeln!(wgsl, "  var mix_tot: array<vec4<u32>, {mix_slots}>;").unwrap();
+        writeln!(wgsl, "  var mix_mul: array<vec4<u32>, {mix_slots}>;").unwrap();
         wgsl.push_str(&self.body);
-        // Write the final ret value to the check buffer, scaled by the cycle's zerofier_inv.
-        writeln!(wgsl, "  write_check(cycle, mix_tot[{ret}]);").unwrap();
+        writeln!(wgsl, "  write_check(cycle, mix_tot[{ret_slot}]);").unwrap();
         wgsl.push_str("}\n");
         self.body.clear();
         StagedKernel {
             id: name.to_string(),
             field_mode: self.field_mode,
-            fp_slots: fp_expected,
-            mix_slots: mix_expected,
+            fp_slots,
+            mix_slots,
             wgsl_source: wgsl,
         }
     }
@@ -446,19 +706,22 @@ pub fn staged_kernel_from_def_with_mode(
     field_mode: FieldMode,
 ) -> Result<StagedKernel, CodegenError> {
     let (fp_expected, mix_expected) = def_var_counts(def);
-    let mut emitter = WgslEmitter::new(def, taps, field_mode);
+    let mut emitter = WgslEmitter::new(def, taps, field_mode)?;
     for (idx, op) in def.block.iter().enumerate() {
         emitter.emit(idx, op)?;
     }
     debug_assert_eq!(
-        emitter.fp_idx, fp_expected,
-        "emitted fp slot count must equal PolyExtStepDef::fp_expected()"
+        emitter.fp_var_count, fp_expected,
+        "emitted fp var count must equal PolyExtStepDef::fp_expected()"
     );
     debug_assert_eq!(
-        emitter.mix_idx, mix_expected,
-        "emitted mix slot count must equal PolyExtStepDef::mix_expected()"
+        emitter.mix_var_count, mix_expected,
+        "emitted mix var count must equal PolyExtStepDef::mix_expected()"
     );
-    Ok(emitter.finalize(name, fp_expected, mix_expected, def.ret))
+    let ret_slot = emitter
+        .mix_slot_for(def.ret)
+        .expect("ret mix var was marked usize::MAX last-use so its slot is still live");
+    Ok(emitter.finalize(name, ret_slot))
 }
 
 /// Convenience: pick `FieldMode::Base` when possible, else `FieldMode::Ext`.
@@ -635,20 +898,28 @@ mod tests {
             staged_kernel_from_def_with_mode("full_ext", &FULL_DEF, TEST_TAPS, FieldMode::Ext)
                 .unwrap();
         assert_eq!(kernel.field_mode, FieldMode::Ext);
-        assert!(kernel.wgsl_source.contains("var fp: array<vec4<u32>, 7>"));
+        // With slot allocation, FULL_DEF's 7 fp vars reuse 5 physical slots:
+        // var 0 stays at slot 0 (last use is AndCond at op 9 — kept alive);
+        // var 4 (Add) gets slot 4; var 5 (Sub) reuses slot 2 (vacated by
+        // var 2 after Add); var 6 (Mul) reuses slot 1 (vacated by var 1
+        // after Sub). Max slot = 5.
+        assert!(kernel.wgsl_source.contains("var fp: array<vec4<u32>, 5>"));
+        // var 1 ConstExt assigned to slot 1.
         assert!(
             kernel
                 .wgsl_source
                 .contains("fp[1] = vec4<u32>(1u, 2u, 3u, 4u);")
         );
+        // var 4 Add(0, 2) -> fp[4] = ext_add(fp[0], fp[2]).
         assert!(kernel.wgsl_source.contains("fp[4] = ext_add(fp[0], fp[2]);"));
-        assert!(kernel.wgsl_source.contains("fp[5] = ext_sub(fp[4], fp[1]);"));
-        assert!(kernel.wgsl_source.contains("fp[6] = ext_mul(fp[5], fp[3]);"));
+        // var 5 Sub(4, 1) reuses slot 2 (var 2's slot was freed after Add).
+        assert!(kernel.wgsl_source.contains("fp[2] = ext_sub(fp[4], fp[1]);"));
+        // var 6 Mul(5, 3) reuses slot 1 (var 1's slot was freed after Sub).
+        assert!(kernel.wgsl_source.contains("fp[1] = ext_mul(fp[2], fp[3]);"));
+        // AndEqz combines mix_mul[chain_slot=0] with fp[inner_slot=1] (var 6 lives in slot 1).
         assert!(
-            kernel
-                .wgsl_source
-                .contains("ext_mul(mix_mul[0], fp[6])"),
-            "AndEqz under Ext mode must use ext_mul (vec4 * vec4)"
+            kernel.wgsl_source.contains("ext_mul(mix_mul[0], fp[1])"),
+            "AndEqz under Ext mode must use ext_mul over fp[6]'s reused slot 1"
         );
     }
 
@@ -753,17 +1024,26 @@ mod tests {
     #[test]
     fn staged_kernel_emits_one_line_per_step_with_op_comment() {
         let kernel = staged_kernel_from_def("tiny", &TINY_DEF, &[]).unwrap();
+        // iter 6: emit comments include both poly_ext var index and the
+        // physical slot the allocator chose. Match the simpler op-name
+        // anchor that's stable across slot-allocation outcomes.
         for (idx, op) in TINY_DEF.block.iter().enumerate() {
-            let op_label = match op {
-                PolyExtStep::Const(v) => format!("Const({v})"),
-                PolyExtStep::Add(x, y) => format!("Add(fp[{x}], fp[{y}])"),
-                PolyExtStep::True => "True".to_string(),
-                PolyExtStep::AndEqz(c, i) => format!("AndEqz(chain=mix[{c}], inner=fp[{i}])"),
+            let op_anchor = match op {
+                PolyExtStep::Const(v) => format!("= Const({v})"),
+                PolyExtStep::Add(_, _) => "= Add(fp_var".to_string(),
+                PolyExtStep::True => "= True (mix_pow".to_string(),
+                PolyExtStep::AndEqz(_, _) => "= AndEqz(chain=mix_var".to_string(),
                 _ => unreachable!(),
             };
             let marker = format!("[{idx}]");
-            assert!(kernel.wgsl_source.contains(&marker));
-            assert!(kernel.wgsl_source.contains(&op_label));
+            assert!(
+                kernel.wgsl_source.contains(&marker),
+                "step {idx} ({op:?}) missing op-idx marker '{marker}'"
+            );
+            assert!(
+                kernel.wgsl_source.contains(&op_anchor),
+                "step {idx} ({op:?}) missing op-name anchor '{op_anchor}'"
+            );
         }
     }
 
@@ -870,7 +1150,8 @@ mod tests {
         let full = staged_full_kernel_wgsl("tiny", &TINY_DEF, &[], FieldMode::Base)
             .expect("Base ok for TINY_DEF (no Get ops)");
         let prelude_anchor = "fn write_check(cycle: u32, val: vec4<u32>)";
-        let body_anchor = "@compute @workgroup_size(64)";
+        // iter 6: kernel uses `@workgroup_size(1)` to bound private memory.
+        let body_anchor = "@compute @workgroup_size(1)";
         let prelude_pos = full.find(prelude_anchor).expect("prelude present");
         let body_pos = full.find(body_anchor).expect("emitter body present");
         assert!(prelude_pos < body_pos, "prelude must precede emitter body");
@@ -888,9 +1169,14 @@ mod tests {
         let full = staged_full_kernel_wgsl("full_ext", &FULL_DEF, TEST_TAPS, FieldMode::Ext)
             .expect("Ext mode accepts ConstExt");
         assert!(full.contains("fn ext_mul(lhs: vec4<u32>, rhs: vec4<u32>)"));
-        assert!(full.contains("fp[6] = ext_mul(fp[5], fp[3]);"));
-        assert!(full.contains("@compute @workgroup_size(64)"));
-        assert!(full.contains("write_check(cycle, mix_tot[2]);"));
+        // Mul(5, 3) under slot reuse: f5 lives in slot 2, f3 in slot 3, f6 in slot 1.
+        assert!(full.contains("fp[1] = ext_mul(fp[2], fp[3]);"));
+        // iter 6: @workgroup_size(1) for private-memory bounding.
+        assert!(full.contains("@compute @workgroup_size(1)"));
+        // AndCond's `ret` mix slot: in FULL_DEF, m2's slot is reused as 0
+        // (m0 was freed before AndCond runs). The write_check uses the
+        // ret mix slot (here 0), not the ret var index (2).
+        assert!(full.contains("write_check(cycle, mix_tot[0]);"));
         // Get(5) -> TEST_TAPS[5] = g2, offset 5, back 0 — should reference read_g2_ext.
         assert!(full.contains("read_g2_ext(5u, 0u, cycle)"));
     }

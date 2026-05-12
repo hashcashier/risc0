@@ -44,7 +44,8 @@ use crate::core::{
 use crate::{
     adapter::{PolyExtStep, PolyExtStepDef},
     hal::webgpu_codegen::{
-        staged_full_kernel_wgsl, CodegenError, EmitterTap, FieldMode,
+        eval_check_fp_slot, eval_check_last_uses, eval_check_mix_slot, eval_check_note_last,
+        staged_full_kernel_wgsl, CodegenError, EmitterTap, EvalCheckSlotAllocator, FieldMode,
     },
     taps::TapSet,
     INV_RATE,
@@ -498,105 +499,11 @@ fn eval_check_ext_const(words: [u32; 4]) -> String {
     )
 }
 
-#[derive(Default)]
-struct EvalCheckSlotAllocator {
-    free: Vec<usize>,
-    next: usize,
-    max: usize,
-}
-
-impl EvalCheckSlotAllocator {
-    fn alloc(&mut self) -> usize {
-        let slot = self.free.pop().unwrap_or_else(|| {
-            let slot = self.next;
-            self.next += 1;
-            self.max = self.max.max(self.next);
-            slot
-        });
-        self.max = self.max.max(slot + 1);
-        slot
-    }
-
-    fn free(&mut self, slot: usize) {
-        self.free.push(slot);
-    }
-}
-
-fn eval_check_note_last(last_uses: &mut Vec<Option<usize>>, var: usize, op_idx: usize) {
-    if var >= last_uses.len() {
-        last_uses.resize(var + 1, None);
-    }
-    last_uses[var] = Some(op_idx);
-}
-
-fn eval_check_last_uses(
-    def: &PolyExtStepDef,
-) -> Result<(Vec<Option<usize>>, Vec<Option<usize>>, usize, usize)> {
-    let mut last_fp = Vec::new();
-    let mut last_mix = Vec::new();
-    let mut fp_count = 0usize;
-    let mut mix_count = 0usize;
-
-    for (op_idx, op) in def.block.iter().enumerate() {
-        match op {
-            PolyExtStep::Const(_)
-            | PolyExtStep::ConstExt(_, _, _, _)
-            | PolyExtStep::Get(_)
-            | PolyExtStep::GetGlobal(_, _) => {
-                fp_count += 1;
-                last_fp.resize(last_fp.len().max(fp_count), None);
-            }
-            PolyExtStep::Add(lhs, rhs)
-            | PolyExtStep::Sub(lhs, rhs)
-            | PolyExtStep::Mul(lhs, rhs) => {
-                eval_check_note_last(&mut last_fp, *lhs, op_idx);
-                eval_check_note_last(&mut last_fp, *rhs, op_idx);
-                fp_count += 1;
-                last_fp.resize(last_fp.len().max(fp_count), None);
-            }
-            PolyExtStep::True => {
-                mix_count += 1;
-                last_mix.resize(last_mix.len().max(mix_count), None);
-            }
-            PolyExtStep::AndEqz(chain, inner) => {
-                eval_check_note_last(&mut last_mix, *chain, op_idx);
-                eval_check_note_last(&mut last_fp, *inner, op_idx);
-                mix_count += 1;
-                last_mix.resize(last_mix.len().max(mix_count), None);
-            }
-            PolyExtStep::AndCond(chain, cond, inner) => {
-                eval_check_note_last(&mut last_mix, *chain, op_idx);
-                eval_check_note_last(&mut last_fp, *cond, op_idx);
-                eval_check_note_last(&mut last_mix, *inner, op_idx);
-                mix_count += 1;
-                last_mix.resize(last_mix.len().max(mix_count), None);
-            }
-        }
-    }
-
-    ensure!(
-        def.ret < mix_count,
-        "poly_ext return mix index {} exceeds generated mix count {}",
-        def.ret,
-        mix_count
-    );
-    last_mix[def.ret] = Some(usize::MAX);
-    Ok((last_fp, last_mix, fp_count, mix_count))
-}
-
-fn eval_check_fp_slot(slots: &[Option<usize>], var: usize) -> Result<usize> {
-    slots
-        .get(var)
-        .and_then(|slot| *slot)
-        .ok_or_else(|| anyhow!("poly_ext fp var {var} is not live"))
-}
-
-fn eval_check_mix_slot(slots: &[Option<usize>], var: usize) -> Result<usize> {
-    slots
-        .get(var)
-        .and_then(|slot| *slot)
-        .ok_or_else(|| anyhow!("poly_ext mix var {var} is not live"))
-}
+// EvalCheckSlotAllocator, eval_check_last_uses, eval_check_fp_slot, and
+// eval_check_mix_slot moved to `risc0/zkp/src/hal/webgpu_codegen.rs` so
+// the staged-WGSL emitter (which is built on all targets when the
+// `webgpu` feature is on) can share the same slot-allocation discipline
+// as the runtime interpreter here. See iter 6 commit.
 
 fn eval_check_interpreter_instructions_with_limit(
     taps: &TapSet<'_>,
@@ -869,19 +776,19 @@ fn eval_check_interpreter_instructions_with_limit(
 
     let ret_slot = eval_check_mix_slot(&mix_slots, def.ret)?;
     ensure!(
-        fp_alloc.max <= max_fp_slots,
+        fp_alloc.max_used() <= max_fp_slots,
         "WebGPU interpreted eval_check needs {} FP slots, max is {}",
-        fp_alloc.max,
+        fp_alloc.max_used(),
         max_fp_slots
     );
     ensure!(
-        mix_alloc.max <= WEBGPU_EVAL_CHECK_MAX_MIX_SLOTS,
+        mix_alloc.max_used() <= WEBGPU_EVAL_CHECK_MAX_MIX_SLOTS,
         "WebGPU interpreted eval_check needs {} mix slots, max is {}",
-        mix_alloc.max,
+        mix_alloc.max_used(),
         WEBGPU_EVAL_CHECK_MAX_MIX_SLOTS
     );
 
-    Ok((instructions, fp_alloc.max, mix_alloc.max, ret_slot))
+    Ok((instructions, fp_alloc.max_used(), mix_alloc.max_used(), ret_slot))
 }
 
 fn eval_check_interpreter_instructions(
@@ -2104,21 +2011,21 @@ fn build_eval_check_wgsl(taps: &TapSet<'_>, def: &PolyExtStepDef) -> Result<Stri
 
     let ret_slot = eval_check_mix_slot(&mix_slots, def.ret)?;
     ensure!(
-        fp_alloc.max <= WEBGPU_EVAL_CHECK_MAX_FP_SLOTS,
+        fp_alloc.max_used() <= WEBGPU_EVAL_CHECK_MAX_FP_SLOTS,
         "WebGPU eval_check needs {} FP slots, max is {}",
-        fp_alloc.max,
+        fp_alloc.max_used(),
         WEBGPU_EVAL_CHECK_MAX_FP_SLOTS
     );
     ensure!(
-        mix_alloc.max <= WEBGPU_EVAL_CHECK_MAX_MIX_SLOTS,
+        mix_alloc.max_used() <= WEBGPU_EVAL_CHECK_MAX_MIX_SLOTS,
         "WebGPU eval_check needs {} mix slots, max is {}",
-        mix_alloc.max,
+        mix_alloc.max_used(),
         WEBGPU_EVAL_CHECK_MAX_MIX_SLOTS
     );
 
     let mut wgsl = String::from(EVAL_CHECK_WGSL_PREFIX);
-    let fp_slots = fp_alloc.max.max(1);
-    let mix_slots = mix_alloc.max.max(1);
+    let fp_slots = fp_alloc.max_used().max(1);
+    let mix_slots = mix_alloc.max_used().max(1);
     for slot in 0..fp_slots {
         let _ = writeln!(wgsl, "    var f{slot}: vec4<u32>;");
     }
@@ -2323,14 +2230,14 @@ fn build_eval_check_split_wgsl(
     }
 
     ensure!(
-        fp_alloc.max <= WEBGPU_EVAL_CHECK_MAX_FP_SLOTS,
+        fp_alloc.max_used() <= WEBGPU_EVAL_CHECK_MAX_FP_SLOTS,
         "WebGPU split eval_check needs {} FP slots, max is {}",
-        fp_alloc.max,
+        fp_alloc.max_used(),
         WEBGPU_EVAL_CHECK_MAX_FP_SLOTS
     );
 
     let mut wgsl = String::from(EVAL_CHECK_WGSL_PREFIX);
-    let fp_slots = fp_alloc.max.max(1);
+    let fp_slots = fp_alloc.max_used().max(1);
     for slot in 0..fp_slots {
         let _ = writeln!(wgsl, "    var f{slot}: vec4<u32>;");
     }
