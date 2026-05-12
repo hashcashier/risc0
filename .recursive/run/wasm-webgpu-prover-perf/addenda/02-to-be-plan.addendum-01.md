@@ -1,6 +1,8 @@
 Run: `/.recursive/run/wasm-webgpu-prover-perf/`
 Phase: `02 TO-BE plan — Addendum 01`
-Status: `DRAFT`
+Status: `LOCKED`
+LockedAt: `2026-05-12T06:43:01Z`
+LockHash: `406d4123d961bded1438b939936c38790be868abf712f624ff4d2df2e15ed5d6`
 Workflow version: `recursive-mode-audit-v2`
 Amends:
 - `/.recursive/run/wasm-webgpu-prover-perf/02-to-be-plan.md` (LOCKED, hash `25aced2df2cb0420801faa3e0e6b0666aeedf1f5cd09803df25180d77a146a92`)
@@ -12,6 +14,17 @@ Inputs:
 Outputs:
 - `/.recursive/run/wasm-webgpu-prover-perf/addenda/02-to-be-plan.addendum-01.md`
 Scope note: Codifies the **Correctness-First Discipline**. Any correctness regression detected during SP1–SP11 (e.g., the xgboost `verify lift` failure observed 2026-05-12) immediately halts all performance work on this run until the regression is fixed. This addendum amends every SP's "Implementation checklist" with a regression-triage gate and adds a new sub-phase `SP-CR` (Correctness Regression triage) that takes priority over every other SP whenever invoked.
+
+## TODO
+
+- [x] Define the Correctness Regression criteria (1)–(6).
+- [x] Define the SP-CR sub-phase scope, checklist, tests, QA surface, idempotence guidance.
+- [x] Amend every SP1–SP11 Implementation checklist with the regression-gate item.
+- [x] Mark xgboost as `blocked` pending SP-CR.
+- [x] Block SP10 on xgboost SP-CR completion.
+- [x] Document that this addendum exists outside the locked Phase 2 artifact (per recursive-mode addendum convention).
+- [x] Update `.recursive/STATE.md`, `.recursive/DECISIONS.md`, `docs/wasm-webgpu-prover.md`, `docs/wasm-webgpu-validation.md`, `docs/wasm-webgpu-prover-learnings.md` to surface the rule.
+- [x] Coverage Gate / Approval Gate.
 
 ## Trigger event
 
