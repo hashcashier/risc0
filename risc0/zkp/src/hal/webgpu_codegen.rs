@@ -212,11 +212,63 @@ pub struct StagedKernel {
     pub fp_slots: usize,
     /// Number of MixState locals (`mix_tot` + `mix_mul`) the body uses.
     pub mix_slots: usize,
+    /// SP3 iter 7m: WGSL `@compute @workgroup_size(N)` chosen by the
+    /// emitter to maximize GPU SIMD utilization while keeping
+    /// per-workgroup private memory below
+    /// `WEBGPU_COMPUTE_WORKGROUP_STORAGE_BUDGET`. The dispatch wiring
+    /// reads this to compute `dispatch_workgroups(domain / workgroup_size,
+    /// 1, 1)`-shaped launches.
+    pub workgroup_size: u32,
     /// The WGSL source code for this kernel's *body*. The runtime prelude
     /// (bindings, params, arithmetic helpers, `read_tap` / `read_global` /
     /// `load_mix_pow` / `write_check`) is provided by `webgpu.rs` and
     /// concatenated by the dispatch wiring (SP3 follow-on).
     pub wgsl_source: String,
+}
+
+/// SP3 iter 7m: budget (in bytes) we assume for per-workgroup private
+/// memory when picking `workgroup_size`. The WebGPU adapter exposes
+/// `max_compute_workgroup_storage_size` at runtime (typically 48 KiB
+/// on production GPUs and on our 5090 — see the
+/// `browser-prove:webgpu-limits` log). The codegen runs at host-side
+/// build time without an adapter handle, so we use this constant as a
+/// safe lower bound that matches the spec-required minimum.
+pub const WEBGPU_COMPUTE_WORKGROUP_STORAGE_BUDGET: u32 = 49152;
+
+/// SP3 iter 7m: cap on `workgroup_size` even when private memory
+/// allows more. 64 threads/workgroup is the typical sweet spot for
+/// WGSL compute on desktop GPUs — covers Nvidia's 32-wide warp and
+/// AMD's 64-wide wavefront, and avoids over-large workgroups that
+/// can stall on register pressure.
+pub const WEBGPU_COMPUTE_WORKGROUP_SIZE_CAP: u32 = 64;
+
+/// SP3 iter 7m: pick a `workgroup_size` that lets each stage's
+/// per-thread `fp` / `mix_tot` / `mix_mul` private arrays fit inside
+/// the adapter's per-workgroup storage budget. Returned value is a
+/// power of two in `[1, WEBGPU_COMPUTE_WORKGROUP_SIZE_CAP]`.
+fn choose_workgroup_size(
+    field_mode: FieldMode,
+    fp_slots: usize,
+    mix_slots: usize,
+) -> u32 {
+    let fp_bytes_per_thread = match field_mode {
+        FieldMode::Base => fp_slots * 4,
+        FieldMode::Ext => fp_slots * 16,
+    };
+    // `mix_tot` and `mix_mul` are each `array<vec4<u32>, mix_slots>`,
+    // 16 bytes per slot, two arrays per thread.
+    let mix_bytes_per_thread = mix_slots * 32;
+    let per_thread = (fp_bytes_per_thread + mix_bytes_per_thread).max(1) as u32;
+    let max_by_budget = (WEBGPU_COMPUTE_WORKGROUP_STORAGE_BUDGET / per_thread)
+        .max(1)
+        .min(WEBGPU_COMPUTE_WORKGROUP_SIZE_CAP);
+    // Floor to power of two so dispatch math stays simple
+    // (`tile_size % workgroup_size == 0` for typical tile sizes).
+    let mut w: u32 = 1;
+    while w * 2 <= max_by_budget {
+        w *= 2;
+    }
+    w
 }
 
 /// Errors that prevent generating a staged kernel for a DEF under a given
@@ -635,6 +687,7 @@ impl<'a> WgslEmitter<'a> {
     /// Materialize the kernel. `ret_slot` is the slot the ret mix var
     /// was assigned (recorded by `alloc_mix` and persisted via
     /// `last_mix[ret] = usize::MAX` so it never frees).
+    #[allow(dead_code)]
     fn finalize(mut self, name: &str, ret_slot: usize) -> StagedKernel {
         let fp_slots = self.fp_alloc.max_used().max(1);
         let mix_slots = self.mix_alloc.max_used().max(1);
@@ -649,15 +702,14 @@ impl<'a> WgslEmitter<'a> {
         wgsl.push_str(
             "// runtime prelude (bindings, params, ext_*/add/sub/mul helpers,\n// read_g{0,1,2}_*, read_global_*, load_mix_pow, write_check) is the\n// `STAGED_EVAL_CHECK_PRELUDE_WGSL` constant; this body is appended after it.\n",
         );
-        // SP3 iter 6: workgroup_size = 1. With slot allocation, each
-        // thread's private state is small (fp_slots * 4 B + 2 * mix_slots
-        // * 16 B), but the per-PolyExtStep straight-line code is long
-        // (~20k ops for rv32im). Running each cycle on its own workgroup
-        // lets the GPU schedule thousands of independent thread blocks
-        // without the per-workgroup register-file pressure that a
-        // larger workgroup size would impose. Matches the runtime
-        // interpreter's `private_parallel = true` discipline.
-        writeln!(wgsl, "@compute @workgroup_size(1)").unwrap();
+        // SP3 iter 7m: workgroup_size sized to fit `fp` + `mix_tot` +
+        // `mix_mul` private arrays inside the typical 48 KiB per-
+        // workgroup storage budget. Iter 6 used a hardcoded `1`; on
+        // poseidon2_basic that left the GPU dramatically underutilized
+        // and the staged kernel ran ~10x slower than the interpreter.
+        let workgroup_size =
+            choose_workgroup_size(self.field_mode, fp_slots, mix_slots);
+        writeln!(wgsl, "@compute @workgroup_size({workgroup_size})").unwrap();
         wgsl.push_str("fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
         wgsl.push_str("  let cycle = gid.x;\n");
         wgsl.push_str("  if (cycle >= params.domain) { return; }\n");
@@ -678,6 +730,7 @@ impl<'a> WgslEmitter<'a> {
             field_mode: self.field_mode,
             fp_slots,
             mix_slots,
+            workgroup_size,
             wgsl_source: wgsl,
         }
     }
@@ -974,17 +1027,24 @@ fn emit_chunk_wgsl(
     wgsl.push_str(
         "// runtime prelude (bindings, params, ext_*/add/sub/mul helpers,\n// read_g{0,1,2}_*, read_global_*, load_mix_pow, write_check,\n// read/write_*_scratch) is the `STAGED_EVAL_CHECK_PRELUDE_WGSL` constant.\n",
     );
-    writeln!(wgsl, "@compute @workgroup_size(1)").unwrap();
+    // SP3 iter 7m: pick workgroup_size to fit `fp` + `mix_tot` +
+    // `mix_mul` private arrays in the per-workgroup storage budget
+    // (~48 KiB). Iter 6/7's hardcoded `1` left the GPU heavily
+    // underutilized; sizing per the actual private memory footprint
+    // lets each workgroup pack 16-64 threads. Each chunk uses
+    // `plan.fp_slots` / `plan.mix_slots` (the cross-chunk high-water)
+    // so all stages share a stable size.
+    let workgroup_size = choose_workgroup_size(field_mode, fp_slots, mix_slots);
+    writeln!(wgsl, "@compute @workgroup_size({workgroup_size})").unwrap();
     wgsl.push_str("fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
     // SP3 iter 7g: CUDA-shape dispatch. The host calls
-    // `dispatch_workgroups(tile_size, num_tiles, 1)` ONCE per stage —
-    // closer to CUDA's single-grid-launch shape. `tile_local = gid.x`
-    // is the thread's offset within a tile; `tile_idx = gid.y` is
-    // which tile this thread belongs to; the global cycle is `tile_idx
-    // * tile_size + tile_local`. Scratch I/O is keyed by `tile_local`
-    // so the scratch buffer remains `tile_size`-sized regardless of
-    // domain. Replaces iter 7d/7e/7f's per-tile setBindGroup +
-    // dynamic-offset loop.
+    // `dispatch_workgroups(tile_size / workgroup_size, num_tiles, 1)` ONCE
+    // per stage — closer to CUDA's single-grid-launch shape. `tile_local
+    // = gid.x` is the thread's offset within a tile (global x, post-
+    // workgroup); `tile_idx = gid.y` is which tile this thread belongs
+    // to; the global cycle is `tile_idx * tile_size + tile_local`.
+    // Scratch I/O is keyed by `tile_local` so the scratch buffer
+    // remains `tile_size`-sized regardless of domain.
     wgsl.push_str("  let tile_local = gid.x;\n");
     wgsl.push_str("  let tile_idx = gid.y;\n");
     wgsl.push_str("  let cycle = tile_idx * staged_scratch_params.tile_size + tile_local;\n");
@@ -1006,6 +1066,7 @@ fn emit_chunk_wgsl(
         field_mode,
         fp_slots,
         mix_slots,
+        workgroup_size,
         wgsl_source: wgsl,
     })
 }
@@ -1763,8 +1824,9 @@ mod tests {
         let full = staged_full_kernel_wgsl("tiny", &TINY_DEF, &[], FieldMode::Base)
             .expect("Base ok for TINY_DEF (no Get ops)");
         let prelude_anchor = "fn write_check(cycle: u32, val: vec4<u32>)";
-        // iter 6: kernel uses `@workgroup_size(1)` to bound private memory.
-        let body_anchor = "@compute @workgroup_size(1)";
+        // iter 7m: kernel uses `@compute @workgroup_size(N)` where N is
+        // picked by `choose_workgroup_size` to fit private memory.
+        let body_anchor = "@compute @workgroup_size";
         let prelude_pos = full.find(prelude_anchor).expect("prelude present");
         let body_pos = full.find(body_anchor).expect("emitter body present");
         assert!(prelude_pos < body_pos, "prelude must precede emitter body");
@@ -1784,8 +1846,11 @@ mod tests {
         assert!(full.contains("fn ext_mul(lhs: vec4<u32>, rhs: vec4<u32>)"));
         // Mul(5, 3) under slot reuse: f5 lives in slot 2, f3 in slot 3, f6 in slot 1.
         assert!(full.contains("fp[1] = ext_mul(fp[2], fp[3]);"));
-        // iter 6: @workgroup_size(1) for private-memory bounding.
-        assert!(full.contains("@compute @workgroup_size(1)"));
+        // iter 7m: workgroup_size is picked by choose_workgroup_size to
+        // fit fp_slots+mix_slots in the per-workgroup storage budget.
+        // For FULL_DEF in Ext mode the chosen size is non-zero; we
+        // just assert the @workgroup_size attribute is present.
+        assert!(full.contains("@compute @workgroup_size"));
         // AndCond's `ret` mix slot: in FULL_DEF, m2's slot is reused as 0
         // (m0 was freed before AndCond runs). The write_check uses the
         // ret mix slot (here 0), not the ret var index (2).

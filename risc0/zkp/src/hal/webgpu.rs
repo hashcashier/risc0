@@ -4516,6 +4516,14 @@ struct EvalCheckInterpreterPipeline {
 struct StagedEvalCheckPipeline {
     layout: web_sys::GpuBindGroupLayout,
     stages: Vec<WebGpuKernel>,
+    /// SP3 iter 7m: `@compute @workgroup_size(N)` baked into every
+    /// stage's WGSL by `choose_workgroup_size`. Dispatch shape is
+    /// `(tile_size / workgroup_size, num_tiles, 1)` so the total
+    /// thread count remains `tile_size * num_tiles` (= domain rounded
+    /// up to `tile_size`). All stages of a pipeline share the same
+    /// workgroup_size because the codegen picks it from `plan.fp_slots`
+    /// / `plan.mix_slots`, which are cross-chunk high-water marks.
+    workgroup_size: u32,
     base_field_fp: bool,
     /// u32 words per tile-local cycle in `fp_scratch` (max-live × 1 for
     /// Base or × 4 for Ext). 0 when `stages.len() == 1` (single-kernel,
@@ -5308,9 +5316,19 @@ impl WebGpuHal {
             96,
             WEBGPU_BUFFER_USAGE_UNIFORM | WEBGPU_BUFFER_USAGE_COPY_DST,
         )?;
+        // SP3 iter 7m: workgroup_size is shared across stages (codegen
+        // picks the same value from `plan.fp_slots`/`plan.mix_slots`).
+        // If multi.stages is empty (defensive — should never happen),
+        // fall back to 1.
+        let workgroup_size = multi
+            .stages
+            .first()
+            .map(|s| s.workgroup_size)
+            .unwrap_or(1);
         let pipeline = StagedEvalCheckPipeline {
             layout,
             stages,
+            workgroup_size,
             base_field_fp,
             fp_scratch_stride_u32: multi.fp_scratch_stride_u32,
             mix_scratch_stride_u32: multi.mix_scratch_stride_u32,
@@ -5479,13 +5497,21 @@ impl WebGpuHal {
         // implicitly synchronize — this is the closest WebGPU analog.
         // Single submit is preserved (one encoder.finish()), so queue
         // pressure stays at iter 7e's level.
+        // SP3 iter 7m: dispatch `(tile_size / workgroup_size, num_tiles,
+        // 1)` workgroups per stage. Each workgroup runs `workgroup_size`
+        // threads. Total threads = `tile_size * num_tiles` >= domain.
+        // `tile_size` is 4096 and `workgroup_size` is a power of 2 in
+        // [1, 64], so the division is exact.
+        let workgroup_count_x = tile_size / pipeline.workgroup_size;
         let encoder = self.device.create_command_encoder();
         for stage in &pipeline.stages {
             let pass = encoder.begin_compute_pass();
             pass.set_pipeline(&stage.pipeline);
             pass.set_bind_group(0, Some(&bind_group));
             pass.dispatch_workgroups_with_workgroup_count_y_and_workgroup_count_z(
-                tile_size, num_tiles, 1,
+                workgroup_count_x,
+                num_tiles,
+                1,
             );
             pass.end();
         }
