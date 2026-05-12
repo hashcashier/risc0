@@ -5203,6 +5203,20 @@ impl WebGpuHal {
         .map_err(|err: CodegenError| {
             anyhow!("staged eval_check codegen failed: {:?}", err)
         })?;
+        // SP3 iter 7n: log the planner's output so we can see what
+        // workgroup_size + per-chunk slot footprint the codegen
+        // produced. Helps diagnose why iter 7m didn't move the
+        // staged-path runtime (storage-bandwidth-bound vs compute-bound).
+        let first_stage_fp = multi.stages.first().map(|s| s.fp_slots).unwrap_or(0);
+        let first_stage_mix = multi.stages.first().map(|s| s.mix_slots).unwrap_or(0);
+        let first_stage_wg = multi.stages.first().map(|s| s.workgroup_size).unwrap_or(0);
+        log_webgpu_stage(&format!(
+            "browser-prove:staged-plan field_mode={field_mode:?} stages={} fp_slots={first_stage_fp} mix_slots={first_stage_mix} workgroup_size={first_stage_wg} fp_scratch_stride_u32={} mix_scratch_stride_u32={} def_block_len={}",
+            multi.stages.len(),
+            multi.fp_scratch_stride_u32,
+            multi.mix_scratch_stride_u32,
+            def.block.len(),
+        ));
         let layout = self.create_bind_group_layout(
             "webgpu_staged_eval_check_layout",
             &[
