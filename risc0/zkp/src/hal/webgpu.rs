@@ -67,20 +67,6 @@ const SP3_STAGED_TARGET_CHUNK_OPS: usize = 5000;
 /// requested and independent of how many cycles the prove has overall.
 const SP3_STAGED_TILE_SIZE: u32 = 4096;
 
-/// SP3 iter 7e: byte stride between consecutive `StagedScratchParams`
-/// entries in the dynamic-offset UBO. The WebGPU spec requires
-/// `minUniformBufferOffsetAlignment >= 256`, so we use 256 directly.
-/// Each entry holds a 16-byte `StagedScratchParams` struct; the
-/// remaining 240 bytes are unused padding to the next alignment.
-const SP3_STAGED_SCRATCH_PARAMS_ENTRY_BYTES: usize = 256;
-
-/// SP3 iter 7e: ceiling on the number of tiles a single staged dispatch
-/// can have. Bounds the pre-allocated `scratch_params` UBO size at
-/// `MAX_TILES * 256 B` (= 256 KiB at 1024). At `SP3_STAGED_TILE_SIZE
-/// = 4096` this supports `domain <= 4 * 1024 * 1024` (po2 22), well
-/// above any production fixture today.
-const SP3_STAGED_MAX_TILES: u32 = 1024;
-
 /// `GPUBufferUsage.MAP_READ`.
 pub const WEBGPU_BUFFER_USAGE_MAP_READ: u32 = 0x0001;
 /// `GPUBufferUsage.MAP_WRITE`.
@@ -4535,9 +4521,9 @@ struct StagedEvalCheckPipeline {
     /// Cached mix scratches (each `tile_size * mix_stride * 4 B`).
     mix_tot_scratch: web_sys::GpuBuffer,
     mix_mul_scratch: web_sys::GpuBuffer,
-    /// Cached `SP3_STAGED_MAX_TILES * 256 B` UBO for staged_scratch_params.
-    /// Each `eval_check` call rewrites the prefix matching its tile
-    /// count, then the compute pass walks tiles via dynamic offsets.
+    /// SP3 iter 7g: cached 16-byte UBO holding pipeline-constant
+    /// `{fp_stride, mix_stride, num_stages, tile_size}`. Written once at
+    /// pipeline create; every `eval_check` call binds it as-is.
     scratch_params_buf: web_sys::GpuBuffer,
     /// SP3 iter 7f: cached storage buffer for `mix_pows` (sized to the
     /// DEF's `mix_expected * 4 u32`). Each `eval_check` call rewrites
@@ -5215,10 +5201,10 @@ impl WebGpuHal {
                 // SP3 iter 7c: new scratch bindings. Always present in the
                 // layout — single-stage emissions bind a dummy 4-byte fp
                 // / mix scratch buffer to satisfy the validator.
-                // SP3 iter 7e: binding 9 now uses dynamic offset so we
-                // can advance `tile_base` through one cached UBO without
-                // rebinding or resubmitting between tiles.
-                WebGpuBindingLayout::uniform_dynamic(9, 16),
+                // SP3 iter 7g: binding 9 is a 16-byte UBO with
+                // pipeline-constant {fp_stride, mix_stride, num_stages,
+                // tile_size}, bound once and read by every stage.
+                WebGpuBindingLayout::uniform(9, 16),
                 WebGpuBindingLayout::storage(10, 0),
                 WebGpuBindingLayout::storage(11, 0),
                 WebGpuBindingLayout::storage(12, 0),
@@ -5267,16 +5253,35 @@ impl WebGpuHal {
             "webgpu_staged_eval_check_mix_mul_scratch",
             mix_scratch_byte_len,
         )?;
-        // SP3 iter 7e: scratch_params is sized for up to
-        // `SP3_STAGED_MAX_TILES` 256-byte-aligned entries. Each
-        // `eval_check` call pre-fills only the tiles its domain needs
-        // (`ceil(domain / SP3_STAGED_TILE_SIZE)`), then walks them via
-        // dynamic offsets on binding 9 inside one compute pass.
+        // SP3 iter 7g: scratch_params is a single 16-byte UBO with
+        // {fp_stride, mix_stride, num_stages, tile_size}. All fields
+        // are pipeline-constant — written ONCE at pipeline create, then
+        // every eval_check call reuses it. Threads compute their cycle
+        // via `gid.y * tile_size + gid.x`, so no per-tile UBO offset is
+        // needed. Replaces iter 7e/7f's `MAX_TILES * 256 B` dynamic-
+        // offset array with a single 16-byte entry.
         let scratch_params_buf = self.create_buffer(
             "webgpu_staged_eval_check_scratch_params",
-            (SP3_STAGED_MAX_TILES as u64)
-                * (SP3_STAGED_SCRATCH_PARAMS_ENTRY_BYTES as u64),
+            16,
             WEBGPU_BUFFER_USAGE_UNIFORM | WEBGPU_BUFFER_USAGE_COPY_DST,
+        )?;
+        let num_stages_u32 =
+            u32::try_from(multi.stages.len()).expect("staged num_stages exceeds u32");
+        let fp_stride_u32 = u32::try_from(multi.fp_scratch_stride_u32)
+            .expect("staged fp_scratch_stride exceeds u32");
+        let mix_stride_u32 = u32::try_from(multi.mix_scratch_stride_u32)
+            .expect("staged mix_scratch_stride exceeds u32");
+        let scratch_params_words: [u32; 4] = [
+            fp_stride_u32,
+            mix_stride_u32,
+            num_stages_u32,
+            SP3_STAGED_TILE_SIZE,
+        ];
+        self.write_buffer_named(
+            &scratch_params_buf,
+            "webgpu_staged_eval_check_scratch_params",
+            0,
+            bytemuck::cast_slice(&scratch_params_words),
         )?;
         // SP3 iter 7f: cache mix_pows and params buffers on the
         // pipeline. Sizes depend only on the DEF (mix_pow_words for
@@ -5410,14 +5415,17 @@ impl WebGpuHal {
             bytemuck::cast_slice(&params_words),
         )?;
 
-        // SP3 iter 7d: tiled dispatch over cached scratch buffers. All
-        // four scratch buffers (fp/mix_tot/mix_mul + scratch_params UBO)
-        // are owned by the pipeline and reused across every eval_check
-        // call that hits this DEF. The dispatch loop only rewrites
-        // scratch_params.tile_base per tile.
-        let fp_stride = pipeline.fp_scratch_stride_u32;
-        let mix_stride = pipeline.mix_scratch_stride_u32;
+        // SP3 iter 7g: CUDA-shape dispatch. Closest analog to CUDA's
+        // single `eval_check<<<grid, block>>>` launch covering the whole
+        // domain — we issue ONE `dispatch_workgroups(tile_size,
+        // num_tiles, 1)` per stage instead of iter 7e/7f's
+        // `num_tiles * num_stages` setBindGroup+dispatch loop. Threads
+        // compute `cycle = gid.y * tile_size + gid.x` inline, so no
+        // per-tile UBO offset is needed. scratch_params is a single
+        // 16-byte pipeline-constant UBO; pipeline/bind_group are bound
+        // once and reused across all stages.
         let tile_size = SP3_STAGED_TILE_SIZE.min(domain_u32);
+        let num_tiles = (domain_u32 + tile_size - 1) / tile_size;
 
         let bind_group = self.create_bind_group(
             "webgpu_staged_eval_check_bind_group",
@@ -5449,70 +5457,17 @@ impl WebGpuHal {
             ],
         )?;
 
-        let num_stages = pipeline.stages.len();
-
-        // SP3 iter 7e: pre-fill `scratch_params` with one
-        // 256-byte-aligned entry per tile. Each entry has the
-        // tile-local `tile_base`; stride and num_stages are constant
-        // across tiles. One writeBuffer up front, then the compute
-        // pass advances through entries via dynamic offsets.
-        let num_tiles =
-            ((domain_u32 + tile_size - 1) / tile_size).min(SP3_STAGED_MAX_TILES);
-        let entry_words = SP3_STAGED_SCRATCH_PARAMS_ENTRY_BYTES / mem::size_of::<u32>();
-        let mut scratch_params_data: Vec<u32> = Vec::with_capacity(num_tiles as usize * entry_words);
-        {
-            let fp_stride_u32 =
-                u32::try_from(fp_stride).expect("staged fp_stride exceeds u32");
-            let mix_stride_u32 =
-                u32::try_from(mix_stride).expect("staged mix_stride exceeds u32");
-            let num_stages_u32 =
-                u32::try_from(num_stages).expect("staged num_stages exceeds u32");
-            for tile_idx in 0..num_tiles {
-                let tile_base = tile_idx * tile_size;
-                scratch_params_data.push(fp_stride_u32);
-                scratch_params_data.push(mix_stride_u32);
-                scratch_params_data.push(num_stages_u32);
-                scratch_params_data.push(tile_base);
-                // Pad to 256-byte alignment for the next entry.
-                for _ in 4..entry_words {
-                    scratch_params_data.push(0);
-                }
-            }
-        }
-        self.write_buffer_named(
-            &pipeline.scratch_params_buf,
-            "webgpu_staged_eval_check_scratch_params",
-            0,
-            bytemuck::cast_slice(&scratch_params_data),
-        )?;
-
-        // SP3 iter 7e: one command encoder, one compute pass, one
-        // submit per eval_check call. Inside the pass, walk tiles via
-        // dynamic offsets on binding 9, setting pipeline + dispatching
-        // each stage per tile. Collapses the iter 7d
-        // `num_tiles * num_stages` queue submissions into one.
+        // Single encoder, single compute pass, single submit per call.
+        // Bind group is set once, then each stage runs one
+        // `dispatch_workgroups(tile_size, num_tiles, 1)`.
         let encoder = self.device.create_command_encoder();
         let pass = encoder.begin_compute_pass();
-        let offsets = js_sys::Uint32Array::new_with_length(1);
-        let entry_stride_u32 = SP3_STAGED_SCRATCH_PARAMS_ENTRY_BYTES as u32;
-        for tile_idx in 0..num_tiles {
-            let tile_base = tile_idx * tile_size;
-            let this_tile = tile_size.min(domain_u32 - tile_base);
-            offsets.set_index(0, tile_idx * entry_stride_u32);
-            pass.set_bind_group_with_u32_array_and_u32_and_dynamic_offsets_data_length(
-                0,
-                Some(&bind_group),
-                &offsets,
-                0,
-                1,
-            )
-            .map_err(js_error)?;
-            for stage in &pipeline.stages {
-                pass.set_pipeline(&stage.pipeline);
-                pass.dispatch_workgroups_with_workgroup_count_y_and_workgroup_count_z(
-                    this_tile, 1, 1,
-                );
-            }
+        pass.set_bind_group(0, Some(&bind_group));
+        for stage in &pipeline.stages {
+            pass.set_pipeline(&stage.pipeline);
+            pass.dispatch_workgroups_with_workgroup_count_y_and_workgroup_count_z(
+                tile_size, num_tiles, 1,
+            );
         }
         pass.end();
         self.submit(encoder.finish());

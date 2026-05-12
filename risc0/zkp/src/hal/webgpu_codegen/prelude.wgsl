@@ -269,14 +269,13 @@ struct StagedScratchParams {
     fp_stride: u32,    // u32s per tile-local cycle for fp_scratch
     mix_stride: u32,   // u32s per tile-local cycle for each of mix_tot_scratch / mix_mul_scratch
     num_stages: u32,   // 1 for single-kernel emission, N for multi-stage
-    // SP3 iter 7d: cycle offset for the current tile. Scratch buffers are
-    // sized to a fixed tile (e.g., 4096 cycles) regardless of domain; the
-    // dispatch loop iterates `ceil(domain / tile_size)` tiles per stage,
-    // bumping `tile_base` each pass. Within a tile, the kernel computes
-    // `cycle = tile_base + gid.x` for tap/global reads and `write_check`,
-    // but scratch I/O uses `tile_local = gid.x` so the scratch buffer
-    // only needs `tile_size * stride * 4 B` of GPU memory.
-    tile_base: u32,
+    // SP3 iter 7g: cycle stride per tile (CUDA-shape dispatch). Each
+    // staged eval_check call dispatches `dispatch_workgroups(tile_size,
+    // num_tiles, 1)`. Threads compute `cycle = gid.y * tile_size +
+    // gid.x` so all tiles run in one dispatch per stage — no per-tile
+    // setBindGroup. Iter 7e/7f used `tile_base` advanced via dynamic UBO
+    // offsets; iter 7g collapses that loop into `gid.y`.
+    tile_size: u32,
 };
 
 @group(0) @binding(9) var<uniform> staged_scratch_params: StagedScratchParams;

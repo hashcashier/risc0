@@ -976,14 +976,18 @@ fn emit_chunk_wgsl(
     );
     writeln!(wgsl, "@compute @workgroup_size(1)").unwrap();
     wgsl.push_str("fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
-    // SP3 iter 7d: tiled dispatch. `tile_local` is the thread's offset
-    // within the current tile (0..tile_size); `cycle = tile_base +
-    // tile_local` is the global cycle index used for tap/global reads,
-    // mix_pow lookups, and `write_check`. Scratch I/O is keyed by
-    // `tile_local` so the scratch buffer remains `tile_size`-sized
-    // regardless of the prove's full domain.
+    // SP3 iter 7g: CUDA-shape dispatch. The host calls
+    // `dispatch_workgroups(tile_size, num_tiles, 1)` ONCE per stage —
+    // closer to CUDA's single-grid-launch shape. `tile_local = gid.x`
+    // is the thread's offset within a tile; `tile_idx = gid.y` is
+    // which tile this thread belongs to; the global cycle is `tile_idx
+    // * tile_size + tile_local`. Scratch I/O is keyed by `tile_local`
+    // so the scratch buffer remains `tile_size`-sized regardless of
+    // domain. Replaces iter 7d/7e/7f's per-tile setBindGroup +
+    // dynamic-offset loop.
     wgsl.push_str("  let tile_local = gid.x;\n");
-    wgsl.push_str("  let cycle = staged_scratch_params.tile_base + tile_local;\n");
+    wgsl.push_str("  let tile_idx = gid.y;\n");
+    wgsl.push_str("  let cycle = tile_idx * staged_scratch_params.tile_size + tile_local;\n");
     wgsl.push_str("  if (cycle >= params.domain) { return; }\n");
     writeln!(
         wgsl,
