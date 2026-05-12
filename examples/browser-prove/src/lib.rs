@@ -335,7 +335,13 @@ mod tests {
             Ok(prove_info) => prove_info,
             Err(err) => {
                 log_webgpu_diagnostics(prover, name);
-                panic!("{name}: async prove failed: {err}");
+                // SP-CR diagnostic 7 2026-05-12: dump the full anyhow error
+                // chain so the inner VerificationError variant from
+                // verify_integrity is visible. Default `{err}` only shows the
+                // topmost context ("verify lift") and hides the actual
+                // verification failure.
+                console_log!("browser-prove:async-prove-error name={name} err={err:?}");
+                panic!("{name}: async prove failed: {err:?}");
             }
         };
 
@@ -347,7 +353,7 @@ mod tests {
         prove_info
             .receipt
             .verify(image_id)
-            .unwrap_or_else(|err| panic!("{name}: receipt verification failed: {err}"));
+            .unwrap_or_else(|err| panic!("{name}: receipt verification failed: {err:?}"));
         console_log!(
             "browser-prove:done {name}: segments={} user_cycles={} total_cycles={}",
             prove_info.stats.segments,
