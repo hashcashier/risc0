@@ -876,11 +876,14 @@ fn emit_chunk_wgsl(
     ret_var: usize,
 ) -> Result<StagedKernel, CodegenError> {
     emitter.body.clear();
-    // 1) Live-in scratch loads (only for chunks > 0).
+    // 1) Live-in scratch loads (only for chunks > 0). Scratch is indexed
+    // by `tile_local` (the thread's offset within the current tile),
+    // NOT the global `cycle` — so the scratch buffer can be sized to
+    // `tile_size * stride` regardless of the prove's full domain.
     if let Some(prev) = prev_boundary {
         writeln!(
             emitter.body,
-            "  // === chunk {chunk_idx} live-in: restore {} fp + {} mix from scratch ===",
+            "  // === chunk {chunk_idx} live-in: restore {} fp + {} mix from scratch (tile_local) ===",
             prev.live_fp.len(),
             prev.live_mix.len()
         )
@@ -892,14 +895,14 @@ fn emit_chunk_wgsl(
         for (live_idx, (var, slot)) in prev.live_fp.iter().enumerate() {
             writeln!(
                 emitter.body,
-                "  fp[{slot}] = {fp_helper}(cycle, {live_idx}u); // fp_var{var}",
+                "  fp[{slot}] = {fp_helper}(tile_local, {live_idx}u); // fp_var{var}",
             )
             .unwrap();
         }
         for (live_idx, (var, slot)) in prev.live_mix.iter().enumerate() {
             writeln!(
                 emitter.body,
-                "  mix_tot[{slot}] = read_mix_tot_scratch(cycle, {live_idx}u); mix_mul[{slot}] = read_mix_mul_scratch(cycle, {live_idx}u); // mix_var{var}",
+                "  mix_tot[{slot}] = read_mix_tot_scratch(tile_local, {live_idx}u); mix_mul[{slot}] = read_mix_mul_scratch(tile_local, {live_idx}u); // mix_var{var}",
             )
             .unwrap();
         }
@@ -913,7 +916,7 @@ fn emit_chunk_wgsl(
     if !is_last {
         writeln!(
             emitter.body,
-            "  // === chunk {chunk_idx} live-out: save {} fp + {} mix to scratch ===",
+            "  // === chunk {chunk_idx} live-out: save {} fp + {} mix to scratch (tile_local) ===",
             this_boundary.live_fp.len(),
             this_boundary.live_mix.len()
         )
@@ -925,14 +928,14 @@ fn emit_chunk_wgsl(
         for (live_idx, (var, slot)) in this_boundary.live_fp.iter().enumerate() {
             writeln!(
                 emitter.body,
-                "  {fp_helper}(cycle, {live_idx}u, fp[{slot}]); // fp_var{var}",
+                "  {fp_helper}(tile_local, {live_idx}u, fp[{slot}]); // fp_var{var}",
             )
             .unwrap();
         }
         for (live_idx, (var, slot)) in this_boundary.live_mix.iter().enumerate() {
             writeln!(
                 emitter.body,
-                "  write_mix_tot_scratch(cycle, {live_idx}u, mix_tot[{slot}]); write_mix_mul_scratch(cycle, {live_idx}u, mix_mul[{slot}]); // mix_var{var}",
+                "  write_mix_tot_scratch(tile_local, {live_idx}u, mix_tot[{slot}]); write_mix_mul_scratch(tile_local, {live_idx}u, mix_mul[{slot}]); // mix_var{var}",
             )
             .unwrap();
         }
@@ -973,7 +976,14 @@ fn emit_chunk_wgsl(
     );
     writeln!(wgsl, "@compute @workgroup_size(1)").unwrap();
     wgsl.push_str("fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
-    wgsl.push_str("  let cycle = gid.x;\n");
+    // SP3 iter 7d: tiled dispatch. `tile_local` is the thread's offset
+    // within the current tile (0..tile_size); `cycle = tile_base +
+    // tile_local` is the global cycle index used for tap/global reads,
+    // mix_pow lookups, and `write_check`. Scratch I/O is keyed by
+    // `tile_local` so the scratch buffer remains `tile_size`-sized
+    // regardless of the prove's full domain.
+    wgsl.push_str("  let tile_local = gid.x;\n");
+    wgsl.push_str("  let cycle = staged_scratch_params.tile_base + tile_local;\n");
     wgsl.push_str("  if (cycle >= params.domain) { return; }\n");
     writeln!(
         wgsl,
@@ -1608,24 +1618,24 @@ mod tests {
         // prelude-reference comment in every stage; the CALL doesn't.
         let s0 = &multi.stages[0].wgsl_source;
         assert!(!s0.contains("fp[0] = read_fp_scratch_scalar"));
-        assert!(s0.contains("write_fp_scratch_scalar(cycle, 0u, fp[0])"));
-        assert!(s0.contains("write_fp_scratch_scalar(cycle, 1u, fp[1])"));
+        assert!(s0.contains("write_fp_scratch_scalar(tile_local, 0u, fp[0])"));
+        assert!(s0.contains("write_fp_scratch_scalar(tile_local, 1u, fp[1])"));
         assert!(!s0.contains("write_check(cycle, mix_tot["));
 
         // Stage 1: load 2 fp, run Add + True, store 1 fp + 1 mix.
         let s1 = &multi.stages[1].wgsl_source;
-        assert!(s1.contains("fp[0] = read_fp_scratch_scalar(cycle, 0u)"));
-        assert!(s1.contains("fp[1] = read_fp_scratch_scalar(cycle, 1u)"));
+        assert!(s1.contains("fp[0] = read_fp_scratch_scalar(tile_local, 0u)"));
+        assert!(s1.contains("fp[1] = read_fp_scratch_scalar(tile_local, 1u)"));
         // After Add, fp_var 2 lives at slot 2 (slots 0/1 freed by Add).
-        assert!(s1.contains("write_fp_scratch_scalar(cycle, 0u, fp[2])"));
+        assert!(s1.contains("write_fp_scratch_scalar(tile_local, 0u, fp[2])"));
         // After True, mix_var 0 lives at slot 0.
-        assert!(s1.contains("write_mix_tot_scratch(cycle, 0u, mix_tot[0])"));
+        assert!(s1.contains("write_mix_tot_scratch(tile_local, 0u, mix_tot[0])"));
         assert!(!s1.contains("write_check(cycle, mix_tot["));
 
         // Stage 2: load 1 fp + 1 mix, run AndEqz, write_check.
         let s2 = &multi.stages[2].wgsl_source;
-        assert!(s2.contains("fp[2] = read_fp_scratch_scalar(cycle, 0u)"));
-        assert!(s2.contains("mix_tot[0] = read_mix_tot_scratch(cycle, 0u)"));
+        assert!(s2.contains("fp[2] = read_fp_scratch_scalar(tile_local, 0u)"));
+        assert!(s2.contains("mix_tot[0] = read_mix_tot_scratch(tile_local, 0u)"));
         assert!(s2.contains("write_check(cycle, mix_tot[1])"));
 
         // Strides: max_live_fp = 2 (after stage 0), max_live_mix = 1
@@ -1644,7 +1654,7 @@ mod tests {
         let early = &multi.stages[0].wgsl_source;
         // Boundary live-out for ext mode uses _ext helpers.
         assert!(
-            early.contains("write_fp_scratch_ext(cycle"),
+            early.contains("write_fp_scratch_ext(tile_local"),
             "ext mode must use write_fp_scratch_ext at chunk boundaries"
         );
         let last = &multi.stages.last().unwrap().wgsl_source;

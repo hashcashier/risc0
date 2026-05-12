@@ -1324,8 +1324,32 @@ mod tests {
     /// against a single fixture small enough to fit (e.g., a custom
     /// PolyExt program with synthetic taps, not the production
     /// recursion DEF). Until then, `#[ignore]`'d.
+    /// **iter 7d result** (`evidence/logs/sp3-iter7d-v2-cached-*`): with
+    /// the tiled dispatch + cached scratch/scratch_params buffers
+    /// (allocated once per DEF, reused across all eval_check calls), peak
+    /// GPU memory drops from ~1.68 GiB to ~27 MiB per pipeline. The first
+    /// staged dispatch fires cleanly (`eval_check_staged_submit
+    /// domain=131072 elapsed_ms=2`, 0 webgpu-uncaptured-error). The
+    /// prove pipeline progresses into `finalize_async check_group` and
+    /// then ChromeDriver dies with `signal: 9 (SIGKILL)` again —
+    /// indicating the OOM trigger is not in the staged code path's
+    /// per-call allocations (those are now cached) but in the
+    /// cumulative async GPU work across many `eval_check` calls within
+    /// `finalize_async`. Each call submits ~32 tiles × 4 stages = 128
+    /// dispatches without an intermediate queue drain; the bookkeeping
+    /// (encoder objects, queue commands, JS object retention) piles up
+    /// during the sync `dispatch_eval_check_poly_ext` path before the
+    /// async caller resumes the event loop.
+    ///
+    /// iter 7e (next): orchestrate the dispatch via the encoder
+    /// directly — open one command encoder per `eval_check` call,
+    /// `begin_compute_pass` once, dispatch all (tile × stage) pairs
+    /// inside that pass with `setBindGroup` dynamic offsets to advance
+    /// tile_base, end the pass and submit a single command buffer per
+    /// call. Should reduce per-call queue overhead from 128 submissions
+    /// to 1 while preserving the same scratch-bounding properties.
     #[wasm_bindgen_test(async)]
-    #[ignore = "SP3 iter 7d prerequisite: recursion DEF scratch + accumulated browser-test RAM exceeds CI process budget on iter 7c"]
+    #[ignore = "SP3 iter 7e prerequisite: orchestrate tile dispatches in one encoder + one submit per call; current per-tile submits exhaust CI process budget"]
     async fn poseidon2_basic_async_staged_eval_check_verifies() {
         use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
 

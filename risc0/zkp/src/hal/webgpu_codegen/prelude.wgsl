@@ -266,10 +266,17 @@ fn write_check(cycle: u32, val: vec4<u32>) {
 // empty stride and a small dummy storage buffer.
 
 struct StagedScratchParams {
-    fp_stride: u32,    // u32s per cycle for fp_scratch
-    mix_stride: u32,   // u32s per cycle for each of mix_tot_scratch / mix_mul_scratch (4 per live mix var)
+    fp_stride: u32,    // u32s per tile-local cycle for fp_scratch
+    mix_stride: u32,   // u32s per tile-local cycle for each of mix_tot_scratch / mix_mul_scratch
     num_stages: u32,   // 1 for single-kernel emission, N for multi-stage
-    _pad0: u32,
+    // SP3 iter 7d: cycle offset for the current tile. Scratch buffers are
+    // sized to a fixed tile (e.g., 4096 cycles) regardless of domain; the
+    // dispatch loop iterates `ceil(domain / tile_size)` tiles per stage,
+    // bumping `tile_base` each pass. Within a tile, the kernel computes
+    // `cycle = tile_base + gid.x` for tap/global reads and `write_check`,
+    // but scratch I/O uses `tile_local = gid.x` so the scratch buffer
+    // only needs `tile_size * stride * 4 B` of GPU memory.
+    tile_base: u32,
 };
 
 @group(0) @binding(9) var<uniform> staged_scratch_params: StagedScratchParams;
@@ -277,28 +284,30 @@ struct StagedScratchParams {
 @group(0) @binding(11) var<storage, read_write> mix_tot_scratch: ElemBuffer;
 @group(0) @binding(12) var<storage, read_write> mix_mul_scratch: ElemBuffer;
 
-// Per-cycle scratch base for fp_scratch in u32 indices.
-fn fp_scratch_base(cycle: u32) -> u32 {
-    return cycle * staged_scratch_params.fp_stride;
+// Per-tile-local-cycle base for fp_scratch in u32 indices. `tile_local`
+// is the thread's offset within the current tile (gid.x), NOT the global
+// cycle — scratch buffers are sized to `tile_size * stride`, independent
+// of the prove's full domain.
+fn fp_scratch_base(tile_local: u32) -> u32 {
+    return tile_local * staged_scratch_params.fp_stride;
 }
 
-// Per-cycle scratch base for the mix scratch buffers in u32 indices.
-fn mix_scratch_base(cycle: u32) -> u32 {
-    return cycle * staged_scratch_params.mix_stride;
+fn mix_scratch_base(tile_local: u32) -> u32 {
+    return tile_local * staged_scratch_params.mix_stride;
 }
 
 // Base-field fp read/write: one u32 per live slot.
-fn read_fp_scratch_scalar(cycle: u32, live_idx: u32) -> u32 {
-    return fp_scratch.data[fp_scratch_base(cycle) + live_idx];
+fn read_fp_scratch_scalar(tile_local: u32, live_idx: u32) -> u32 {
+    return fp_scratch.data[fp_scratch_base(tile_local) + live_idx];
 }
 
-fn write_fp_scratch_scalar(cycle: u32, live_idx: u32, val: u32) {
-    fp_scratch.data[fp_scratch_base(cycle) + live_idx] = val;
+fn write_fp_scratch_scalar(tile_local: u32, live_idx: u32, val: u32) {
+    fp_scratch.data[fp_scratch_base(tile_local) + live_idx] = val;
 }
 
 // Extension fp read/write: four u32s per live slot (a vec4 BabyBearExt).
-fn read_fp_scratch_ext(cycle: u32, live_idx: u32) -> vec4<u32> {
-    let base = fp_scratch_base(cycle) + live_idx * 4u;
+fn read_fp_scratch_ext(tile_local: u32, live_idx: u32) -> vec4<u32> {
+    let base = fp_scratch_base(tile_local) + live_idx * 4u;
     return vec4<u32>(
         fp_scratch.data[base + 0u],
         fp_scratch.data[base + 1u],
@@ -307,18 +316,17 @@ fn read_fp_scratch_ext(cycle: u32, live_idx: u32) -> vec4<u32> {
     );
 }
 
-fn write_fp_scratch_ext(cycle: u32, live_idx: u32, val: vec4<u32>) {
-    let base = fp_scratch_base(cycle) + live_idx * 4u;
+fn write_fp_scratch_ext(tile_local: u32, live_idx: u32, val: vec4<u32>) {
+    let base = fp_scratch_base(tile_local) + live_idx * 4u;
     fp_scratch.data[base + 0u] = val.x;
     fp_scratch.data[base + 1u] = val.y;
     fp_scratch.data[base + 2u] = val.z;
     fp_scratch.data[base + 3u] = val.w;
 }
 
-// Mix state is always vec4<u32> regardless of field mode (`mix_tot` and
-// `mix_mul` carry the running BabyBearExt accumulator and power chain).
-fn read_mix_tot_scratch(cycle: u32, live_idx: u32) -> vec4<u32> {
-    let base = mix_scratch_base(cycle) + live_idx * 4u;
+// Mix state is always vec4<u32> regardless of field mode.
+fn read_mix_tot_scratch(tile_local: u32, live_idx: u32) -> vec4<u32> {
+    let base = mix_scratch_base(tile_local) + live_idx * 4u;
     return vec4<u32>(
         mix_tot_scratch.data[base + 0u],
         mix_tot_scratch.data[base + 1u],
@@ -327,16 +335,16 @@ fn read_mix_tot_scratch(cycle: u32, live_idx: u32) -> vec4<u32> {
     );
 }
 
-fn write_mix_tot_scratch(cycle: u32, live_idx: u32, val: vec4<u32>) {
-    let base = mix_scratch_base(cycle) + live_idx * 4u;
+fn write_mix_tot_scratch(tile_local: u32, live_idx: u32, val: vec4<u32>) {
+    let base = mix_scratch_base(tile_local) + live_idx * 4u;
     mix_tot_scratch.data[base + 0u] = val.x;
     mix_tot_scratch.data[base + 1u] = val.y;
     mix_tot_scratch.data[base + 2u] = val.z;
     mix_tot_scratch.data[base + 3u] = val.w;
 }
 
-fn read_mix_mul_scratch(cycle: u32, live_idx: u32) -> vec4<u32> {
-    let base = mix_scratch_base(cycle) + live_idx * 4u;
+fn read_mix_mul_scratch(tile_local: u32, live_idx: u32) -> vec4<u32> {
+    let base = mix_scratch_base(tile_local) + live_idx * 4u;
     return vec4<u32>(
         mix_mul_scratch.data[base + 0u],
         mix_mul_scratch.data[base + 1u],
@@ -345,8 +353,8 @@ fn read_mix_mul_scratch(cycle: u32, live_idx: u32) -> vec4<u32> {
     );
 }
 
-fn write_mix_mul_scratch(cycle: u32, live_idx: u32, val: vec4<u32>) {
-    let base = mix_scratch_base(cycle) + live_idx * 4u;
+fn write_mix_mul_scratch(tile_local: u32, live_idx: u32, val: vec4<u32>) {
+    let base = mix_scratch_base(tile_local) + live_idx * 4u;
     mix_mul_scratch.data[base + 0u] = val.x;
     mix_mul_scratch.data[base + 1u] = val.y;
     mix_mul_scratch.data[base + 2u] = val.z;

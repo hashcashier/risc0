@@ -57,6 +57,16 @@ use crate::{
 /// `eval_check_{0,1,2,3}.cu` layout the runtime interpreter parallels.
 const SP3_STAGED_TARGET_CHUNK_OPS: usize = 5000;
 
+/// SP3 iter 7d: number of cycles processed per scratch-buffer tile. The
+/// scratch buffer is sized to `tile_size * stride * 4 B` regardless of
+/// the prove's full domain — the dispatch loop iterates
+/// `ceil(domain / tile_size)` tiles, bumping `tile_base` between passes.
+/// At 4096 with ~400 live ext fp vars + 5 live mix vars the per-cycle
+/// stride is ~1620 u32, so fp_scratch = 4096 * 1620 * 4 ≈ 27 MiB; mix
+/// scratches are < 1 MiB each. Comfortably within the device limits we
+/// requested and independent of how many cycles the prove has overall.
+const SP3_STAGED_TILE_SIZE: u32 = 4096;
+
 /// `GPUBufferUsage.MAP_READ`.
 pub const WEBGPU_BUFFER_USAGE_MAP_READ: u32 = 0x0001;
 /// `GPUBufferUsage.MAP_WRITE`.
@@ -4485,19 +4495,36 @@ struct EvalCheckInterpreterPipeline {
 /// `mix_tot_scratch` / `mix_mul_scratch` rw storage). All stages of
 /// the same DEF share the same bind group; only the bound pipeline
 /// changes per stage.
+///
+/// SP3 iter 7d: the four scratch buffers are cached on the pipeline so
+/// they're allocated once per DEF (sized to `tile_size * stride * 4 B`,
+/// independent of the prove's full domain) and reused across all
+/// `eval_check` calls. This bounds total GPU memory by O(unique DEFs ×
+/// per-tile scratch) instead of O(eval_check_call_count × per-domain
+/// scratch).
 #[derive(Clone)]
 struct StagedEvalCheckPipeline {
     layout: web_sys::GpuBindGroupLayout,
     stages: Vec<WebGpuKernel>,
     base_field_fp: bool,
-    /// u32 words per cycle in `fp_scratch` (max-live × 1 for Base or × 4
-    /// for Ext). 0 when `stages.len() == 1` (single-kernel, no scratch
-    /// needed; the dispatch still binds a dummy 4-byte fp_scratch buffer
-    /// so the validator doesn't complain).
+    /// u32 words per tile-local cycle in `fp_scratch` (max-live × 1 for
+    /// Base or × 4 for Ext). 0 when `stages.len() == 1` (single-kernel,
+    /// no scratch needed; cached buffers are still 4-byte dummies so
+    /// the validator's binding-count rules don't trip).
     fp_scratch_stride_u32: usize,
-    /// u32 words per cycle in `mix_tot_scratch` / `mix_mul_scratch`
-    /// (max-live × 4). 0 when no multi-stage save is needed.
+    /// u32 words per tile-local cycle in `mix_tot_scratch` /
+    /// `mix_mul_scratch` (max-live × 4). 0 when no multi-stage save
+    /// is needed.
     mix_scratch_stride_u32: usize,
+    /// Cached `tile_size * fp_stride * 4 B` storage buffer.
+    fp_scratch: web_sys::GpuBuffer,
+    /// Cached mix scratches (each `tile_size * mix_stride * 4 B`).
+    mix_tot_scratch: web_sys::GpuBuffer,
+    mix_mul_scratch: web_sys::GpuBuffer,
+    /// Cached 16-byte UBO for staged_scratch_params. The dispatch loop
+    /// rewrites `tile_base` (and the static stride/num_stages fields,
+    /// which never change for this pipeline) once per tile.
+    scratch_params_buf: web_sys::GpuBuffer,
 }
 
 /// A single storage or uniform buffer binding in a WebGPU bind group layout.
@@ -5168,12 +5195,45 @@ impl WebGpuHal {
             let _ = idx;
             stages.push(kernel);
         }
+        // SP3 iter 7d: allocate scratch buffers once at pipeline create
+        // and cache them; they're reused across every eval_check call
+        // that hits this pipeline. Size is `SP3_STAGED_TILE_SIZE *
+        // stride * 4 B`, independent of any single call's domain.
+        let fp_scratch_byte_len = if multi.fp_scratch_stride_u32 == 0 {
+            4
+        } else {
+            byte_len_for::<u32>(multi.fp_scratch_stride_u32 * SP3_STAGED_TILE_SIZE as usize)
+        };
+        let mix_scratch_byte_len = if multi.mix_scratch_stride_u32 == 0 {
+            4
+        } else {
+            byte_len_for::<u32>(multi.mix_scratch_stride_u32 * SP3_STAGED_TILE_SIZE as usize)
+        };
+        let fp_scratch = self
+            .create_storage_buffer("webgpu_staged_eval_check_fp_scratch", fp_scratch_byte_len)?;
+        let mix_tot_scratch = self.create_storage_buffer(
+            "webgpu_staged_eval_check_mix_tot_scratch",
+            mix_scratch_byte_len,
+        )?;
+        let mix_mul_scratch = self.create_storage_buffer(
+            "webgpu_staged_eval_check_mix_mul_scratch",
+            mix_scratch_byte_len,
+        )?;
+        let scratch_params_buf = self.create_buffer(
+            "webgpu_staged_eval_check_scratch_params",
+            16,
+            WEBGPU_BUFFER_USAGE_UNIFORM | WEBGPU_BUFFER_USAGE_COPY_DST,
+        )?;
         let pipeline = StagedEvalCheckPipeline {
             layout,
             stages,
             base_field_fp,
             fp_scratch_stride_u32: multi.fp_scratch_stride_u32,
             mix_scratch_stride_u32: multi.mix_scratch_stride_u32,
+            fp_scratch,
+            mix_tot_scratch,
+            mix_mul_scratch,
+            scratch_params_buf,
         };
         self.staged_eval_check_pipelines
             .borrow_mut()
@@ -5269,42 +5329,14 @@ impl WebGpuHal {
             bytemuck::cast_slice(&params_words),
         )?;
 
-        // SP3 iter 7c: per-cycle scratch sized to (fp_stride + mix_stride * 2)
-        // * domain * 4 B. For single-stage emissions both strides are 0
-        // and we bind a small dummy buffer to satisfy the bind group layout.
+        // SP3 iter 7d: tiled dispatch over cached scratch buffers. All
+        // four scratch buffers (fp/mix_tot/mix_mul + scratch_params UBO)
+        // are owned by the pipeline and reused across every eval_check
+        // call that hits this DEF. The dispatch loop only rewrites
+        // scratch_params.tile_base per tile.
         let fp_stride = pipeline.fp_scratch_stride_u32;
         let mix_stride = pipeline.mix_scratch_stride_u32;
-        let num_stages = pipeline.stages.len();
-        let fp_scratch_byte_len = if fp_stride == 0 {
-            4
-        } else {
-            byte_len_for::<u32>(fp_stride * domain_u32 as usize)
-        };
-        let mix_scratch_byte_len = if mix_stride == 0 {
-            4
-        } else {
-            byte_len_for::<u32>(mix_stride * domain_u32 as usize)
-        };
-        let fp_scratch_gpu = self
-            .create_storage_buffer("webgpu_staged_eval_check_fp_scratch", fp_scratch_byte_len)?;
-        let mix_tot_scratch_gpu = self.create_storage_buffer(
-            "webgpu_staged_eval_check_mix_tot_scratch",
-            mix_scratch_byte_len,
-        )?;
-        let mix_mul_scratch_gpu = self.create_storage_buffer(
-            "webgpu_staged_eval_check_mix_mul_scratch",
-            mix_scratch_byte_len,
-        )?;
-        let scratch_params_words = [
-            u32::try_from(fp_stride).expect("staged fp_stride exceeds u32"),
-            u32::try_from(mix_stride).expect("staged mix_stride exceeds u32"),
-            u32::try_from(num_stages).expect("staged num_stages exceeds u32"),
-            0u32,
-        ];
-        let scratch_params_buf = self.create_uniform_buffer(
-            "webgpu_staged_eval_check_scratch_params",
-            bytemuck::cast_slice(&scratch_params_words),
-        )?;
+        let tile_size = SP3_STAGED_TILE_SIZE.min(domain_u32);
 
         let bind_group = self.create_bind_group(
             "webgpu_staged_eval_check_bind_group",
@@ -5326,21 +5358,39 @@ impl WebGpuHal {
                 },
                 WebGpuBufferBinding {
                     binding: 9,
-                    buffer: &scratch_params_buf,
+                    buffer: &pipeline.scratch_params_buf,
                     offset: 0,
                     size: Some(16),
                 },
-                WebGpuBufferBinding::new(10, &fp_scratch_gpu),
-                WebGpuBufferBinding::new(11, &mix_tot_scratch_gpu),
-                WebGpuBufferBinding::new(12, &mix_mul_scratch_gpu),
+                WebGpuBufferBinding::new(10, &pipeline.fp_scratch),
+                WebGpuBufferBinding::new(11, &pipeline.mix_tot_scratch),
+                WebGpuBufferBinding::new(12, &pipeline.mix_mul_scratch),
             ],
         )?;
 
-        let workgroups = domain_u32;
-        // Dispatch each stage in sequence; queue ordering ensures
-        // stage K's scratch writes are visible to stage K+1's reads.
-        for stage in &pipeline.stages {
-            self.dispatch_compute_1d(stage, &bind_group, workgroups);
+        let num_stages = pipeline.stages.len();
+        let mut tile_base: u32 = 0;
+        while tile_base < domain_u32 {
+            let this_tile = tile_size.min(domain_u32 - tile_base);
+            // Rewrite scratch_params (fp_stride, mix_stride, num_stages,
+            // tile_base) on the cached UBO. Subsequent dispatches see
+            // this value via queue ordering.
+            let scratch_params_words = [
+                u32::try_from(fp_stride).expect("staged fp_stride exceeds u32"),
+                u32::try_from(mix_stride).expect("staged mix_stride exceeds u32"),
+                u32::try_from(num_stages).expect("staged num_stages exceeds u32"),
+                tile_base,
+            ];
+            self.write_buffer_named(
+                &pipeline.scratch_params_buf,
+                "webgpu_staged_eval_check_scratch_params",
+                0,
+                bytemuck::cast_slice(&scratch_params_words),
+            )?;
+            for stage in &pipeline.stages {
+                self.dispatch_compute_1d(stage, &bind_group, this_tile);
+            }
+            tile_base += this_tile;
         }
         self.record_gpu_result_authoritative("eval_check", true);
         Ok(true)
