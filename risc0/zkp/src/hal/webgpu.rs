@@ -5491,20 +5491,12 @@ impl WebGpuHal {
         }
         self.submit(encoder.finish());
 
-        // SP3 iter 7j (2026-05-12): evict the cached pipeline entry for
-        // this DEF immediately after submit returns. Pipelines + scratch
-        // buffers cached across calls (iter 7d-7i) are the only
-        // resident state difference between baseline (passes) and
-        // staged-enabled (SIGKILLs Chrome in the recursion lift). The
-        // local `pipeline` is a clone holding the same `web_sys::GpuBuffer`
-        // refs, so Dawn keeps them alive until the submitted commands
-        // complete; dropping the cache entry just lets JS GC reclaim the
-        // wrappers afterward. Defeats pipeline caching across calls —
-        // each subsequent eval_check pays the WGSL compile cost — but
-        // isolates whether persistent cached state is the SIGKILL cause.
-        let key = def as *const PolyExtStepDef as usize;
-        self.staged_eval_check_pipelines.borrow_mut().remove(&key);
-
+        // SP3 iter 7l (2026-05-12): pipeline cache is re-enabled.
+        // Iter 7j evicted per-call as a diagnostic — proved persistent
+        // cached state isn't the SIGKILL cause, but added significant
+        // recompile cost (each call recompiled 2-4 staged shaders).
+        // Revert to keep the pipeline cache so subsequent eval_check
+        // calls hitting the same DEF reuse compiled stages.
         self.record_gpu_result_authoritative("eval_check", true);
         Ok(true)
     }
