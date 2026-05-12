@@ -67,6 +67,20 @@ const SP3_STAGED_TARGET_CHUNK_OPS: usize = 5000;
 /// requested and independent of how many cycles the prove has overall.
 const SP3_STAGED_TILE_SIZE: u32 = 4096;
 
+/// SP3 iter 7e: byte stride between consecutive `StagedScratchParams`
+/// entries in the dynamic-offset UBO. The WebGPU spec requires
+/// `minUniformBufferOffsetAlignment >= 256`, so we use 256 directly.
+/// Each entry holds a 16-byte `StagedScratchParams` struct; the
+/// remaining 240 bytes are unused padding to the next alignment.
+const SP3_STAGED_SCRATCH_PARAMS_ENTRY_BYTES: usize = 256;
+
+/// SP3 iter 7e: ceiling on the number of tiles a single staged dispatch
+/// can have. Bounds the pre-allocated `scratch_params` UBO size at
+/// `MAX_TILES * 256 B` (= 256 KiB at 1024). At `SP3_STAGED_TILE_SIZE
+/// = 4096` this supports `domain <= 4 * 1024 * 1024` (po2 22), well
+/// above any production fixture today.
+const SP3_STAGED_MAX_TILES: u32 = 1024;
+
 /// `GPUBufferUsage.MAP_READ`.
 pub const WEBGPU_BUFFER_USAGE_MAP_READ: u32 = 0x0001;
 /// `GPUBufferUsage.MAP_WRITE`.
@@ -4521,10 +4535,21 @@ struct StagedEvalCheckPipeline {
     /// Cached mix scratches (each `tile_size * mix_stride * 4 B`).
     mix_tot_scratch: web_sys::GpuBuffer,
     mix_mul_scratch: web_sys::GpuBuffer,
-    /// Cached 16-byte UBO for staged_scratch_params. The dispatch loop
-    /// rewrites `tile_base` (and the static stride/num_stages fields,
-    /// which never change for this pipeline) once per tile.
+    /// Cached `SP3_STAGED_MAX_TILES * 256 B` UBO for staged_scratch_params.
+    /// Each `eval_check` call rewrites the prefix matching its tile
+    /// count, then the compute pass walks tiles via dynamic offsets.
     scratch_params_buf: web_sys::GpuBuffer,
+    /// SP3 iter 7f: cached storage buffer for `mix_pows` (sized to the
+    /// DEF's `mix_expected * 4 u32`). Each `eval_check` call rewrites
+    /// it with the call-specific `poly_mix^exp` values.
+    mix_pows_buf: web_sys::GpuBuffer,
+    /// SP3 iter 7f: cached 96-byte uniform buffer for the main Params
+    /// UBO at binding 8. Each `eval_check` call rewrites it.
+    params_buf: web_sys::GpuBuffer,
+    /// SP3 iter 7f: `mix_expected` for this DEF. Recorded here so the
+    /// dispatch knows how many `u32` words to write into `mix_pows_buf`
+    /// without recomputing.
+    mix_pow_words: usize,
 }
 
 /// A single storage or uniform buffer binding in a WebGPU bind group layout.
@@ -4536,6 +4561,11 @@ pub struct WebGpuBindingLayout {
     pub ty: web_sys::GpuBufferBindingType,
     /// Optional minimum binding size in bytes.
     pub min_binding_size: u64,
+    /// When true, the bind group accepts a dynamic byte offset for this
+    /// binding via `setBindGroup`. SP3 iter 7e uses this to advance
+    /// `tile_base` through a single `scratch_params` UBO without
+    /// rebinding or resubmitting between tiles.
+    pub has_dynamic_offset: bool,
 }
 
 impl WebGpuBindingLayout {
@@ -4545,6 +4575,7 @@ impl WebGpuBindingLayout {
             binding,
             ty: web_sys::GpuBufferBindingType::Storage,
             min_binding_size,
+            has_dynamic_offset: false,
         }
     }
 
@@ -4554,6 +4585,7 @@ impl WebGpuBindingLayout {
             binding,
             ty: web_sys::GpuBufferBindingType::ReadOnlyStorage,
             min_binding_size,
+            has_dynamic_offset: false,
         }
     }
 
@@ -4563,6 +4595,19 @@ impl WebGpuBindingLayout {
             binding,
             ty: web_sys::GpuBufferBindingType::Uniform,
             min_binding_size,
+            has_dynamic_offset: false,
+        }
+    }
+
+    /// Create a uniform buffer binding layout with dynamic offset support
+    /// (SP3 iter 7e). The bind group's `setBindGroup` call must then
+    /// supply a `u32` byte offset for this binding.
+    pub fn uniform_dynamic(binding: u32, min_binding_size: u64) -> Self {
+        Self {
+            binding,
+            ty: web_sys::GpuBufferBindingType::Uniform,
+            min_binding_size,
+            has_dynamic_offset: true,
         }
     }
 }
@@ -5170,7 +5215,10 @@ impl WebGpuHal {
                 // SP3 iter 7c: new scratch bindings. Always present in the
                 // layout — single-stage emissions bind a dummy 4-byte fp
                 // / mix scratch buffer to satisfy the validator.
-                WebGpuBindingLayout::uniform(9, 16),
+                // SP3 iter 7e: binding 9 now uses dynamic offset so we
+                // can advance `tile_base` through one cached UBO without
+                // rebinding or resubmitting between tiles.
+                WebGpuBindingLayout::uniform_dynamic(9, 16),
                 WebGpuBindingLayout::storage(10, 0),
                 WebGpuBindingLayout::storage(11, 0),
                 WebGpuBindingLayout::storage(12, 0),
@@ -5219,9 +5267,30 @@ impl WebGpuHal {
             "webgpu_staged_eval_check_mix_mul_scratch",
             mix_scratch_byte_len,
         )?;
+        // SP3 iter 7e: scratch_params is sized for up to
+        // `SP3_STAGED_MAX_TILES` 256-byte-aligned entries. Each
+        // `eval_check` call pre-fills only the tiles its domain needs
+        // (`ceil(domain / SP3_STAGED_TILE_SIZE)`), then walks them via
+        // dynamic offsets on binding 9 inside one compute pass.
         let scratch_params_buf = self.create_buffer(
             "webgpu_staged_eval_check_scratch_params",
-            16,
+            (SP3_STAGED_MAX_TILES as u64)
+                * (SP3_STAGED_SCRATCH_PARAMS_ENTRY_BYTES as u64),
+            WEBGPU_BUFFER_USAGE_UNIFORM | WEBGPU_BUFFER_USAGE_COPY_DST,
+        )?;
+        // SP3 iter 7f: cache mix_pows and params buffers on the
+        // pipeline. Sizes depend only on the DEF (mix_pow_words for
+        // mix_pows, fixed 96 bytes for params) so they're stable
+        // across all eval_check calls hitting this pipeline.
+        let mix_expected = def.ret + 1;
+        let mix_pow_words = mix_expected * BabyBearExtElem::EXT_SIZE;
+        let mix_pows_buf = self.create_storage_buffer(
+            "webgpu_staged_eval_check_mix_pows",
+            byte_len_for::<u32>(mix_pow_words.max(1)),
+        )?;
+        let params_buf = self.create_buffer(
+            "webgpu_staged_eval_check_params",
+            96,
             WEBGPU_BUFFER_USAGE_UNIFORM | WEBGPU_BUFFER_USAGE_COPY_DST,
         )?;
         let pipeline = StagedEvalCheckPipeline {
@@ -5234,6 +5303,9 @@ impl WebGpuHal {
             mix_tot_scratch,
             mix_mul_scratch,
             scratch_params_buf,
+            mix_pows_buf,
+            params_buf,
+            mix_pow_words,
         };
         self.staged_eval_check_pipelines
             .borrow_mut()
@@ -5285,12 +5357,16 @@ impl WebGpuHal {
         for value in mix_pows {
             mix_pow_words.extend(ext_words(value));
         }
-        let mix_pows_gpu = self.create_storage_buffer(
-            "webgpu_staged_eval_check_mix_pows",
-            byte_len_for::<u32>(mix_pow_words.len()),
-        )?;
+        debug_assert_eq!(
+            mix_pow_words.len(),
+            pipeline.mix_pow_words,
+            "staged mix_pows word count must match pipeline reservation"
+        );
+        // SP3 iter 7f: rewrite the cached `mix_pows` storage buffer
+        // (owned by the pipeline) instead of creating a fresh one per
+        // eval_check call.
         self.write_buffer_named(
-            &mix_pows_gpu,
+            &pipeline.mix_pows_buf,
             "webgpu_staged_eval_check_mix_pows",
             0,
             bytemuck::cast_slice(&mix_pow_words),
@@ -5324,8 +5400,13 @@ impl WebGpuHal {
             params[10],
             params[11],
         ];
-        let params_buf = self.create_uniform_buffer(
+        // SP3 iter 7f: rewrite the cached params UBO (owned by the
+        // pipeline) instead of allocating a fresh 96-byte uniform per
+        // call.
+        self.write_buffer_named(
+            &pipeline.params_buf,
             "webgpu_staged_eval_check_params",
+            0,
             bytemuck::cast_slice(&params_words),
         )?;
 
@@ -5349,10 +5430,10 @@ impl WebGpuHal {
                 WebGpuBufferBinding::new(4, global0_gpu),
                 WebGpuBufferBinding::new(5, global1_gpu),
                 // binding 6 (instrs) omitted; not in pipeline layout
-                WebGpuBufferBinding::new(7, &mix_pows_gpu),
+                WebGpuBufferBinding::new(7, &pipeline.mix_pows_buf),
                 WebGpuBufferBinding {
                     binding: 8,
-                    buffer: &params_buf,
+                    buffer: &pipeline.params_buf,
                     offset: 0,
                     size: Some(96),
                 },
@@ -5369,29 +5450,72 @@ impl WebGpuHal {
         )?;
 
         let num_stages = pipeline.stages.len();
-        let mut tile_base: u32 = 0;
-        while tile_base < domain_u32 {
-            let this_tile = tile_size.min(domain_u32 - tile_base);
-            // Rewrite scratch_params (fp_stride, mix_stride, num_stages,
-            // tile_base) on the cached UBO. Subsequent dispatches see
-            // this value via queue ordering.
-            let scratch_params_words = [
-                u32::try_from(fp_stride).expect("staged fp_stride exceeds u32"),
-                u32::try_from(mix_stride).expect("staged mix_stride exceeds u32"),
-                u32::try_from(num_stages).expect("staged num_stages exceeds u32"),
-                tile_base,
-            ];
-            self.write_buffer_named(
-                &pipeline.scratch_params_buf,
-                "webgpu_staged_eval_check_scratch_params",
-                0,
-                bytemuck::cast_slice(&scratch_params_words),
-            )?;
-            for stage in &pipeline.stages {
-                self.dispatch_compute_1d(stage, &bind_group, this_tile);
+
+        // SP3 iter 7e: pre-fill `scratch_params` with one
+        // 256-byte-aligned entry per tile. Each entry has the
+        // tile-local `tile_base`; stride and num_stages are constant
+        // across tiles. One writeBuffer up front, then the compute
+        // pass advances through entries via dynamic offsets.
+        let num_tiles =
+            ((domain_u32 + tile_size - 1) / tile_size).min(SP3_STAGED_MAX_TILES);
+        let entry_words = SP3_STAGED_SCRATCH_PARAMS_ENTRY_BYTES / mem::size_of::<u32>();
+        let mut scratch_params_data: Vec<u32> = Vec::with_capacity(num_tiles as usize * entry_words);
+        {
+            let fp_stride_u32 =
+                u32::try_from(fp_stride).expect("staged fp_stride exceeds u32");
+            let mix_stride_u32 =
+                u32::try_from(mix_stride).expect("staged mix_stride exceeds u32");
+            let num_stages_u32 =
+                u32::try_from(num_stages).expect("staged num_stages exceeds u32");
+            for tile_idx in 0..num_tiles {
+                let tile_base = tile_idx * tile_size;
+                scratch_params_data.push(fp_stride_u32);
+                scratch_params_data.push(mix_stride_u32);
+                scratch_params_data.push(num_stages_u32);
+                scratch_params_data.push(tile_base);
+                // Pad to 256-byte alignment for the next entry.
+                for _ in 4..entry_words {
+                    scratch_params_data.push(0);
+                }
             }
-            tile_base += this_tile;
         }
+        self.write_buffer_named(
+            &pipeline.scratch_params_buf,
+            "webgpu_staged_eval_check_scratch_params",
+            0,
+            bytemuck::cast_slice(&scratch_params_data),
+        )?;
+
+        // SP3 iter 7e: one command encoder, one compute pass, one
+        // submit per eval_check call. Inside the pass, walk tiles via
+        // dynamic offsets on binding 9, setting pipeline + dispatching
+        // each stage per tile. Collapses the iter 7d
+        // `num_tiles * num_stages` queue submissions into one.
+        let encoder = self.device.create_command_encoder();
+        let pass = encoder.begin_compute_pass();
+        let offsets = js_sys::Uint32Array::new_with_length(1);
+        let entry_stride_u32 = SP3_STAGED_SCRATCH_PARAMS_ENTRY_BYTES as u32;
+        for tile_idx in 0..num_tiles {
+            let tile_base = tile_idx * tile_size;
+            let this_tile = tile_size.min(domain_u32 - tile_base);
+            offsets.set_index(0, tile_idx * entry_stride_u32);
+            pass.set_bind_group_with_u32_array_and_u32_and_dynamic_offsets_data_length(
+                0,
+                Some(&bind_group),
+                &offsets,
+                0,
+                1,
+            )
+            .map_err(js_error)?;
+            for stage in &pipeline.stages {
+                pass.set_pipeline(&stage.pipeline);
+                pass.dispatch_workgroups_with_workgroup_count_y_and_workgroup_count_z(
+                    this_tile, 1, 1,
+                );
+            }
+        }
+        pass.end();
+        self.submit(encoder.finish());
         self.record_gpu_result_authoritative("eval_check", true);
         Ok(true)
     }
@@ -7490,6 +7614,9 @@ impl WebGpuHal {
             buffer.set_type(entry.ty);
             if entry.min_binding_size != 0 {
                 buffer.set_min_binding_size(byte_len_as_f64(entry.min_binding_size)?);
+            }
+            if entry.has_dynamic_offset {
+                buffer.set_has_dynamic_offset(true);
             }
 
             let layout_entry =

@@ -1349,7 +1349,6 @@ mod tests {
     /// call. Should reduce per-call queue overhead from 128 submissions
     /// to 1 while preserving the same scratch-bounding properties.
     #[wasm_bindgen_test(async)]
-    #[ignore = "SP3 iter 7e prerequisite: orchestrate tile dispatches in one encoder + one submit per call; current per-tile submits exhaust CI process budget"]
     async fn poseidon2_basic_async_staged_eval_check_verifies() {
         use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
 
