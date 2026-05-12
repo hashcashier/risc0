@@ -65,9 +65,9 @@ zero CPU-only HAL operations.
 
 | Guest | Native CUDA baseline | Chrome/WebGPU status |
 | --- | --- | --- |
-| `risc0-zkvm-methods/cfg` | 1 segment, 2261 user cycles, 32768 total cycles, 390.942019ms | Passed, same cycles |
-| `hello-world` | 1 segment, 3532 user cycles, 32768 total cycles, 407.65863ms | Passed, same cycles |
-| `json` | 1 segment, 13311 user cycles, 65536 total cycles, 416.113284ms | Passed, same cycles |
+| `risc0-zkvm-methods/cfg` | 1 segment, 2269 user cycles, 32768 total cycles, 499.535ms (refreshed 2026-05-12 RTX 5090) | Passed, same cycles; Chrome WebGPU 3.818s ≈ **7.6× ratio**; `cpu_only_ops=0`, only `scatter` fallback |
+| `hello-world` | 1 segment, 3560 user cycles, 32768 total cycles, 483.515ms (refreshed 2026-05-12 RTX 5090) | Passed, same cycles; Chrome WebGPU 3.803s ≈ **7.9× ratio**; `cpu_only_ops=0`, only `scatter` fallback |
+| `json` | 1 segment, 13319 user cycles, 65536 total cycles, 521.131ms (refreshed 2026-05-12 RTX 5090) | Passed, same cycles; Chrome WebGPU 4.583s ≈ **8.8× ratio**; `cpu_only_ops=0`, only `scatter` fallback |
 | `chess` | 1 segment, 22500 user cycles, 131072 total cycles, 503.676967ms | Passed, same cycles |
 | `composition/multiply-assumption` | 1 segment, 3532 user cycles, 32768 total cycles, 410.961683ms | Passed, same cycles |
 | `composition` | 1 segment, 13887 user cycles, 65536 total cycles, 428.996087ms | Passed, same cycles |
@@ -109,13 +109,13 @@ zero CPU-only HAL operations.
 | `multi_test/sys_read` | 1 segment, 8471 user cycles, 65536 total cycles, 258.619384ms | Passed, same cycles |
 | `multi_test/echo_stdout` | 1 segment, 4203 user cycles, 32768 total cycles, 236.010871ms | Passed, same cycles |
 | `multi_test/echo_words` | 1 segment, 3996 user cycles, 32768 total cycles, 236.157902ms | Passed, same cycles |
-| `multi_test/libm` | 1 segment, 3373 user cycles, 32768 total cycles, 436.441617ms | Passed standalone in 214.08s with succinct receipt; `rv32im_eval_check` 32.546s, `segment_prove_core` 43.592s, `recursion_eval_check` 119.937s, `lift_prove` 170.293s |
-| `multi_test/poseidon2_basic` | 1 segment, 3598 user cycles, 32768 total cycles, 426.880871ms in the latest focused CUDA run | Passed via `prove_with_opts_async` with a succinct receipt in Chrome in 4.03s, same cycles; Chrome negotiated 1 GiB buffer and storage-binding limits; rv32im and recursion STARK commit/finalize plus combo prepare/divide ran in GPU-authoritative mode; `eval_check` recorded 2 WebGPU dispatches and 0 CPU fallbacks |
+| `multi_test/libm` | 1 segment, 3328 user cycles, 32768 total cycles, 510.044ms (refreshed 2026-05-12 RTX 5090) | Passed via `prove_with_opts_async` with a succinct receipt in Chrome in 3.802s ≈ **7.5× ratio**; same cycles; `cpu_only_ops=0`, only `scatter` fallback. **Dramatic improvement from the prior 214.08s figure: the async/GPU-authoritative recursion eval_check path is now applied for libm.** Prior per-stage breakdown (`rv32im_eval_check 32.5s, recursion_eval_check 119.9s, lift_prove 170.3s`) no longer applies. |
+| `multi_test/poseidon2_basic` | 1 segment, 3553 user cycles, 32768 total cycles, 545.337ms (cold) / 244.864ms (warm, refreshed 2026-05-12 RTX 5090) | Passed via `prove_with_opts_async` with a succinct receipt in Chrome in 3.946s ≈ **7.2× cold / 16.1× warm ratio**; same cycles; Chrome negotiated 1 GiB buffer and storage-binding limits; rv32im and recursion STARK commit/finalize plus combo prepare/divide ran in GPU-authoritative mode; `eval_check` recorded 2 WebGPU dispatches and 0 CPU fallbacks; `gpu_dispatches=306, cpu_mirrors=11, cpu_fallbacks=1 (scatter), cpu_only_ops=0` |
 | `multi_test/poseidon2_short` | 1 segment, 3596 user cycles, 32768 total cycles, 235.5053ms | Passed in timed accelerator group, same cycles |
 | `multi_test/poseidon2_long` | 1 segment, 3800 user cycles, 32768 total cycles, 238.775893ms | Passed in timed accelerator group, same cycles |
 | `multi_test/poseidon2_continue` | 1 segment, 3835 user cycles, 32768 total cycles, 237.068497ms | Passed in timed accelerator group, same cycles |
 | `multi_test/sha_conforms` | 1 segment, 61122 user cycles, 131072 total cycles, 296.37097ms | Passed in timed accelerator group, same cycles |
-| `multi_test/rsa_compat` | 408 segments, 91535675 user cycles, 106758144 total cycles, 210.946054043s | Browser timed out after preceding pre-RSA fixtures; no succinct receipt yet |
+| `multi_test/rsa_compat` | 407 segments, 91535630 user cycles, 106463232 total cycles, 209.144s (refreshed 2026-05-12 RTX 5090) | Browser timed out after preceding pre-RSA fixtures; no succinct receipt yet — re-attempt after SP6 keccak generator lands |
 | `multi_test/do_random` | 1 segment, 27956 user cycles, 65536 total cycles, 260.290704ms | Passed in timed post-RSA split, same cycles |
 | `multi_test/aligned_alloc` | 1 segment, 3306 user cycles, 32768 total cycles, 234.941701ms | Passed in timed post-RSA split, same cycles |
 | `multi_test/alloc_zeroed` | 1 segment, 6387 user cycles, 32768 total cycles, 238.588112ms | Passed in timed post-RSA split, same cycles |
@@ -127,8 +127,8 @@ zero CPU-only HAL operations.
 | `multi_test/bigint` | 1 segment, 6913 user cycles, 65536 total cycles, 257.070061ms | Passed in timed post-RSA split, same cycles |
 | `multi_test/bigint_raw` | 1 segment, 3854 user cycles, 32768 total cycles, 238.714152ms | Passed in timed post-RSA split, same cycles |
 | `multi_test/keccak_update2` | 1 segment, 8054 user cycles, 65536 total cycles, 856.791179ms | Passed in timed post-RSA split, same cycles |
-| `multi_test/keccak_union_small` (`KeccakUnion(1)`) | 4 segments, 747310 user cycles, 917504 total cycles, 7.46676192s in the latest focused CUDA run | Passed as standalone Chrome/WebGPU succinct proof in 441.14s with 9 pending Keccak proofs and 1 assumption; same cycles; Chrome negotiated 1 GiB buffer and storage-binding limits; all ZKP bulk ops except `scatter` had 0 CPU fallbacks; Keccak circuit `eval_check` still fell back 9 times |
-| `multi_test/keccak_union` (`KeccakUnion(3)`) | 11 segments, 2230730 user cycles, 2752512 total cycles, 20.682250251s | Browser standalone run progressed through all 11 RV32IM segments and at least 12 of 25 Keccak proof requests after the async union fix, then timed out/SIGKILLed after 3600s before producing a succinct receipt |
+| `multi_test/keccak_union_small` (`KeccakUnion(1)`) | 4 segments, 747265 user cycles, 917504 total cycles, 7.748s (refreshed 2026-05-12 RTX 5090) | Passed standalone Chrome/WebGPU in 121.99s ≈ **15.7× ratio** (gpu_dispatches=6022, cpu_mirrors=188, cpu_fallbacks=4 = 1 scatter + 3 keccak eval_check, cpu_only_ops=0). **Significant improvement from the prior 441.14s / 59× figure** — async/GPU-authoritative recursion path is now applied. Residual is dominated by Keccak eval_check fallbacks (3 of them) because the generic interpreter needs 6741 FP slots > 1536 cap. |
+| `multi_test/keccak_union` (`KeccakUnion(3)`) | 11 segments, 2230685 user cycles, 2752512 total cycles, 20.676s (refreshed 2026-05-12 RTX 5090) | Native CUDA baseline refreshed for SP6 target. Browser standalone re-attempt deferred to after SP6 keccak generator lands; previous attempt SIGKILLed after 3600s. |
 | `risc0-zkvm-methods/bench/simple_loop` | 1 segment, 3300 user cycles, 32768 total cycles, 444.669138ms | Passed, same cycles |
 | `risc0-zkvm-methods/test_feature` | 1 segment, 2933 user cycles, 32768 total cycles, 396.733057ms | Passed, same cycles |
 | `risc0-zkvm-methods/blst` | 1028 segments, 229848040 user cycles, 269287424 total cycles, 523.487318958s | Browser run deferred until remaining eval_check/readback and oversized-buffer bottlenecks are addressed |

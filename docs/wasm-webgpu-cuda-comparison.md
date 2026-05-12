@@ -1,16 +1,35 @@
 # Browser WebGPU vs Native CUDA Proving
 
-Status: comparison paused at user request; retained as optimization context.
+Status: 6-fixture R1 smoke matrix refreshed 2026-05-12 on RTX 5090 / Chrome 148. Ratios now cluster at 7–9× for small fixtures and 15.7× on `KeccakUnion(1)` — significant improvement from the paused-state figures retained below for delta visibility.
 
-See `docs/wasm-webgpu-prover-learnings.md` for the pause handoff, latest
-results summary, and recommended resume plan.
+See `docs/wasm-webgpu-prover-learnings.md` for the pause handoff and `.recursive/run/wasm-webgpu-prover-perf/evidence/perf/r1-baselines/` for the canonical capture commands plus the refreshed summary table.
+
+## R1 Smoke Matrix (refreshed 2026-05-12 on RTX 5090 + Chrome 148)
+
+Hardware: RTX 5090 (32 GB, SM120/Blackwell, CUDA 13.0), Chrome 148.0.7778.96, ChromeDriver 148.0.7778.97, headless `enable-unsafe-webgpu enable-features=Vulkan use-angle=vulkan`. Negotiated WebGPU limits: `max_buffer_size=max_storage_buffer_binding_size=1073741824`, `max_compute_workgroup_storage_size=49152`.
+
+| Fixture | Native CUDA | Chrome WebGPU | Ratio | Receipt | Segments | User cycles | gpu_dispatches | cpu_fallbacks | cpu_only_ops |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| `risc0-zkvm-methods/cfg` | 499.5 ms | 3.82 s | **7.6×** | Succinct, verified | 1 | 2269 | 306 | 1 (scatter) | 0 |
+| `hello-world` | 483.5 ms | 3.80 s | **7.9×** | Succinct, verified | 1 | 3560 | 306 | 1 (scatter) | 0 |
+| `json` | 521.1 ms | 4.58 s | **8.8×** | Succinct, verified | 1 | 13319 | 312 | 1 (scatter) | 0 |
+| `multi_test/poseidon2_basic` (cold CUDA) | 545.3 ms | 3.95 s | **7.2×** | Succinct, verified | 1 | 3553 | 306 | 1 (scatter) | 0 |
+| `multi_test/poseidon2_basic` (warm CUDA) | 244.9 ms | 3.95 s | **16.1×** | Succinct, verified | 1 | 3553 | 306 | 1 (scatter) | 0 |
+| `multi_test/libm` | 510.0 ms | 3.80 s | **7.5×** | Succinct, verified | 1 | 3328 | 306 | 1 (scatter) | 0 |
+| `multi_test/keccak_union_small` | 7.748 s | 121.99 s | **15.7×** | Succinct, verified | 4 | 747265 | 6022 | 4 (scatter + 3 keccak eval_check) | 0 |
+
+The libm ratio is no longer 491×; the async/GPU-authoritative recursion path applies. The KeccakUnion(1) ratio is no longer 59×; same path applies plus async Keccak union. The remaining residual is shape-specific: small fixtures are upload + readback + interpreter-startup dominated; KeccakUnion(1) is dominated by Keccak `eval_check` (3 fallbacks because 6741 > 1536 FP slot cap) and Keccak `scatter`.
+
+## Pre-2026-05-12 Anchor (retained for delta visibility)
+
+The pre-2026-05-12 figures below are retained because they document the path that landed the dramatic libm + Keccak improvements. They are NOT the current measurement anchors.
 
 This note compares the current browser WebGPU proving path with native CUDA
 proving as implemented in this branch. It is intentionally focused on the
 parts that explain correctness parity and the current order-of-magnitude
 runtime gap.
 
-## Current Measurement Anchor
+## Historical Measurement Anchor (pre-2026-05-12; superseded by R1 Smoke Matrix above)
 
 All native baselines should be measured before browser runs with:
 

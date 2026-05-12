@@ -177,14 +177,15 @@ but the group is not complete: `multi_test/rsa_compat` and the full
 proof path before producing succinct receipts. A smaller `KeccakUnion(1)`
 diagnostic now passes as a standalone Chrome/WebGPU succinct proof after the
 async Keccak receipt union fix and async WebGPU Keccak subproof path:
-native CUDA completed the latest focused run in 7.46676192s with 4 segments,
-while Chrome/WebGPU completed the same 4-segment proof in 441.14s after
-negotiating 1 GiB WebGPU buffer and storage-binding limits. The run had 9
-pending Keccak proofs, 1 assumption, and `cpu_only_ops=0`. All ZKP bulk ops
-except `scatter` had 0 CPU fallbacks; the remaining blocker is Keccak circuit
-`eval_check`, which still falls back 9 times because the generic interpreter
-needs 6741 FP slots. The full `KeccakUnion(3)` fixture remains a focused
-performance blocker.
+native CUDA completed the latest focused run in 7.748s with 4 segments
+(refreshed 2026-05-12 RTX 5090), while Chrome/WebGPU completed the same
+4-segment proof in 121.99s — a 15.7× ratio, dramatically improved from the
+prior 441.14s figure. The run had `cpu_only_ops=0`. All ZKP bulk ops except
+`scatter` had 0 CPU fallbacks; the remaining blocker is Keccak circuit
+`eval_check`, which still falls back 3 times in the refreshed run because the
+generic interpreter needs 6741 FP slots > the 1536 cap. The full
+`KeccakUnion(3)` fixture remains a focused performance blocker; native CUDA
+baseline refreshed at 20.676s for SP6 target.
 
 ## GPU-Authoritative Work
 
