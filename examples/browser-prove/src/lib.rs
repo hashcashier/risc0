@@ -1306,8 +1306,26 @@ mod tests {
     /// that chunks the DEF into ~1k-op stages joined via a scratch
     /// storage buffer, mirroring CUDA's 4-file `eval_check_{0,1,2,3}.cu`
     /// layout. Until that lands, this test stays `#[ignore]`'d.
+    /// **iter 7c result** (`evidence/logs/sp3-iter7c-staged-v2-*`): with
+    /// the 4-GiB `maxBufferSize` and 16 storage-buffers-per-stage
+    /// `requiredLimits` bumps, the staged pipelines now compile and
+    /// dispatch cleanly — 0 `webgpu-uncaptured-error` events during the
+    /// rv32im segment prove (1 staged dispatch fires at `domain=131072`
+    /// in ~0 ms with `base_field_fp=false`). But the prove pipeline
+    /// progresses into the recursion lift and the test environment
+    /// (headless Chrome + ChromeDriver + SwiftShader on this CI box)
+    /// runs out of process RAM — ChromeDriver dies with `signal: 9
+    /// (SIGKILL)`. The recursion DEF emits a ~1.68 GiB scratch buffer
+    /// at po2=18 (max_live_fp * 4 u32 * domain) under multi-stage,
+    /// which fits in the bumped limits but stacks badly with the
+    /// already-large CI footprint. iter 7d (next) needs either (a) a
+    /// tighter chunking heuristic that minimizes per-cycle live-set
+    /// for the recursion DEF specifically, or (b) running parity
+    /// against a single fixture small enough to fit (e.g., a custom
+    /// PolyExt program with synthetic taps, not the production
+    /// recursion DEF). Until then, `#[ignore]`'d.
     #[wasm_bindgen_test(async)]
-    #[ignore = "SP3 iter 7 prerequisite: multi-stage split for 20k-op rv32im DEF; single-kernel exhausts GPU per-dispatch budget"]
+    #[ignore = "SP3 iter 7d prerequisite: recursion DEF scratch + accumulated browser-test RAM exceeds CI process budget on iter 7c"]
     async fn poseidon2_basic_async_staged_eval_check_verifies() {
         use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
 

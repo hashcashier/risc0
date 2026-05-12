@@ -45,11 +45,17 @@ use crate::{
     adapter::{PolyExtStep, PolyExtStepDef},
     hal::webgpu_codegen::{
         eval_check_fp_slot, eval_check_last_uses, eval_check_mix_slot, eval_check_note_last,
-        staged_full_kernel_wgsl, CodegenError, EmitterTap, EvalCheckSlotAllocator, FieldMode,
+        staged_multi_kernel_from_def, CodegenError, EmitterTap, EvalCheckSlotAllocator, FieldMode,
+        STAGED_EVAL_CHECK_PRELUDE_WGSL,
     },
     taps::TapSet,
     INV_RATE,
 };
+
+/// Target chunk size for multi-stage staged WGSL emission. Chosen so the
+/// rv32im production DEF (~20k ops) emits ~4 stages, mirroring the CUDA
+/// `eval_check_{0,1,2,3}.cu` layout the runtime interpreter parallels.
+const SP3_STAGED_TARGET_CHUNK_OPS: usize = 5000;
 
 /// `GPUBufferUsage.MAP_READ`.
 pub const WEBGPU_BUFFER_USAGE_MAP_READ: u32 = 0x0001;
@@ -71,9 +77,16 @@ pub const WEBGPU_MAP_MODE_READ: u32 = 0x0001;
 const MAX_EXACT_JS_INTEGER: u64 = 1 << 53;
 const WEBGPU_WORKGROUP_SIZE: u32 = 256;
 const WEBGPU_MAX_WORKGROUPS_PER_DIMENSION: u32 = 65_535;
-const WEBGPU_REQUESTED_MAX_BUFFER_BYTES: u64 = 1024 * 1024 * 1024;
-const WEBGPU_REQUESTED_MAX_STORAGE_BINDING_BYTES: u64 = 1024 * 1024 * 1024;
+const WEBGPU_REQUESTED_MAX_BUFFER_BYTES: u64 = 4 * 1024 * 1024 * 1024 - 4; // 4 GiB - alignment slack; many adapters cap at this
+const WEBGPU_REQUESTED_MAX_STORAGE_BINDING_BYTES: u64 = 4 * 1024 * 1024 * 1024 - 4;
 const WEBGPU_REQUESTED_MAX_WORKGROUP_STORAGE_BYTES: u32 = 128 * 1024;
+/// SP3 iter 7c: staged eval_check uses 7 read-only storage buffers
+/// (group0..2, global0..1, mix_pows, plus mix_tot/mix_mul scratch) and
+/// 3 read-write storage buffers (check, fp_scratch, mix_tot/mix_mul
+/// scratch — overlap intentional, the binding type is `storage` not
+/// `read_only_storage`). WebGPU's default `maxStorageBuffersPerShaderStage`
+/// is 8; we request more so the multi-stage pipeline's bind group fits.
+const WEBGPU_REQUESTED_MAX_STORAGE_BUFFERS_PER_STAGE: u32 = 16;
 const WEBGPU_SAFE_STORAGE_BINDING_BYTES: u64 = 1024 * 1024 * 1024;
 const WEBGPU_SAFE_QUEUE_WRITE_BYTES: usize = 16 * 1024 * 1024;
 const WEBGPU_STORAGE_BUFFER_OFFSET_ALIGNMENT: u64 = 256;
@@ -4463,16 +4476,28 @@ struct EvalCheckInterpreterPipeline {
     kernel: WebGpuKernel,
 }
 
-/// SP3 iter 5 (2026-05-12): a compiled staged-WGSL `eval_check` kernel for a
-/// specific `(PolyExtStepDef, base_field_fp)` pair. The bind-group layout
-/// here mirrors the runtime interpreter's at 9 bindings MINUS binding 6
-/// (`instrs`) — the staged kernel embeds the DEF inline and has no
-/// instruction stream to read.
+/// SP3 iter 7c: a compiled multi-stage staged-WGSL `eval_check` pipeline
+/// for a specific `(PolyExtStepDef, base_field_fp)` pair. The bind-group
+/// layout has 12 active bindings (skipping the interpreter's `instrs`
+/// at binding 6): 8 from iter 6 (check, group0..2, global0..1,
+/// mix_pows, params) plus 4 new for multi-stage scratch (binding 9 =
+/// `staged_scratch_params` UBO, 10/11/12 = `fp_scratch` /
+/// `mix_tot_scratch` / `mix_mul_scratch` rw storage). All stages of
+/// the same DEF share the same bind group; only the bound pipeline
+/// changes per stage.
 #[derive(Clone)]
 struct StagedEvalCheckPipeline {
     layout: web_sys::GpuBindGroupLayout,
-    kernel: WebGpuKernel,
+    stages: Vec<WebGpuKernel>,
     base_field_fp: bool,
+    /// u32 words per cycle in `fp_scratch` (max-live × 1 for Base or × 4
+    /// for Ext). 0 when `stages.len() == 1` (single-kernel, no scratch
+    /// needed; the dispatch still binds a dummy 4-byte fp_scratch buffer
+    /// so the validator doesn't complain).
+    fp_scratch_stride_u32: usize,
+    /// u32 words per cycle in `mix_tot_scratch` / `mix_mul_scratch`
+    /// (max-live × 4). 0 when no multi-stage save is needed.
+    mix_scratch_stride_u32: usize,
 }
 
 /// A single storage or uniform buffer binding in a WebGPU bind group layout.
@@ -5092,10 +5117,16 @@ impl WebGpuHal {
                 back_inv_rate: (t.back() * INV_RATE) as u32,
             })
             .collect();
-        let wgsl = staged_full_kernel_wgsl("staged_eval_check", def, &emitter_taps, field_mode)
-            .map_err(|err: CodegenError| {
-                anyhow!("staged eval_check codegen failed: {:?}", err)
-            })?;
+        let multi = staged_multi_kernel_from_def(
+            "staged_eval_check",
+            def,
+            &emitter_taps,
+            field_mode,
+            SP3_STAGED_TARGET_CHUNK_OPS,
+        )
+        .map_err(|err: CodegenError| {
+            anyhow!("staged eval_check codegen failed: {:?}", err)
+        })?;
         let layout = self.create_bind_group_layout(
             "webgpu_staged_eval_check_layout",
             &[
@@ -5109,18 +5140,40 @@ impl WebGpuHal {
                 // inlines the DEF rather than reading an instruction stream.
                 WebGpuBindingLayout::read_only_storage(7, 0),
                 WebGpuBindingLayout::uniform(8, 96),
+                // SP3 iter 7c: new scratch bindings. Always present in the
+                // layout — single-stage emissions bind a dummy 4-byte fp
+                // / mix scratch buffer to satisfy the validator.
+                WebGpuBindingLayout::uniform(9, 16),
+                WebGpuBindingLayout::storage(10, 0),
+                WebGpuBindingLayout::storage(11, 0),
+                WebGpuBindingLayout::storage(12, 0),
             ],
         )?;
-        let kernel = self.create_compute_kernel(
-            "webgpu_staged_eval_check",
-            &wgsl,
-            "main",
-            &[layout.clone()],
-        )?;
+        let mut stages = Vec::with_capacity(multi.stages.len());
+        for (idx, stage) in multi.stages.iter().enumerate() {
+            // Concatenate prelude + per-stage body for compilation.
+            let mut wgsl = String::with_capacity(
+                STAGED_EVAL_CHECK_PRELUDE_WGSL.len() + stage.wgsl_source.len() + 64,
+            );
+            wgsl.push_str(STAGED_EVAL_CHECK_PRELUDE_WGSL);
+            wgsl.push('\n');
+            wgsl.push_str(&stage.wgsl_source);
+            let kernel_name = if multi.stages.len() == 1 {
+                "webgpu_staged_eval_check"
+            } else {
+                "webgpu_staged_eval_check_stage"
+            };
+            let kernel =
+                self.create_compute_kernel(kernel_name, &wgsl, "main", &[layout.clone()])?;
+            let _ = idx;
+            stages.push(kernel);
+        }
         let pipeline = StagedEvalCheckPipeline {
             layout,
-            kernel,
+            stages,
             base_field_fp,
+            fp_scratch_stride_u32: multi.fp_scratch_stride_u32,
+            mix_scratch_stride_u32: multi.mix_scratch_stride_u32,
         };
         self.staged_eval_check_pipelines
             .borrow_mut()
@@ -5216,6 +5269,43 @@ impl WebGpuHal {
             bytemuck::cast_slice(&params_words),
         )?;
 
+        // SP3 iter 7c: per-cycle scratch sized to (fp_stride + mix_stride * 2)
+        // * domain * 4 B. For single-stage emissions both strides are 0
+        // and we bind a small dummy buffer to satisfy the bind group layout.
+        let fp_stride = pipeline.fp_scratch_stride_u32;
+        let mix_stride = pipeline.mix_scratch_stride_u32;
+        let num_stages = pipeline.stages.len();
+        let fp_scratch_byte_len = if fp_stride == 0 {
+            4
+        } else {
+            byte_len_for::<u32>(fp_stride * domain_u32 as usize)
+        };
+        let mix_scratch_byte_len = if mix_stride == 0 {
+            4
+        } else {
+            byte_len_for::<u32>(mix_stride * domain_u32 as usize)
+        };
+        let fp_scratch_gpu = self
+            .create_storage_buffer("webgpu_staged_eval_check_fp_scratch", fp_scratch_byte_len)?;
+        let mix_tot_scratch_gpu = self.create_storage_buffer(
+            "webgpu_staged_eval_check_mix_tot_scratch",
+            mix_scratch_byte_len,
+        )?;
+        let mix_mul_scratch_gpu = self.create_storage_buffer(
+            "webgpu_staged_eval_check_mix_mul_scratch",
+            mix_scratch_byte_len,
+        )?;
+        let scratch_params_words = [
+            u32::try_from(fp_stride).expect("staged fp_stride exceeds u32"),
+            u32::try_from(mix_stride).expect("staged mix_stride exceeds u32"),
+            u32::try_from(num_stages).expect("staged num_stages exceeds u32"),
+            0u32,
+        ];
+        let scratch_params_buf = self.create_uniform_buffer(
+            "webgpu_staged_eval_check_scratch_params",
+            bytemuck::cast_slice(&scratch_params_words),
+        )?;
+
         let bind_group = self.create_bind_group(
             "webgpu_staged_eval_check_bind_group",
             &pipeline.layout,
@@ -5234,11 +5324,24 @@ impl WebGpuHal {
                     offset: 0,
                     size: Some(96),
                 },
+                WebGpuBufferBinding {
+                    binding: 9,
+                    buffer: &scratch_params_buf,
+                    offset: 0,
+                    size: Some(16),
+                },
+                WebGpuBufferBinding::new(10, &fp_scratch_gpu),
+                WebGpuBufferBinding::new(11, &mix_tot_scratch_gpu),
+                WebGpuBufferBinding::new(12, &mix_mul_scratch_gpu),
             ],
         )?;
 
-        let workgroups = domain_u32.div_ceil(64);
-        self.dispatch_compute_1d(&pipeline.kernel, &bind_group, workgroups);
+        let workgroups = domain_u32;
+        // Dispatch each stage in sequence; queue ordering ensures
+        // stage K's scratch writes are visible to stage K+1's reads.
+        for stage in &pipeline.stages {
+            self.dispatch_compute_1d(stage, &bind_group, workgroups);
+        }
         self.record_gpu_result_authoritative("eval_check", true);
         Ok(true)
     }
@@ -9809,6 +9912,16 @@ async fn request_device() -> Result<web_sys::GpuDevice> {
         &required_limits,
         "maxComputeWorkgroupStorageSize",
         max_compute_workgroup_storage_size as u64,
+    )?;
+    // SP3 iter 7c: bump storage-buffers-per-stage so the staged multi-stage
+    // bind group (10 storage bindings) fits. Default WebGPU is 8.
+    let max_storage_buffers_per_stage = adapter_limits
+        .max_storage_buffers_per_shader_stage()
+        .min(WEBGPU_REQUESTED_MAX_STORAGE_BUFFERS_PER_STAGE);
+    set_required_limit(
+        &required_limits,
+        "maxStorageBuffersPerShaderStage",
+        max_storage_buffers_per_stage as u64,
     )?;
     let descriptor = web_sys::GpuDeviceDescriptor::new();
     descriptor.set_required_limits(&required_limits);
