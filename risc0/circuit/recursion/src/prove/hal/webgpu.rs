@@ -219,23 +219,35 @@ impl RecursionProver for WebGpuRecursionProver {
 
             {
                 let _gpu_scope = self.hal.gpu_authoritative_scope(true);
-                prover
-                    .commit_group_async(REGISTER_GROUP_CTRL, &witgen.ctrl)
-                    .await?;
-                prover
-                    .commit_group_async(REGISTER_GROUP_DATA, &witgen.data)
-                    .await?;
+                {
+                    let _t = WebGpuStageTimer::new_active("commit_group_async recursion_ctrl");
+                    prover
+                        .commit_group_async(REGISTER_GROUP_CTRL, &witgen.ctrl)
+                        .await?;
+                }
+                {
+                    let _t = WebGpuStageTimer::new_active("commit_group_async recursion_data");
+                    prover
+                        .commit_group_async(REGISTER_GROUP_DATA, &witgen.data)
+                        .await?;
+                }
             }
 
             let mix: [BabyBearElem; CircuitImpl::MIX_SIZE] =
                 std::array::from_fn(|_| prover.iop().random_elem());
-            let mix = witgen.accum(self.hal.as_ref(), self.circuit_hal.as_ref(), &mix)?;
+            let mix = {
+                let _t = WebGpuStageTimer::new("recursion_witgen_accum");
+                witgen.accum(self.hal.as_ref(), self.circuit_hal.as_ref(), &mix)?
+            };
 
             let seal = {
                 let _gpu_scope = self.hal.gpu_authoritative_scope(true);
-                prover
-                    .commit_group_async(REGISTER_GROUP_ACCUM, &witgen.accum)
-                    .await?;
+                {
+                    let _t = WebGpuStageTimer::new_active("commit_group_async recursion_accum");
+                    prover
+                        .commit_group_async(REGISTER_GROUP_ACCUM, &witgen.accum)
+                        .await?;
+                }
                 prover
                     .finalize_async(&[&mix, global], self.circuit_hal.as_ref())
                     .await?

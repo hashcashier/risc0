@@ -244,23 +244,35 @@ impl SegmentProver for WebGpuSegmentProver {
             let async_scopes = crate::prove::webgpu_async_authoritative_scopes();
             {
                 let _gpu_scope = hal.gpu_authoritative_scope(async_scopes.code_data);
-                prover.commit_group_async(REGISTER_GROUP_CODE, code).await?;
-                prover.commit_group_async(REGISTER_GROUP_DATA, data).await?;
+                {
+                    let _t = WebGpuStageTimer::new_active("commit_group_async rv32im_code");
+                    prover.commit_group_async(REGISTER_GROUP_CODE, code).await?;
+                }
+                {
+                    let _t = WebGpuStageTimer::new_active("commit_group_async rv32im_data");
+                    prover.commit_group_async(REGISTER_GROUP_DATA, data).await?;
+                }
             }
 
             let mix: [Val; REGCOUNT_MIX] = std::array::from_fn(|_| prover.iop().random_elem());
-            let mix = witgen.accum(hal, circuit_hal, &mix)?;
+            let mix = {
+                let _t = WebGpuStageTimer::new("rv32im_witgen_accum");
+                witgen.accum(hal, circuit_hal, &mix)?
+            };
 
             let async_scopes = crate::prove::webgpu_async_authoritative_scopes();
-            prover
-                .commit_group_async_scoped(
-                    REGISTER_GROUP_ACCUM,
-                    &witgen.accum.buf,
-                    async_scopes.accum_make_coeffs,
-                    async_scopes.accum_poly_group,
-                    async_scopes.accum_merkle,
-                )
-                .await?;
+            {
+                let _t = WebGpuStageTimer::new_active("commit_group_async rv32im_accum");
+                prover
+                    .commit_group_async_scoped(
+                        REGISTER_GROUP_ACCUM,
+                        &witgen.accum.buf,
+                        async_scopes.accum_make_coeffs,
+                        async_scopes.accum_poly_group,
+                        async_scopes.accum_merkle,
+                    )
+                    .await?;
+            }
             {
                 let _gpu_scope = hal.gpu_authoritative_scope(async_scopes.finalize);
                 prover

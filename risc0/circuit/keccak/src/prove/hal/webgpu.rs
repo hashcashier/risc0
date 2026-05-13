@@ -252,12 +252,18 @@ impl KeccakProver for WebGpuKeccakProver {
 
             {
                 let _gpu_scope = self.hal.gpu_authoritative_scope(true);
-                prover
-                    .commit_group_async(REGISTER_GROUP_CODE, &code.buf)
-                    .await?;
-                prover
-                    .commit_group_async(REGISTER_GROUP_DATA, &data.buf)
-                    .await?;
+                {
+                    let _t = WebGpuStageTimer::new_active("commit_group_async keccak_code");
+                    prover
+                        .commit_group_async(REGISTER_GROUP_CODE, &code.buf)
+                        .await?;
+                }
+                {
+                    let _t = WebGpuStageTimer::new_active("commit_group_async keccak_data");
+                    prover
+                        .commit_group_async(REGISTER_GROUP_DATA, &data.buf)
+                        .await?;
+                }
             }
 
             let mix: [Val; REGCOUNT_MIX] = std::array::from_fn(|_| prover.iop().random_elem());
@@ -268,9 +274,12 @@ impl KeccakProver for WebGpuKeccakProver {
                 .alloc_elem_init("accum", cycles * REGCOUNT_ACCUM, Val::ZERO);
             let seal = {
                 let _gpu_scope = self.hal.gpu_authoritative_scope(true);
-                prover
-                    .commit_group_async(REGISTER_GROUP_ACCUM, &accum)
-                    .await?;
+                {
+                    let _t = WebGpuStageTimer::new_active("commit_group_async keccak_accum");
+                    prover
+                        .commit_group_async(REGISTER_GROUP_ACCUM, &accum)
+                        .await?;
+                }
                 prover
                     .finalize_async(&[&mix, &global.buf], self.circuit_hal.as_ref())
                     .await?
