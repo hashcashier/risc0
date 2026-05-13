@@ -42,3 +42,26 @@ Trigger event was the xgboost browser proof's verify_lift failure (`evidence/per
 **Verified**: xgboost succinct receipt in **117.92 s** on the full GPU path (~21× native CUDA's 5.7 s) — vs the rejected D12 cpu_mirror's ~600×. R1 smoke poseidon2_basic in 3.93 s (matches baseline; no regression from D16's Drop work). Evidence: `evidence/logs/sp-cr-xgboost-d16-buffer-destroy-1778619000.txt`, `evidence/logs/sp-cr-r1-smoke-d16-poseidon2-1778619200.txt`.
 
 Complementary defensive correctness fix retained: `can_dispatch_hash_rows` / `can_dispatch_hash_fold` check `round_constants` / `m_int_diag` raw_buffer presence (mirrors dispatch preconditions). xgboost reclassified to `verified` (full GPU path). SP10 unblocked. Performance follow-up: close the ~21× gap to 1.0× native CUDA via SP2–SP11.
+
+### SP6c/SP6d (overlap + multi-device) — 2026-05-13
+
+Direct hardware measurement (`evidence/perf/sp6c-overlap/2026-05-13-cuda-vs-webgpu-utilization.md`) reframed the remaining roadmap. RTX 5090 sits at **12.6% mean GPU util / 53.7 W mean power** during WebGPU libm prove (3231 ms); CUDA hits 25.6% / 119 W at 437 ms. WebGPU is **submission-bound, not compute-bound** — the GPU has 7× headroom that single-device single-thread proving cannot exploit.
+
+Plan reprioritized via Addendum 04: SP6c (CPU/GPU overlap) and SP6d (multi-device pool) are now the dominant levers. Per-kernel SPs (SP3, SP6a) are demoted because they only address ~13% of wall time.
+
+Landed in this push (post Phase 03 lock):
+- SP6a iter 1 (per-round FRI timers) — Poseidon2 merkle ceiling identified (~860 ms / 94% of fri_prove on lift).
+- SP6b iter 4 (chunked Horner heuristic) — -13% poseidon2_basic wall (3739→3258 ms).
+- SP6c iter 1 — `gpu_idle_ratio` metric instrumented (`WebGpuStageTimer::new_active` + thread-local accumulator + `prove_session_async` metric log).
+- SP6c iter 2 — `commit_group_async` + `witgen_accum` instrumented; metric tightens 0.46→0.34 on R1 smokes.
+- SP6c iter 3 — PARKED with documented structural reason (single-thread + single-device limit).
+- SP6d iter 1 — `risc0_zkvm::WebGpuProverPool` scaffold + 2-slot construct smoke; browser confirms independent `web_sys::GpuDevice` per slot.
+
+Current R1 measurements (post-iter-2):
+| Fixture | wall_ms | gpu_idle_ratio |
+|---|---:|---:|
+| poseidon2_basic | 3219 | 0.344 |
+| libm | 3213 | 0.343 |
+| keccak_union_small | 107138 | 0.353 |
+
+Status snapshot for future sessions: `addenda/03-implementation-status-2026-05-13.md`. Roadmap: SP6d iter 2 (distribute lift/join work across pool slots, expected 30–50% wall win on multi-segment); then SP7 (GPU-resident witness, expected ~7% per circuit); SP8 (readback coalesce, ~3%); SP9 (pipeline cache, ~5%); SP10 (R9 matrix re-measurement); SP11 (closing audit).
