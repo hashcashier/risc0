@@ -626,6 +626,12 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
         let mut eval_u: Vec<<crate::hal::webgpu::WebGpuHal as Hal>::ExtElem> = Vec::new();
         {
             let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for("finalize_async eval_u_groups", self.hal);
+            // SP8 iter 1: issue all per-group batch_evaluate dispatches
+            // first, then await their readbacks via futures::try_join_all.
+            // mapAsync requests fire concurrently from the JS side, so the
+            // browser can pipeline them across the 3 groups instead of
+            // round-tripping each in turn.
+            let mut outs = Vec::with_capacity(self.groups.len());
             for (id, pg) in self.groups.iter().enumerate() {
                 let pg = pg.as_ref().unwrap();
 
@@ -643,7 +649,14 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
                 self.hal
                     .batch_evaluate_any_async(&pg.coeffs, pg.count, &which, &xs, &out)
                     .await?;
-                out.sync_gpu_to_cpu(self.hal).await?;
+                outs.push(out);
+            }
+            let readback_futures = outs
+                .iter()
+                .map(|out| out.sync_gpu_to_cpu(self.hal))
+                .collect::<Vec<_>>();
+            futures::future::try_join_all(readback_futures).await?;
+            for out in &outs {
                 out.view(|view| {
                     eval_u.extend(view);
                 });

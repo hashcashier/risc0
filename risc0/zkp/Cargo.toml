@@ -44,6 +44,7 @@ rayon = { version = "1.5", optional = true }
 risc0-sys = { workspace = true, optional = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+futures = { version = "0.3", default-features = false, features = ["alloc"], optional = true }
 getrandom_02 = { package = "getrandom", version = "0.2.16", features = [
   "js",
 ] }
@@ -116,6 +117,7 @@ std = ["anyhow/std"]
 unstable = []
 webgpu = [
   "prove",
+  "dep:futures",
   "dep:js-sys",
   "dep:wasm-bindgen",
   "dep:wasm-bindgen-futures",
