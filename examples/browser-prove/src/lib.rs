@@ -1021,8 +1021,19 @@ mod tests {
         }
     }
 
+    /// SP4 (R8) regression: recursion-sized `gather_sample` operates
+    /// over a `BufferPool` (multi-tile GPU source) without any CPU
+    /// fallback. Replaces the obsolete
+    /// `webgpu_hal_recursion_sized_gather_sample_falls_back_to_cpu`
+    /// test, whose `dst.cpu_is_current()` assertion stopped holding
+    /// after iter 7c bumped `maxStorageBufferBindingSize` from the
+    /// default 128 MiB to 1 GiB (the 512 MiB source now fits one
+    /// binding and the original CPU-fallback code path no longer
+    /// fires).
     #[wasm_bindgen_test(async)]
-    async fn webgpu_hal_recursion_sized_gather_sample_falls_back_to_cpu() {
+    async fn webgpu_hal_recursion_sized_gather_sample_uses_buffer_pool() {
+        use risc0_zkp::hal::webgpu::buffer_pool::{BufferPool, TileLayout};
+
         console_error_panic_hook::set_once();
 
         let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
@@ -1035,28 +1046,66 @@ mod tests {
         let source_bytes = source_elems * std::mem::size_of::<BabyBearElem>();
         assert!(source_bytes > 120 * 1024 * 1024);
 
-        let src = hal.alloc_elem("webgpu_hal_recursion_sized_gather_src", source_elems);
-        src.view_mut(|view| {
-            for (idx, value) in view.iter_mut().enumerate() {
-                *value = elem(idx + 9000);
-            }
-        });
+        // Force a multi-tile pool by capping the per-tile binding at
+        // 128 MiB (we know iter 7c bumped the real device limit, so we
+        // pass the smaller cap explicitly here so the pool splits into
+        // four 32-col tiles). Production callers will use the actual
+        // device's `max_storage_binding_bytes()`.
+        let max_binding = 128u64 * 1024 * 1024;
+        let layout = TileLayout::new(
+            rows,
+            cols,
+            std::mem::size_of::<BabyBearElem>(),
+            max_binding,
+        )
+        .expect("recursion-sized layout must fit at 128 MiB-per-tile");
+        assert!(
+            layout.num_tiles() > 1,
+            "expected multi-tile layout to exercise the tiled gather path"
+        );
+        let pool = BufferPool::new::<BabyBearElem>(
+            &hal,
+            "webgpu_hal_recursion_sized_gather_pool",
+            layout,
+        )
+        .expect("pool allocation must succeed at recursion size");
 
-        for idx in [0, rows / 2 + 17, rows - 1] {
-            let expected = (0..cols)
-                .map(|col| elem(col * rows + idx + 9000))
-                .collect::<Vec<_>>();
+        // Populate the pool from a CPU staging buffer.
+        let staging: Vec<BabyBearElem> = (0..source_elems).map(|i| elem(i + 9000)).collect();
+        let staging_bytes: Vec<u8> = staging
+            .iter()
+            .flat_map(|e| e.as_u32_montgomery().to_le_bytes())
+            .collect();
+        pool.upload_from_cpu_bytes(
+            &hal,
+            std::mem::size_of::<BabyBearElem>(),
+            staging_bytes.as_slice(),
+        )
+        .expect("pool upload must succeed");
+
+        hal.reset_diagnostics();
+        for idx in [0usize, rows / 2 + 17, rows - 1] {
+            let expected: Vec<BabyBearElem> =
+                (0..cols).map(|col| elem(col * rows + idx + 9000)).collect();
             let dst = hal.alloc_elem("webgpu_hal_recursion_sized_gather_dst", cols);
             {
                 let _gpu_scope = hal.gpu_authoritative_scope(true);
-                hal.gather_sample(&dst, &src, idx, cols, rows);
+                hal.debug_dispatch_gather_sample_tiled(&dst, &pool, idx, cols, rows)
+                    .expect("tiled gather must succeed");
             }
-            assert!(
-                dst.cpu_is_current(),
-                "recursion-sized gather should keep CPU output current until WebGPU supports tiled buffers"
-            );
+            // Pull the GPU result back to CPU for comparison. (The
+            // dispatch marks `dst` GPU-dirty; `to_vec` requires a
+            // current CPU shadow.)
+            dst.sync_gpu_to_cpu(&hal).await.expect("readback must succeed");
             assert_eq!(dst.to_vec(), expected, "idx={idx}");
         }
+
+        // No CPU fallback fired: the tiled path runs entirely on GPU.
+        let stats = hal.diagnostics();
+        assert_eq!(
+            stats.cpu_fallbacks, 0,
+            "tiled gather should not record any CPU fallbacks"
+        );
     }
 
     #[wasm_bindgen_test(async)]

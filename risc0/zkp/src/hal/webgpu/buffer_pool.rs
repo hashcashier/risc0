@@ -186,34 +186,44 @@ impl BufferPool {
     }
 
     /// Test/setup helper: populate the entire pool from a contiguous
-    /// column-major CPU slice (`cpu[col * stride + row]`). Sliced into
-    /// per-tile uploads. Used by the browser-prove regression test
-    /// (`webgpu_hal_recursion_sized_gather_sample_uses_buffer_pool`)
-    /// and by production callers in SP5 that build the recursion
-    /// data group from a CPU-side staging buffer.
+    /// column-major CPU byte slice (`cpu_bytes[col * stride * elem_size
+    /// .. (col+1) * stride * elem_size]` for each column). Sliced
+    /// into per-tile uploads. Used by the browser-prove regression
+    /// test (`webgpu_hal_recursion_sized_gather_sample_uses_buffer_pool`)
+    /// and by production callers in SP5 that build the recursion data
+    /// group from a CPU-side staging buffer.
+    ///
+    /// `elem_size` must match the `T` used when calling `Self::new`.
+    /// Callers can build `cpu_bytes` via `bytemuck::cast_slice` over
+    /// their elem slice, or any other byte-equivalent encoding.
     #[doc(hidden)]
-    pub fn upload_from_cpu_slice<T: bytemuck::Pod>(
+    pub fn upload_from_cpu_bytes(
         &self,
         hal: &WebGpuHal,
-        cpu: &[T],
+        elem_size: usize,
+        cpu_bytes: &[u8],
     ) -> Result<()> {
+        let expected_bytes = self
+            .layout
+            .total_cols
+            .checked_mul(self.layout.stride)
+            .and_then(|n| n.checked_mul(elem_size))
+            .ok_or_else(|| anyhow!("BufferPool::upload: total bytes overflow"))?;
         ensure!(
-            cpu.len() == self.layout.total_cols * self.layout.stride,
-            "BufferPool::upload size mismatch: cpu={} layout={}*{}",
-            cpu.len(),
-            self.layout.total_cols,
-            self.layout.stride,
+            cpu_bytes.len() == expected_bytes,
+            "BufferPool::upload size mismatch: cpu={} expected={expected_bytes}",
+            cpu_bytes.len(),
         );
         for tile_idx in 0..self.num_tiles() {
             let col_start = tile_idx * self.layout.tile_cols;
             let cols = self.layout.cols_in_tile(tile_idx);
-            let elem_start = col_start * self.layout.stride;
-            let elem_end = elem_start + cols * self.layout.stride;
+            let byte_start = col_start * self.layout.stride * elem_size;
+            let byte_end = byte_start + cols * self.layout.stride * elem_size;
             hal.write_buffer_named(
                 &self.buffers[tile_idx],
                 self.name,
                 0,
-                bytemuck::cast_slice(&cpu[elem_start..elem_end]),
+                &cpu_bytes[byte_start..byte_end],
             )?;
         }
         Ok(())
