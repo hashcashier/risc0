@@ -4,7 +4,10 @@
     "args": [
       "enable-unsafe-webgpu",
       "enable-features=Vulkan",
-      "use-angle=vulkan"
+      "use-angle=vulkan",
+      "disable-gpu-watchdog",
+      "disable-hang-monitor",
+      "enable-dawn-features=allow_unsafe_apis,disable_robustness"
     ]
   }
 }
