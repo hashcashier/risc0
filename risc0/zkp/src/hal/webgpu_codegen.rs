@@ -1099,29 +1099,38 @@ fn emit_chunk_wgsl(
     // `plan.fp_slots` / `plan.mix_slots` (the cross-chunk high-water)
     // so all stages share a stable size.
     let workgroup_size = choose_workgroup_size(field_mode, fp_slots, mix_slots);
+    // SP3 iter 7z: CUDA-inspired structure. CUDA's `eval_check` calls
+    // `poly_fp` which calls `rv32im_v2_0..19` device functions — nvcc
+    // optimizes register allocation per function. We mirror that by
+    // declaring `fp`/`mix_tot`/`mix_mul` at module scope (`var<private>`,
+    // per-thread persistent) and emitting the chunk body as a separate
+    // `fn chunk_body(...)`. Main does the dispatch math + bounds check
+    // and calls chunk_body. The driver can analyze each function's
+    // register pressure independently — should generate tighter code
+    // than one ~1.6 MB straight-line main.
+    writeln!(
+        wgsl,
+        "var<private> fp: array<{}, {fp_slots}>;",
+        field_mode.fp_ty()
+    )
+    .unwrap();
+    writeln!(wgsl, "var<private> mix_tot: array<vec4<u32>, {mix_slots}>;").unwrap();
+    writeln!(wgsl, "var<private> mix_mul: array<vec4<u32>, {mix_slots}>;").unwrap();
+    wgsl.push_str("fn chunk_body(tile_local: u32, cycle: u32) {\n");
+    wgsl.push_str(&emitter.body);
+    wgsl.push_str("}\n");
     writeln!(wgsl, "@compute @workgroup_size({workgroup_size})").unwrap();
     wgsl.push_str("fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
     // SP3 iter 7g: CUDA-shape dispatch. The host calls
     // `dispatch_workgroups(tile_size / workgroup_size, num_tiles, 1)` ONCE
-    // per stage — closer to CUDA's single-grid-launch shape. `tile_local
-    // = gid.x` is the thread's offset within a tile (global x, post-
-    // workgroup); `tile_idx = gid.y` is which tile this thread belongs
-    // to; the global cycle is `tile_idx * tile_size + tile_local`.
-    // Scratch I/O is keyed by `tile_local` so the scratch buffer
-    // remains `tile_size`-sized regardless of domain.
+    // per stage. `tile_local = gid.x` is the thread's offset within a
+    // tile; `tile_idx = gid.y` is which tile this thread belongs to;
+    // the global cycle is `tile_idx * tile_size + tile_local`.
     wgsl.push_str("  let tile_local = gid.x;\n");
     wgsl.push_str("  let tile_idx = gid.y;\n");
     wgsl.push_str("  let cycle = tile_idx * staged_scratch_params.tile_size + tile_local;\n");
     wgsl.push_str("  if (cycle >= params.domain) { return; }\n");
-    writeln!(
-        wgsl,
-        "  var fp: array<{}, {fp_slots}>;",
-        field_mode.fp_ty()
-    )
-    .unwrap();
-    writeln!(wgsl, "  var mix_tot: array<vec4<u32>, {mix_slots}>;").unwrap();
-    writeln!(wgsl, "  var mix_mul: array<vec4<u32>, {mix_slots}>;").unwrap();
-    wgsl.push_str(&emitter.body);
+    wgsl.push_str("  chunk_body(tile_local, cycle);\n");
     wgsl.push_str("}\n");
 
     let _ = taps;
