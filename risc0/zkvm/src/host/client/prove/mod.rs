@@ -22,6 +22,8 @@ pub(crate) mod local;
 pub(crate) mod opts;
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 pub(crate) mod webgpu;
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub mod webgpu_pool;
 
 use core::ops::Deref;
 use std::{path::PathBuf, rc::Rc};

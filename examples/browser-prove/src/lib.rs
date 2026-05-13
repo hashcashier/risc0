@@ -1171,6 +1171,33 @@ mod tests {
         assert_eq!(dst.to_vec(), expected);
     }
 
+    /// SP6d iter 1 — construct a 2-slot WebGPU prover pool. Validates
+    /// that the browser will hand out two independent `web_sys::GpuDevice`
+    /// instances and we can build two HALs from them. Each HAL has its
+    /// own submission queue; iter 2+ will route concurrent prove jobs
+    /// across slots.
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_pool_two_slot_construct_smoke() {
+        use risc0_zkvm::WebGpuProverPool;
+
+        console_error_panic_hook::set_once();
+
+        let pool = WebGpuProverPool::new(2).await.expect("pool construct");
+        assert_eq!(pool.len(), 2);
+        assert!(!pool.is_empty());
+
+        let (idx_a, prover_a) = pool.next_slot();
+        let (idx_b, prover_b) = pool.next_slot();
+        assert_eq!(idx_a, 0);
+        assert_eq!(idx_b, 1);
+        assert_eq!(prover_a.get_name(), "webgpu-pool-0");
+        assert_eq!(prover_b.get_name(), "webgpu-pool-1");
+
+        // Wraparound
+        let (idx_c, _) = pool.next_slot();
+        assert_eq!(idx_c, 0);
+    }
+
     #[wasm_bindgen_test(async)]
     async fn webgpu_hal_oversized_async_gather_reads_only_sample() {
         console_error_panic_hook::set_once();
