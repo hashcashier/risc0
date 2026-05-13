@@ -207,6 +207,9 @@ impl ProverImpl {
             session.pending_keccaks.len(),
             session.assumptions.len()
         ));
+        let prove_session_wall_start = js_sys::Date::now();
+        let prove_session_active_start =
+            risc0_zkp::hal::webgpu::WebGpuStageTimer::snapshot_gpu_active_ms();
 
         ensure!(
             self.opts.hashfn == "poseidon2",
@@ -339,6 +342,18 @@ impl ProverImpl {
 
         let _timer = WebGpuStageTimer::new("composite_to_succinct_async");
         let succinct_receipt = self.composite_to_succinct_async(&composite_receipt).await?;
+        drop(_timer);
+        let wall_ms: f64 = js_sys::Date::now() - prove_session_wall_start;
+        let active_ms: f64 = risc0_zkp::hal::webgpu::WebGpuStageTimer::snapshot_gpu_active_ms()
+            - prove_session_active_start;
+        let idle_ratio: f64 = if wall_ms > 0.0 {
+            (1.0_f64 - active_ms / wall_ms).max(0.0)
+        } else {
+            0.0
+        };
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "prove_session_async wall_ms={wall_ms:.1} gpu_active_ms={active_ms:.1} gpu_idle_ratio={idle_ratio:.3}",
+        ));
         let receipt = Receipt::new(
             InnerReceipt::Succinct(succinct_receipt),
             session.journal.clone().unwrap_or_default().bytes,

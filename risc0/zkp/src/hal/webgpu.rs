@@ -163,6 +163,11 @@ const WEBGPU_EVAL_OP_AND_COND: u32 = 9;
 pub struct WebGpuStageTimer {
     label: String,
     start_ms: f64,
+    gpu_active: bool,
+}
+
+thread_local! {
+    static WEBGPU_GPU_ACTIVE_MS: Cell<f64> = const { Cell::new(0.0) };
 }
 
 /// Optional circuit-specific WebGPU implementation of the check-polynomial
@@ -192,22 +197,53 @@ impl WebGpuStageTimer {
         Self {
             label,
             start_ms: js_sys::Date::now(),
+            gpu_active: false,
         }
+    }
+
+    pub fn new_active(label: impl Into<String>) -> Self {
+        let label = label.into();
+        log_webgpu_stage(&format!("browser-prove:stage start {label}"));
+        Self {
+            label,
+            start_ms: js_sys::Date::now(),
+            gpu_active: true,
+        }
+    }
+
+    pub fn snapshot_gpu_active_ms() -> f64 {
+        WEBGPU_GPU_ACTIVE_MS.with(|c| c.get())
+    }
+
+    pub fn reset_gpu_active_ms() {
+        WEBGPU_GPU_ACTIVE_MS.with(|c| c.set(0.0));
     }
 }
 
 impl Drop for WebGpuStageTimer {
     fn drop(&mut self) {
         let elapsed_ms = js_sys::Date::now() - self.start_ms;
-        log_webgpu_stage(&format!(
-            "browser-prove:stage done {} elapsed_ms={elapsed_ms:.3}",
-            self.label
-        ));
+        if self.gpu_active {
+            WEBGPU_GPU_ACTIVE_MS.with(|c| c.set(c.get() + elapsed_ms));
+            log_webgpu_stage(&format!(
+                "browser-prove:stage done {} elapsed_ms={elapsed_ms:.3} gpu_active=true",
+                self.label
+            ));
+        } else {
+            log_webgpu_stage(&format!(
+                "browser-prove:stage done {} elapsed_ms={elapsed_ms:.3}",
+                self.label
+            ));
+        }
     }
 }
 
 pub(crate) fn log_webgpu_stage(message: &str) {
     web_sys::console::log_1(&JsValue::from_str(message));
+}
+
+pub fn log_webgpu_metric(message: &str) {
+    log_webgpu_stage(&format!("browser-prove:metric {message}"));
 }
 
 #[derive(Clone, Copy)]

@@ -111,6 +111,42 @@ fn keccak_union() {
 }
 
 #[test_log::test]
+fn cuda_baseline_poseidon2_basic_succinct() {
+    let env = ExecutorEnv::builder()
+        .write(&MultiTestSpec::Poseidon2Basic)
+        .unwrap()
+        .build()
+        .unwrap();
+    let opts = ProverOpts::succinct();
+    let prover = get_prover_server(&opts).unwrap();
+    let t0 = std::time::Instant::now();
+    let receipt = prover.prove(env, MULTI_TEST_ELF).unwrap().receipt;
+    eprintln!(
+        "cuda_baseline poseidon2_basic_succinct elapsed_ms={}",
+        t0.elapsed().as_millis()
+    );
+    receipt.verify(MULTI_TEST_ID).unwrap();
+}
+
+#[test_log::test]
+fn cuda_baseline_libm_succinct() {
+    let env = ExecutorEnv::builder()
+        .write(&MultiTestSpec::LibM)
+        .unwrap()
+        .build()
+        .unwrap();
+    let opts = ProverOpts::succinct();
+    let prover = get_prover_server(&opts).unwrap();
+    let t0 = std::time::Instant::now();
+    let receipt = prover.prove(env, MULTI_TEST_ELF).unwrap().receipt;
+    eprintln!(
+        "cuda_baseline libm_succinct elapsed_ms={}",
+        t0.elapsed().as_millis()
+    );
+    receipt.verify(MULTI_TEST_ID).unwrap();
+}
+
+#[test_log::test]
 fn basic() {
     // ensure that we got a succinct receipt.
     prove_nothing_succinct().receipt.inner.succinct().unwrap();
