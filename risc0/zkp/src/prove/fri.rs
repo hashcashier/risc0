@@ -138,26 +138,59 @@ impl WebGpuProveRoundInfo {
         hal: &crate::hal::webgpu::WebGpuHal,
         iop: &mut WriteIOP<risc0_core::field::baby_bear::BabyBear>,
         coeffs: &crate::hal::webgpu::WebGpuBuffer<risc0_core::field::baby_bear::BabyBearElem>,
+        round_idx: usize,
     ) -> anyhow::Result<Self> {
         debug!("Doing FRI folding");
+        let _round_timer = crate::hal::webgpu::WebGpuStageTimer::new(format!(
+            "fri_prove round={round_idx} domain_in={}",
+            coeffs.size() / <crate::hal::webgpu::WebGpuHal as Hal>::ExtElem::EXT_SIZE * INV_RATE
+        ));
         let ext_size = <crate::hal::webgpu::WebGpuHal as Hal>::ExtElem::EXT_SIZE;
         let size = coeffs.size() / ext_size;
         let domain = size * INV_RATE;
         let evaluated = hal.alloc_elem("evaluated", domain * ext_size);
-        hal.batch_expand_into_evaluate_ntt_async(&evaluated, coeffs, ext_size, log2_ceil(INV_RATE))
+        {
+            let _t = crate::hal::webgpu::WebGpuStageTimer::new(format!(
+                "fri_prove round={round_idx} expand_evaluate_ntt domain={domain}"
+            ));
+            hal.batch_expand_into_evaluate_ntt_async(
+                &evaluated,
+                coeffs,
+                ext_size,
+                log2_ceil(INV_RATE),
+            )
             .await?;
-        let merkle = MerkleTreeProver::new_async(
-            hal,
-            &evaluated,
-            domain / FRI_FOLD,
-            FRI_FOLD * ext_size,
-            QUERIES,
-        )
-        .await?;
-        merkle.commit_async(hal, iop).await?;
+        }
+        let merkle = {
+            let _t = crate::hal::webgpu::WebGpuStageTimer::new(format!(
+                "fri_prove round={round_idx} merkle_new rows={} cols={}",
+                domain / FRI_FOLD,
+                FRI_FOLD * ext_size
+            ));
+            MerkleTreeProver::new_async(
+                hal,
+                &evaluated,
+                domain / FRI_FOLD,
+                FRI_FOLD * ext_size,
+                QUERIES,
+            )
+            .await?
+        };
+        {
+            let _t = crate::hal::webgpu::WebGpuStageTimer::new(format!(
+                "fri_prove round={round_idx} merkle_commit"
+            ));
+            merkle.commit_async(hal, iop).await?;
+        }
         let fold_mix = iop.random_ext_elem();
         let out_coeffs = hal.alloc_elem("out_coeffs", size / FRI_FOLD * ext_size);
-        hal.fri_fold_async(&out_coeffs, coeffs, &fold_mix).await?;
+        {
+            let _t = crate::hal::webgpu::WebGpuStageTimer::new(format!(
+                "fri_prove round={round_idx} fri_fold count_out={}",
+                size / FRI_FOLD
+            ));
+            hal.fri_fold_async(&out_coeffs, coeffs, &fold_mix).await?;
+        }
         Ok(WebGpuProveRoundInfo {
             domain,
             coeffs: out_coeffs,
@@ -178,21 +211,29 @@ pub async fn fri_prove_async(
     let orig_domain = coeffs.size() / ext_size * INV_RATE;
     let mut rounds = Vec::new();
     let mut coeffs = coeffs.clone();
+    let mut round_idx = 0usize;
     while coeffs.size() / ext_size > FRI_MIN_DEGREE {
-        let round = WebGpuProveRoundInfo::new(hal, iop, &coeffs).await?;
+        let round = WebGpuProveRoundInfo::new(hal, iop, &coeffs, round_idx).await?;
         coeffs = round.coeffs.clone();
         rounds.push(round);
+        round_idx += 1;
     }
 
     let final_coeffs = hal.alloc_elem("final_coeffs", coeffs.size());
-    hal.eltwise_copy_elem(&final_coeffs, &coeffs);
-    hal.batch_bit_reverse_async(&final_coeffs, ext_size).await?;
-    final_coeffs.sync_gpu_to_cpu(hal).await?;
-    final_coeffs.view(|view| {
-        iop.write_field_elem_slice::<risc0_core::field::baby_bear::BabyBearElem>(view);
-        let digest = hal.get_hash_suite().hashfn.hash_elem_slice(view);
-        iop.commit(&digest);
-    });
+    {
+        let _t = crate::hal::webgpu::WebGpuStageTimer::new(format!(
+            "fri_prove final size={}",
+            final_coeffs.size()
+        ));
+        hal.eltwise_copy_elem(&final_coeffs, &coeffs);
+        hal.batch_bit_reverse_async(&final_coeffs, ext_size).await?;
+        final_coeffs.sync_gpu_to_cpu(hal).await?;
+        final_coeffs.view(|view| {
+            iop.write_field_elem_slice::<risc0_core::field::baby_bear::BabyBearElem>(view);
+            let digest = hal.get_hash_suite().hashfn.hash_elem_slice(view);
+            iop.commit(&digest);
+        });
+    }
 
     debug!("Doing Queries");
     let mut query_positions = Vec::with_capacity(QUERIES);
