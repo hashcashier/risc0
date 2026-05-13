@@ -58,7 +58,17 @@ struct Params {
 @group(0) @binding(5) var<storage, read> global1: ElemBuffer;
 // binding 6 is intentionally skipped — it's `instrs` for the runtime
 // interpreter, unused by the staged kernel.
-@group(0) @binding(7) var<storage, read> mix_pows: ElemBuffer;
+// SP3 iter 7x: `mix_pows` is a uniform buffer (CUDA `__constant__`
+// analog). Fixed-size 16384 vec4 = 256 KiB matches the bumped
+// `maxUniformBufferBindingSize` limit in the device descriptor. Each
+// `eval_check` call writes only the prefix the DEF actually uses;
+// `load_mix_pow` indexes into the array. UBO reads are GPU-cached
+// and broadcast-friendly, which is the win over the previous
+// `var<storage, read>` declaration.
+struct MixPowsUbo {
+    data: array<vec4<u32>, 16384>,
+};
+@group(0) @binding(7) var<uniform> mix_pows: MixPowsUbo;
 @group(0) @binding(8) var<uniform> params: Params;
 
 // ----- BabyBear scalar arithmetic --------------------------------------
@@ -215,13 +225,14 @@ fn read_global_ext(arg: u32, offset: u32) -> vec4<u32> {
 }
 
 fn load_mix_pow(mix_idx: u32) -> vec4<u32> {
-    let base = params.mix_pows_base + mix_idx * 4u;
-    return vec4<u32>(
-        mix_pows.data[base + 0u],
-        mix_pows.data[base + 1u],
-        mix_pows.data[base + 2u],
-        mix_pows.data[base + 3u],
-    );
+    // SP3 iter 7x: indexed UBO read. `mix_idx` is the logical mix
+    // power index; with `mix_pows_base` (storage-buffer-era u32 offset)
+    // mapped to vec4-aligned space, `mix_pows_base / 4u` would be the
+    // vec4 offset. Pre-iter-7x callers (host side) pre-bake
+    // `mix_pows_base = 0` for the staged path, so this just indexes
+    // by `mix_idx`. Keep the divide-by-4 here for forward compatibility
+    // if a future variant uses a non-zero base.
+    return mix_pows.data[(params.mix_pows_base / 4u) + mix_idx];
 }
 
 fn zerofier_inv(idx: u32) -> u32 {

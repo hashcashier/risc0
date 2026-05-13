@@ -1882,7 +1882,9 @@ mod tests {
         assert!(prelude.contains("@group(0) @binding(3) var<storage, read> group2:"));
         assert!(prelude.contains("@group(0) @binding(4) var<storage, read> global0:"));
         assert!(prelude.contains("@group(0) @binding(5) var<storage, read> global1:"));
-        assert!(prelude.contains("@group(0) @binding(7) var<storage, read> mix_pows:"));
+        // SP3 iter 7x: mix_pows is a uniform buffer (CUDA `__constant__`
+        // analog), not a storage buffer like the interpreter uses.
+        assert!(prelude.contains("@group(0) @binding(7) var<uniform> mix_pows:"));
         assert!(prelude.contains("@group(0) @binding(8) var<uniform> params:"));
         assert!(
             !prelude.contains("@group(0) @binding(6) "),

@@ -107,6 +107,22 @@ const WEBGPU_REQUESTED_MAX_WORKGROUP_STORAGE_BYTES: u32 = 128 * 1024;
 /// `read_only_storage`). WebGPU's default `maxStorageBuffersPerShaderStage`
 /// is 8; we request more so the multi-stage pipeline's bind group fits.
 const WEBGPU_REQUESTED_MAX_STORAGE_BUFFERS_PER_STAGE: u32 = 16;
+
+/// SP3 iter 7x (2026-05-13): bump `maxUniformBufferBindingSize` so the
+/// staged eval_check's `mix_pows` can live in a uniform buffer instead
+/// of a storage buffer. CUDA's reference uses `__constant__` memory
+/// for `poly_mix` (broadcast-cached, low-latency); UBOs are the
+/// WebGPU analog. For rv32im poseidon2_basic, `mix_pow_words = 25864`
+/// (= 103 KiB), so we need at least 128 KiB. 256 KiB gives headroom
+/// for larger DEFs.
+const WEBGPU_REQUESTED_MAX_UNIFORM_BUFFER_BINDING_BYTES: u64 = 256 * 1024;
+
+/// SP3 iter 7x: capacity of the staged `mix_pows` uniform buffer in
+/// `vec4<u32>` slots. The WGSL prelude declares
+/// `array<vec4<u32>, SP3_STAGED_MIX_POWS_UBO_VEC4_CAPACITY>`; only the
+/// first `mix_pow_words / 4` entries are populated per call. 16384
+/// vec4 = 262144 B = 256 KiB matches the bumped UBO limit above.
+const SP3_STAGED_MIX_POWS_UBO_VEC4_CAPACITY: usize = 16384;
 const WEBGPU_SAFE_STORAGE_BINDING_BYTES: u64 = 1024 * 1024 * 1024;
 const WEBGPU_SAFE_QUEUE_WRITE_BYTES: usize = 16 * 1024 * 1024;
 const WEBGPU_STORAGE_BUFFER_OFFSET_ALIGNMENT: u64 = 256;
@@ -5233,7 +5249,15 @@ impl WebGpuHal {
                 WebGpuBindingLayout::read_only_storage(5, 0),
                 // binding 6 (instrs) intentionally omitted; staged kernel
                 // inlines the DEF rather than reading an instruction stream.
-                WebGpuBindingLayout::read_only_storage(7, 0),
+                // SP3 iter 7x: binding 7 (mix_pows) is now a uniform
+                // buffer (CUDA `__constant__` analog). The full 256 KiB
+                // is bound regardless of the DEF's actual mix_pow_words —
+                // the WGSL declares a fixed-size array and only reads
+                // the prefix the DEF needs.
+                WebGpuBindingLayout::uniform(
+                    7,
+                    (SP3_STAGED_MIX_POWS_UBO_VEC4_CAPACITY * 16) as u64,
+                ),
                 WebGpuBindingLayout::uniform(8, 96),
                 // SP3 iter 7c: new scratch bindings. Always present in the
                 // layout — single-stage emissions bind a dummy 4-byte fp
@@ -5335,9 +5359,25 @@ impl WebGpuHal {
         // across all eval_check calls hitting this pipeline.
         let mix_expected = def.ret + 1;
         let mix_pow_words = mix_expected * BabyBearExtElem::EXT_SIZE;
-        let mix_pows_buf = self.create_storage_buffer(
+        // SP3 iter 7x: mix_pows is a uniform buffer (CUDA `__constant__`
+        // analog). Sized to the full UBO capacity so the WGSL's
+        // fixed-size array<vec4<u32>, SP3_STAGED_MIX_POWS_UBO_VEC4_CAPACITY>
+        // declaration matches the buffer size exactly. Each `eval_check`
+        // call writes only `mix_pow_words` u32s starting at offset 0;
+        // the remaining slots are unused.
+        let mix_pows_capacity_bytes =
+            (SP3_STAGED_MIX_POWS_UBO_VEC4_CAPACITY * 16) as u64;
+        if (mix_pow_words * 4) as u64 > mix_pows_capacity_bytes {
+            return Err(anyhow!(
+                "staged eval_check: mix_pow_words ({}) exceeds UBO capacity ({} u32)",
+                mix_pow_words,
+                mix_pows_capacity_bytes / 4
+            ));
+        }
+        let mix_pows_buf = self.create_buffer(
             "webgpu_staged_eval_check_mix_pows",
-            byte_len_for::<u32>(mix_pow_words.max(1)),
+            mix_pows_capacity_bytes,
+            WEBGPU_BUFFER_USAGE_UNIFORM | WEBGPU_BUFFER_USAGE_COPY_DST,
         )?;
         let params_buf = self.create_buffer(
             "webgpu_staged_eval_check_params",
@@ -10145,6 +10185,16 @@ async fn request_device() -> Result<web_sys::GpuDevice> {
         &required_limits,
         "maxStorageBuffersPerShaderStage",
         max_storage_buffers_per_stage as u64,
+    )?;
+    // SP3 iter 7x: bump `maxUniformBufferBindingSize` so `mix_pows`
+    // can live in a UBO (CUDA `__constant__` analog).
+    let max_uniform_buffer_binding_size = (adapter_limits
+        .max_uniform_buffer_binding_size() as u64)
+        .min(WEBGPU_REQUESTED_MAX_UNIFORM_BUFFER_BINDING_BYTES);
+    set_required_limit(
+        &required_limits,
+        "maxUniformBufferBindingSize",
+        max_uniform_buffer_binding_size,
     )?;
     let descriptor = web_sys::GpuDeviceDescriptor::new();
     descriptor.set_required_limits(&required_limits);
