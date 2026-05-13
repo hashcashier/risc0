@@ -52,6 +52,12 @@ use crate::{
     INV_RATE,
 };
 
+// SP4 (R8): `BufferPool` + `TileLayout` for tiled multi-buffer source
+// representations of recursion-sized data groups. Lives in a child
+// module so the pure addressing math has its own unit tests without
+// dragging in all of `webgpu.rs`.
+pub(crate) mod buffer_pool;
+
 /// Target chunk size for multi-stage staged WGSL emission. Chosen so the
 /// rv32im production DEF (~20k ops) emits ~4 stages, mirroring the CUDA
 /// `eval_check_{0,1,2,3}.cu` layout the runtime interpreter parallels.
