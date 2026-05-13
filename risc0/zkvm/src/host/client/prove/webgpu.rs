@@ -61,6 +61,14 @@ impl WebGpuProver {
         self.hal.diagnostics()
     }
 
+    /// SP6d iter 5: exposes the underlying HAL so a pool orchestrator
+    /// can hand work to this prover's GPUDevice via the public
+    /// `lift_webgpu` / `join_webgpu` entry points in
+    /// `risc0_zkvm::host::recursion::prove`.
+    pub fn hal_handle(&self) -> Rc<WebGpuHal> {
+        self.hal.clone()
+    }
+
     /// Reset backend usage diagnostics accumulated by the underlying WebGPU HAL.
     pub fn reset_diagnostics(&self) {
         self.hal.reset_diagnostics();

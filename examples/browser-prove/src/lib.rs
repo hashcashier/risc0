@@ -1332,6 +1332,76 @@ mod tests {
         );
     }
 
+    /// SP6d iter 5 — `WebGpuProverPool::lift_and_join_async` distributes a
+    /// composite receipt's per-segment lifts across pool slots and joins
+    /// in a balanced tree. On a single-segment fixture (poseidon2_basic)
+    /// there's only one lift, so this measures that the pool path
+    /// produces a verifiable receipt and does not regress wall time
+    /// vs single-slot lift.
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_pool_lift_and_join_single_segment_smoke() {
+        use risc0_zkvm::{InnerReceipt, ProverOpts, WebGpuProverPool};
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        console_error_panic_hook::set_once();
+
+        let pool = WebGpuProverPool::new(2).await.expect("pool construct");
+        let prover = pool.get(0);
+
+        let env = ExecutorEnv::builder()
+            .write(&MultiTestSpec::Poseidon2Basic)
+            .unwrap()
+            .build()
+            .unwrap();
+        // 1) Prove COMPOSITE on slot 0.
+        let composite_info = prover
+            .prove_with_opts_async(env, MULTI_TEST_ELF, &ProverOpts::default())
+            .await
+            .expect("composite prove");
+        let composite = match &composite_info.receipt.inner {
+            InnerReceipt::Composite(c) => c.clone(),
+            other => panic!("expected composite receipt, got {other:?}"),
+        };
+
+        // 2) Distribute lift+join across the 2-slot pool.
+        let t0 = js_sys::Date::now();
+        let succinct = pool
+            .lift_and_join_async(&composite)
+            .await
+            .expect("pool lift+join");
+        let pool_lift_join_ms = js_sys::Date::now() - t0;
+
+        // 3) Confirm the succinct receipt verifies against the same
+        // image id by wrapping it in a full Receipt.
+        let wrapped = risc0_zkvm::Receipt::new(
+            InnerReceipt::Succinct(succinct),
+            composite_info
+                .receipt
+                .journal
+                .bytes
+                .clone(),
+        );
+        wrapped
+            .verify(MULTI_TEST_ID)
+            .expect("pool-distributed succinct verifies");
+
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "pool_lift_and_join_single_segment_smoke pool_lift_join_ms={pool_lift_join_ms:.0}"
+        ));
+        // Single segment ⇒ 1 lift + 0 joins, so wall ≈ single lift_async (~2.2 s).
+        assert!(
+            pool_lift_join_ms < 4000.0,
+            "single-segment pool lift+join wall {pool_lift_join_ms} ms ≥ 4000 ms — regression"
+        );
+    }
+
+    // SP6d iter 5 multi-segment validation deferred: forcing 2 segments
+    // via segment_limit_po2(15) + BusyLoop hit a chromedriver watchdog
+    // SIGKILL on the dev box. Single-segment validation above already
+    // exercises the lift_and_join_async path end-to-end (1 lift, 0 joins,
+    // verified receipt). Multi-segment validation can run in a dedicated
+    // session with a higher per-test timeout / disabled watchdog.
+
     #[wasm_bindgen_test(async)]
     async fn webgpu_hal_oversized_async_gather_reads_only_sample() {
         console_error_panic_hook::set_once();

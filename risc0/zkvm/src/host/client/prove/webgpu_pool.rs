@@ -32,10 +32,16 @@
 
 use std::rc::Rc;
 
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use risc0_zkp::{
     core::hash::poseidon2::Poseidon2HashSuite,
     hal::webgpu::WebGpuHal,
+};
+
+use crate::{
+    host::recursion::prove::{join_webgpu, lift_webgpu},
+    receipt::SuccinctReceipt,
+    CompositeReceipt, ReceiptClaim,
 };
 
 use super::webgpu::WebGpuProver;
@@ -89,5 +95,75 @@ impl WebGpuProverPool {
         let idx = self.next.get();
         self.next.set((idx + 1) % n);
         (idx, self.provers[idx].clone())
+    }
+
+    /// SP6d iter 5: distribute lifts + tree-joins across pool slots to
+    /// compress a composite receipt. The composite's segments may have
+    /// been proved by any (single) prover; this method only handles the
+    /// lift+join phase.
+    ///
+    /// Lift assignment: segment `N` lifts on slot `N % pool.len()`.
+    /// Join structure: balanced tree (left-to-right pairing per level).
+    /// Pairs at each tree level run concurrently across slots.
+    ///
+    /// Limitation: this method does NOT currently handle composite
+    /// receipts with assumption_receipts (resolve phase). For those,
+    /// fall back to `WebGpuProver::compress_async` on a single slot.
+    pub async fn lift_and_join_async(
+        &self,
+        composite: &CompositeReceipt,
+    ) -> Result<SuccinctReceipt<ReceiptClaim>> {
+        anyhow::ensure!(
+            composite.assumption_receipts.is_empty(),
+            "lift_and_join_async does not handle assumptions; use compress_async on a single prover"
+        );
+        anyhow::ensure!(
+            !composite.segments.is_empty(),
+            "composite receipt has no segments"
+        );
+
+        // Phase 1: lifts across slots in parallel.
+        let mut lift_futures = Vec::with_capacity(composite.segments.len());
+        for (idx, seg) in composite.segments.iter().enumerate() {
+            let hal = self.provers[idx % self.provers.len()].hal_handle();
+            let seg = seg.clone();
+            lift_futures.push(async move { lift_webgpu(&seg, hal).await });
+        }
+        let mut tier = futures::future::try_join_all(lift_futures)
+            .await
+            .context("pool lift phase")?;
+
+        // Phase 2: balanced-tree joins. At each level pair receipts
+        // left-to-right; odd receipt at the end passes through unchanged.
+        let mut level = 0_u32;
+        while tier.len() > 1 {
+            let mut join_futures = Vec::with_capacity((tier.len() + 1) / 2);
+            let mut carry: Option<SuccinctReceipt<ReceiptClaim>> = None;
+            let mut chunks = tier.chunks_exact(2);
+            let mut slot_idx = 0;
+            for pair in &mut chunks {
+                let hal = self.provers[slot_idx % self.provers.len()].hal_handle();
+                let a = pair[0].clone();
+                let b = pair[1].clone();
+                join_futures.push(async move { join_webgpu(&a, &b, hal).await });
+                slot_idx += 1;
+            }
+            // Odd tail receipt passes through this level.
+            if let Some(remainder) = chunks.remainder().first() {
+                carry = Some(remainder.clone());
+            }
+            let mut next_tier = futures::future::try_join_all(join_futures)
+                .await
+                .with_context(|| format!("pool join level {level}"))?;
+            if let Some(c) = carry {
+                next_tier.push(c);
+            }
+            tier = next_tier;
+            level += 1;
+        }
+
+        tier.into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("lift_and_join produced no receipt"))
     }
 }
