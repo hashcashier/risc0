@@ -1108,6 +1108,69 @@ mod tests {
         );
     }
 
+    /// SP5a (R3): `BufferPool::from_webgpu_buffer` smoke test. Builds
+    /// a `WebGpuBuffer` on CPU, converts it to a `BufferPool` keyed
+    /// by `(stride, total_cols, max_binding_bytes)`, and verifies a
+    /// gather over the pool matches the expected sample. Exercises
+    /// the helper recursion's `commit_group_async` would call when
+    /// `witness.size() * elem_size > max_storage_binding_bytes`.
+    /// Smaller dimensions than the recursion-sized test so this
+    /// smoke is cheap; the production wiring lands when a fixture
+    /// (e.g., xgboost lift) actually exceeds the binding limit.
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_hal_buffer_pool_from_webgpu_buffer_smoke() {
+        use risc0_zkp::hal::webgpu::buffer_pool::BufferPool;
+
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+
+        // Modest size — enough to exercise a multi-tile split at
+        // a 64 KiB cap (4 tiles of 4 KiB-per-col stride) but cheap.
+        let stride = 1024;
+        let total_cols = 16;
+        let max_binding = 16 * 1024; // forces 4 tiles
+        let source_elems = stride * total_cols;
+
+        let src = hal.alloc_elem("webgpu_hal_buffer_pool_smoke_src", source_elems);
+        src.view_mut(|view| {
+            for (idx, value) in view.iter_mut().enumerate() {
+                *value = elem(idx + 11000);
+            }
+        });
+
+        let pool = BufferPool::from_webgpu_buffer(
+            &hal,
+            "webgpu_hal_buffer_pool_smoke_pool",
+            &src,
+            stride,
+            total_cols,
+            max_binding,
+        )
+        .expect("from_webgpu_buffer must succeed");
+        assert!(
+            pool.num_tiles() > 1,
+            "smoke test must exercise a multi-tile layout"
+        );
+
+        // Sample row idx = stride - 1 — picks the last row across all
+        // columns, exercising the full per-tile address space.
+        let idx = stride - 1;
+        let expected: Vec<BabyBearElem> = (0..total_cols)
+            .map(|col| elem(col * stride + idx + 11000))
+            .collect();
+        let dst = hal.alloc_elem("webgpu_hal_buffer_pool_smoke_dst", total_cols);
+        {
+            let _gpu_scope = hal.gpu_authoritative_scope(true);
+            hal.debug_dispatch_gather_sample_tiled(&dst, &pool, idx, total_cols, stride)
+                .expect("tiled gather over from_webgpu_buffer must succeed");
+        }
+        dst.sync_gpu_to_cpu(&hal).await.expect("readback");
+        assert_eq!(dst.to_vec(), expected);
+    }
+
     #[wasm_bindgen_test(async)]
     async fn webgpu_hal_oversized_async_gather_reads_only_sample() {
         console_error_panic_hook::set_once();

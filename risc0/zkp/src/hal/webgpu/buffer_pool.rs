@@ -34,6 +34,9 @@ use std::mem;
 use anyhow::{anyhow, ensure, Result};
 
 use super::{byte_len_for, WebGpuHal};
+// `size` and `view` are on the `super::super::Buffer` trait, not
+// inherent methods on `WebGpuBuffer`. Bring the trait into scope.
+use super::super::Buffer as _;
 
 /// Layout describing how a logical 2D matrix (`total_cols × stride`
 /// elements, column-major) is split across tile buffers. Each tile
@@ -183,6 +186,65 @@ impl BufferPool {
     /// Borrow tile buffer `tile_idx`. Panics if out of range.
     pub fn tile_buffer(&self, tile_idx: usize) -> &web_sys::GpuBuffer {
         &self.buffers[tile_idx]
+    }
+
+    /// SP5a (R3): build a `BufferPool` for `total_cols` columns of
+    /// `stride` elements at type `T`, sized per tile to fit
+    /// `max_binding_bytes`, and populate it from a CPU-current
+    /// `WebGpuBuffer<T>`. The source's CPU shadow is read directly
+    /// (the buffer must be CPU-current — call `sync_gpu_to_cpu`
+    /// first if it's been touched on GPU). The byte encoding is
+    /// taken as-is — `T` must be a plain-old-data type whose
+    /// in-memory representation matches what kernels expect to read
+    /// from the storage buffer (BabyBearElem stores its raw u32
+    /// directly; no Montgomery conversion needed because the kernel
+    /// shaders also read raw u32s).
+    pub fn from_webgpu_buffer(
+        hal: &WebGpuHal,
+        name: &'static str,
+        src: &super::WebGpuBuffer<risc0_core::field::baby_bear::BabyBearElem>,
+        stride: usize,
+        total_cols: usize,
+        max_binding_bytes: u64,
+    ) -> Result<Self> {
+        let elem_size = mem::size_of::<risc0_core::field::baby_bear::BabyBearElem>();
+        ensure!(
+            src.size() == stride * total_cols,
+            "BufferPool::from_webgpu_buffer: src.size()={} != stride={stride} * total_cols={total_cols}",
+            src.size(),
+        );
+        let layout = TileLayout::new(stride, total_cols, elem_size, max_binding_bytes)?;
+        let pool = Self::new::<risc0_core::field::baby_bear::BabyBearElem>(hal, name, layout)?;
+        // `view` takes a closure returning `()`; route any upload
+        // errors through an `Option<anyhow::Error>` captured by the
+        // closure and surface after `view` returns.
+        let mut err: Option<anyhow::Error> = None;
+        src.view(|cpu| {
+            for tile_idx in 0..pool.num_tiles() {
+                let col_start = tile_idx * pool.layout.tile_cols;
+                let cols = pool.layout.cols_in_tile(tile_idx);
+                let elem_start = col_start * pool.layout.stride;
+                let elem_end = elem_start + cols * pool.layout.stride;
+                let tile_slice = &cpu[elem_start..elem_end];
+                // Cast the BabyBearElem slice to its raw u32 bytes.
+                let bytes: &[u8] = unsafe {
+                    std::slice::from_raw_parts(
+                        tile_slice.as_ptr() as *const u8,
+                        std::mem::size_of_val(tile_slice),
+                    )
+                };
+                if let Err(e) =
+                    hal.write_buffer_named(&pool.buffers[tile_idx], pool.name, 0, bytes)
+                {
+                    err = Some(e);
+                    return;
+                }
+            }
+        });
+        if let Some(e) = err {
+            return Err(e);
+        }
+        Ok(pool)
     }
 
     /// Test/setup helper: populate the entire pool from a contiguous
