@@ -253,13 +253,13 @@ impl KeccakProver for WebGpuKeccakProver {
             {
                 let _gpu_scope = self.hal.gpu_authoritative_scope(true);
                 {
-                    let _t = WebGpuStageTimer::new_active("commit_group_async keccak_code");
+                    let _t = WebGpuStageTimer::new_active_for("commit_group_async keccak_code", self.hal.as_ref());
                     prover
                         .commit_group_async(REGISTER_GROUP_CODE, &code.buf)
                         .await?;
                 }
                 {
-                    let _t = WebGpuStageTimer::new_active("commit_group_async keccak_data");
+                    let _t = WebGpuStageTimer::new_active_for("commit_group_async keccak_data", self.hal.as_ref());
                     prover
                         .commit_group_async(REGISTER_GROUP_DATA, &data.buf)
                         .await?;
@@ -275,7 +275,7 @@ impl KeccakProver for WebGpuKeccakProver {
             let seal = {
                 let _gpu_scope = self.hal.gpu_authoritative_scope(true);
                 {
-                    let _t = WebGpuStageTimer::new_active("commit_group_async keccak_accum");
+                    let _t = WebGpuStageTimer::new_active_for("commit_group_async keccak_accum", self.hal.as_ref());
                     prover
                         .commit_group_async(REGISTER_GROUP_ACCUM, &accum)
                         .await?;

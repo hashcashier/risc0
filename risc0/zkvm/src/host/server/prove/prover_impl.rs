@@ -208,8 +208,12 @@ impl ProverImpl {
             session.assumptions.len()
         ));
         let prove_session_wall_start = js_sys::Date::now();
-        let prove_session_active_start =
-            risc0_zkp::hal::webgpu::WebGpuStageTimer::snapshot_gpu_active_ms();
+        // SP6d iter 4: use the HAL's per-instance counter so a multi-HAL
+        // pool doesn't over-count by other slots' GPU work.
+        let prove_session_active_start = self
+            .webgpu_hal()
+            .map(|hal| hal.gpu_active_ms())
+            .unwrap_or(0.0);
 
         ensure!(
             self.opts.hashfn == "poseidon2",
@@ -344,7 +348,10 @@ impl ProverImpl {
         let succinct_receipt = self.composite_to_succinct_async(&composite_receipt).await?;
         drop(_timer);
         let wall_ms: f64 = js_sys::Date::now() - prove_session_wall_start;
-        let active_ms: f64 = risc0_zkp::hal::webgpu::WebGpuStageTimer::snapshot_gpu_active_ms()
+        let active_ms: f64 = self
+            .webgpu_hal()
+            .map(|hal| hal.gpu_active_ms())
+            .unwrap_or(0.0)
             - prove_session_active_start;
         let idle_ratio: f64 = if wall_ms > 0.0 {
             (1.0_f64 - active_ms / wall_ms).max(0.0)

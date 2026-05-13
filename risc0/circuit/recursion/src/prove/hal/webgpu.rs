@@ -220,13 +220,13 @@ impl RecursionProver for WebGpuRecursionProver {
             {
                 let _gpu_scope = self.hal.gpu_authoritative_scope(true);
                 {
-                    let _t = WebGpuStageTimer::new_active("commit_group_async recursion_ctrl");
+                    let _t = WebGpuStageTimer::new_active_for("commit_group_async recursion_ctrl", self.hal.as_ref());
                     prover
                         .commit_group_async(REGISTER_GROUP_CTRL, &witgen.ctrl)
                         .await?;
                 }
                 {
-                    let _t = WebGpuStageTimer::new_active("commit_group_async recursion_data");
+                    let _t = WebGpuStageTimer::new_active_for("commit_group_async recursion_data", self.hal.as_ref());
                     prover
                         .commit_group_async(REGISTER_GROUP_DATA, &witgen.data)
                         .await?;
@@ -243,7 +243,7 @@ impl RecursionProver for WebGpuRecursionProver {
             let seal = {
                 let _gpu_scope = self.hal.gpu_authoritative_scope(true);
                 {
-                    let _t = WebGpuStageTimer::new_active("commit_group_async recursion_accum");
+                    let _t = WebGpuStageTimer::new_active_for("commit_group_async recursion_accum", self.hal.as_ref());
                     prover
                         .commit_group_async(REGISTER_GROUP_ACCUM, &witgen.accum)
                         .await?;

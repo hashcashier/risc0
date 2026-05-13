@@ -164,6 +164,11 @@ pub struct WebGpuStageTimer {
     label: String,
     start_ms: f64,
     gpu_active: bool,
+    // SP6d iter 4: if set, increment THIS HAL's counter on drop instead
+    // of the thread-local global. Each WebGpuHal owns its own counter via
+    // `Rc<Cell<f64>>`. Multi-HAL pools (SP6d) need this so per-slot
+    // gpu_active_ms doesn't over-count by other slots' activity.
+    hal_active_counter: Option<Rc<Cell<f64>>>,
 }
 
 thread_local! {
@@ -198,6 +203,7 @@ impl WebGpuStageTimer {
             label,
             start_ms: js_sys::Date::now(),
             gpu_active: false,
+            hal_active_counter: None,
         }
     }
 
@@ -208,6 +214,22 @@ impl WebGpuStageTimer {
             label,
             start_ms: js_sys::Date::now(),
             gpu_active: true,
+            hal_active_counter: None,
+        }
+    }
+
+    /// SP6d iter 4: HAL-scoped active timer. The HAL's counter is
+    /// incremented on drop instead of the thread-local global. Use this
+    /// when running under a multi-HAL pool so each HAL's gpu_idle_ratio
+    /// is accurate.
+    pub fn new_active_for(label: impl Into<String>, hal: &WebGpuHal) -> Self {
+        let label = label.into();
+        log_webgpu_stage(&format!("browser-prove:stage start {label}"));
+        Self {
+            label,
+            start_ms: js_sys::Date::now(),
+            gpu_active: true,
+            hal_active_counter: Some(hal.gpu_active_ms_handle()),
         }
     }
 
@@ -224,7 +246,11 @@ impl Drop for WebGpuStageTimer {
     fn drop(&mut self) {
         let elapsed_ms = js_sys::Date::now() - self.start_ms;
         if self.gpu_active {
-            WEBGPU_GPU_ACTIVE_MS.with(|c| c.set(c.get() + elapsed_ms));
+            if let Some(counter) = &self.hal_active_counter {
+                counter.set(counter.get() + elapsed_ms);
+            } else {
+                WEBGPU_GPU_ACTIVE_MS.with(|c| c.set(c.get() + elapsed_ms));
+            }
             log_webgpu_stage(&format!(
                 "browser-prove:stage done {} elapsed_ms={elapsed_ms:.3} gpu_active=true",
                 self.label
@@ -4938,6 +4964,11 @@ pub struct WebGpuHal {
     cpu: CpuHal<BabyBear>,
     poseidon2: Option<WebGpuPoseidon2Hash>,
     diagnostics: WebGpuDiagnosticsState,
+    // SP6d iter 4: per-HAL accumulator for GPU-active stage elapsed_ms.
+    // Wrapped in Rc<Cell<_>> so WebGpuStageTimer instances can hold a
+    // cheap clone without back-references. Replaces the thread-local
+    // WEBGPU_GPU_ACTIVE_MS when running under a multi-HAL pool.
+    gpu_active_ms: Rc<Cell<f64>>,
     gpu_authoritative: Cell<bool>,
     eval_check_gpu_enabled: Cell<bool>,
     batch_expand_into_evaluate_ntt_gpu_enabled: Cell<bool>,
@@ -5040,6 +5071,7 @@ impl WebGpuHal {
             cpu: CpuHal::new(hash_suite),
             poseidon2: None,
             diagnostics: WebGpuDiagnosticsState::default(),
+            gpu_active_ms: Rc::new(Cell::new(0.0)),
             gpu_authoritative: Cell::new(false),
             eval_check_gpu_enabled: Cell::new(true),
             batch_expand_into_evaluate_ntt_gpu_enabled: Cell::new(true),
@@ -5093,6 +5125,25 @@ impl WebGpuHal {
     /// without an immediate CPU mirror.
     pub fn gpu_authoritative(&self) -> bool {
         self.gpu_authoritative.get()
+    }
+
+    /// SP6d iter 4: current gpu_active_ms for this HAL. Sum of all
+    /// `WebGpuStageTimer::new_active_for(_, self)` scopes' elapsed_ms
+    /// since the last reset.
+    pub fn gpu_active_ms(&self) -> f64 {
+        self.gpu_active_ms.get()
+    }
+
+    /// SP6d iter 4: reset this HAL's gpu_active_ms accumulator to 0.
+    pub fn reset_gpu_active_ms(&self) {
+        self.gpu_active_ms.set(0.0);
+    }
+
+    /// SP6d iter 4: clone the counter handle so a `WebGpuStageTimer`
+    /// can increment it on drop without holding a back-reference to
+    /// the HAL. Cheap (Rc::clone).
+    pub fn gpu_active_ms_handle(&self) -> Rc<Cell<f64>> {
+        self.gpu_active_ms.clone()
     }
 
     /// Enable or disable WebGPU eval_check dispatch.
