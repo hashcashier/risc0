@@ -1266,6 +1266,72 @@ mod tests {
         );
     }
 
+    /// SP6d iter 3 — concurrent SUCCINCT proves on a 2-slot pool. Unlike
+    /// the composite-only iter-2 smoke, succinct adds lift+finalize
+    /// (~2.2 s per slot at 34% GPU-idle). The idle window on each slot
+    /// should fill with the other slot's GPU work, yielding a wall well
+    /// under 2x single-prover succinct (3231 ms).
+    ///
+    /// Target: concurrent succinct wall ≤ 4500 ms (i.e., 1.4x single,
+    /// 0.7x serial). True ceiling per per-active-second density would
+    /// be 3231 ms x (active fraction) ≈ ~2200 ms; driver overhead and
+    /// queue serialization eat some of that.
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_pool_two_concurrent_succinct_proves_smoke() {
+        use risc0_zkvm::WebGpuProverPool;
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        console_error_panic_hook::set_once();
+
+        let pool = WebGpuProverPool::new(2).await.expect("pool construct");
+        let prover_a = pool.get(0);
+        let prover_b = pool.get(1);
+
+        let env_a = ExecutorEnv::builder()
+            .write(&MultiTestSpec::Poseidon2Basic)
+            .unwrap()
+            .build()
+            .unwrap();
+        let env_b = ExecutorEnv::builder()
+            .write(&MultiTestSpec::LibM)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let opts = ProverOpts::succinct();
+
+        let t0 = js_sys::Date::now();
+        let (info_a, info_b) = futures::future::join(
+            prover_a.prove_with_opts_async(env_a, MULTI_TEST_ELF, &opts),
+            prover_b.prove_with_opts_async(env_b, MULTI_TEST_ELF, &opts),
+        )
+        .await;
+        let concurrent_wall_ms = js_sys::Date::now() - t0;
+
+        let info_a = info_a.expect("slot 0 succinct prove");
+        let info_b = info_b.expect("slot 1 succinct prove");
+        info_a
+            .receipt
+            .verify(MULTI_TEST_ID)
+            .expect("slot 0 succinct verifies");
+        info_b
+            .receipt
+            .verify(MULTI_TEST_ID)
+            .expect("slot 1 succinct verifies");
+
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "pool_two_concurrent_succinct_proves_smoke concurrent_wall_ms={concurrent_wall_ms:.0}"
+        ));
+
+        // Reference: single-prover succinct on this branch tip ≈ 3231 ms.
+        // 2x serial ≈ 6462 ms. Target ≤ 4500 ms = 70% of serial.
+        assert!(
+            concurrent_wall_ms < 6200.0,
+            "two concurrent succinct proves on 2-slot pool wall \
+             {concurrent_wall_ms} ms ≥ 6200 ms — concurrency not engaged"
+        );
+    }
+
     #[wasm_bindgen_test(async)]
     async fn webgpu_hal_oversized_async_gather_reads_only_sample() {
         console_error_panic_hook::set_once();
