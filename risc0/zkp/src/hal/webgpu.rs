@@ -7063,7 +7063,40 @@ impl WebGpuHal {
         xs: &WebGpuBuffer<BabyBearExtElem>,
         out: &WebGpuBuffer<BabyBearExtElem>,
     ) -> Result<()> {
-        if self.gpu_authoritative()
+        // SP6b iter 4: prefer chunked when eval_count is VERY small
+        // AND deg is large. The chunked path issues one dispatch per
+        // (x, which) pair (per-eval-sequential — see
+        // `batch_evaluate_any_chunked_async` loop), so its dispatch
+        // overhead grows with eval_count. The win comes from
+        // parallelizing the Horner reduction WITHIN each (x, which)
+        // pair into `chunk_count` chunks. So chunked is only a net
+        // win when:
+        //   - eval_count is small enough that sequential dispatches
+        //     don't dominate (empirically ≤ 64 on this machine), AND
+        //   - deg is large enough that the Horner per non-chunked
+        //     thread leaves the GPU underutilized (deg > 8192 means
+        //     each thread does 8K+ iterations, with chunked it
+        //     parallelizes into 8 chunks of 1024 each).
+        //
+        // Hits: recursion lift groups 0/1 (16, 23 evals, deg=1048576).
+        // Misses: rv32im finalize all groups (evals ≥ 119) and
+        // recursion group 2 (604 evals). Iter 3 used a broader
+        // heuristic and regressed rv32im finalize from 30 ms to
+        // 712 ms because it forced chunked on the high-eval-count
+        // case.
+        let prefer_chunked = if self.gpu_authoritative()
+            && poly_count > 0
+            && which.size() > 0
+            && which.size() <= 64
+        {
+            let deg = coeffs.size() / poly_count.max(1);
+            deg > 8192
+        } else {
+            false
+        };
+
+        if !prefer_chunked
+            && self.gpu_authoritative()
             && self.can_dispatch_batch_evaluate_any(out, coeffs, poly_count, which, xs)
         {
             self.batch_evaluate_any(coeffs, poly_count, which, xs, out);
@@ -7076,6 +7109,13 @@ impl WebGpuHal {
                 .batch_evaluate_any_chunked_async(coeffs, poly_count, which, xs, out)
                 .await?
         {
+            return Ok(());
+        }
+
+        if self.gpu_authoritative()
+            && self.can_dispatch_batch_evaluate_any(out, coeffs, poly_count, which, xs)
+        {
+            self.batch_evaluate_any(coeffs, poly_count, which, xs, out);
             return Ok(());
         }
 
