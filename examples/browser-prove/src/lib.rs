@@ -1402,6 +1402,66 @@ mod tests {
     // verified receipt). Multi-segment validation can run in a dedicated
     // session with a higher per-test timeout / disabled watchdog.
 
+    /// SP6d iter 6 — distribute keccak proof requests across pool slots.
+    /// Executes a KeccakUnion(2) fixture to produce 2 pending keccak
+    /// proof requests via the executor (no prove), then runs them via
+    /// `WebGpuProverPool::prove_keccak_requests_async` on a 2-slot pool.
+    ///
+    /// Each request takes ~10-15 s single-slot. With 2 slots in
+    /// parallel, total wall should be ~ceil(2/2) × single = ~10-15 s
+    /// rather than ~20-30 s for serial.
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_pool_keccak_requests_smoke() {
+        use risc0_zkvm::{ExecutorImpl, SimpleSegmentRef, WebGpuProverPool};
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF};
+
+        console_error_panic_hook::set_once();
+
+        // Cap keccak po2 to 14 so each request's prove buffer stays
+        // within wasm32 Vec capacity (~2 GiB). Without this cap, the
+        // default po2 produces a ~2.3 GiB "evaluated" buffer that
+        // overflows isize on wasm.
+        let env = ExecutorEnv::builder()
+            .keccak_max_po2(14)
+            .unwrap()
+            .write(&MultiTestSpec::KeccakUnion(2))
+            .unwrap()
+            .build()
+            .unwrap();
+        let session = ExecutorImpl::from_elf(env, MULTI_TEST_ELF)
+            .expect("executor build")
+            .run_with_callback(|seg| Ok(Box::new(SimpleSegmentRef::new(seg))))
+            .expect("executor run");
+
+        let requests = session.pending_keccaks().to_vec();
+        assert!(
+            !requests.is_empty(),
+            "expected ≥1 keccak request, got {}",
+            requests.len()
+        );
+
+        let pool = WebGpuProverPool::new(2).await.expect("pool construct");
+        let t0 = js_sys::Date::now();
+        let receipts = pool
+            .prove_keccak_requests_async(&requests)
+            .await
+            .expect("pool keccak prove");
+        let wall_ms = js_sys::Date::now() - t0;
+
+        assert_eq!(receipts.len(), requests.len());
+        // Keccak receipts use a specific verifier-parameters set distinct
+        // from the default; verify_integrity() with default VerifierContext
+        // would reject them. The downstream union path in the main prove
+        // flow uses the correct parameters. Here we validate structural
+        // counts and that each `prove_keccak_webgpu` returned without
+        // panic.
+
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "pool_keccak_requests_smoke count={} wall_ms={wall_ms:.0}",
+            receipts.len()
+        ));
+    }
+
     #[wasm_bindgen_test(async)]
     async fn webgpu_hal_oversized_async_gather_reads_only_sample() {
         console_error_panic_hook::set_once();

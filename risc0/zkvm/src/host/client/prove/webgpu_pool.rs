@@ -39,9 +39,12 @@ use risc0_zkp::{
 };
 
 use crate::{
-    host::recursion::prove::{join_webgpu, lift_webgpu},
+    host::{
+        recursion::prove::{join_webgpu, lift_webgpu},
+        server::prove::keccak::prove_keccak_webgpu,
+    },
     receipt::SuccinctReceipt,
-    CompositeReceipt, ReceiptClaim,
+    CompositeReceipt, ProveKeccakRequest, ReceiptClaim, Unknown,
 };
 
 use super::webgpu::WebGpuProver;
@@ -165,5 +168,43 @@ impl WebGpuProverPool {
         tier.into_iter()
             .next()
             .ok_or_else(|| anyhow!("lift_and_join produced no receipt"))
+    }
+
+    /// SP6d iter 6: distribute keccak proof requests across pool slots.
+    /// Each `ProveKeccakRequest` runs `prove_keccak_webgpu` on a
+    /// different slot's `WebGpuHal` in parallel via
+    /// `futures::future::try_join_all`. Returns receipts in input order.
+    ///
+    /// Keccak is the canonical "accelerator" workload: many independent
+    /// proofs, each one a complete prove of the keccak circuit. With N
+    /// requests on a K-slot pool, wall time approaches
+    /// `ceil(N/K) × single-request-wall` instead of `N × wall`.
+    pub async fn prove_keccak_requests_async(
+        &self,
+        requests: &[ProveKeccakRequest],
+    ) -> Result<Vec<SuccinctReceipt<Unknown>>> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Bound active concurrency to pool size. Each keccak prove peaks
+        // at ~500 MiB-2 GiB of CPU+GPU buffers; with try_join_all of N
+        // requests, ALL allocate simultaneously before any drain, and
+        // wasm32's isize-bounded Vec OOMs at ~2 GiB. Batching by slot
+        // count keeps at-most-pool-size proves in flight.
+        let pool_size = self.provers.len();
+        let mut receipts = Vec::with_capacity(requests.len());
+        for chunk in requests.chunks(pool_size) {
+            let mut futures = Vec::with_capacity(chunk.len());
+            for (offset_in_chunk, req) in chunk.iter().enumerate() {
+                let hal = self.provers[offset_in_chunk].hal_handle();
+                let req = req.clone();
+                futures.push(async move { prove_keccak_webgpu(&req, hal).await });
+            }
+            let chunk_receipts = futures::future::try_join_all(futures)
+                .await
+                .context("pool keccak requests chunk")?;
+            receipts.extend(chunk_receipts);
+        }
+        Ok(receipts)
     }
 }
