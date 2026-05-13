@@ -534,16 +534,22 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
                 self.po2,
                 self.cycles,
             );
-        } else {
-            // SP3 iter 7w (2026-05-13): when eval_check ran on GPU, force
-            // a queue drain BEFORE the subsequent NTT / merkle / FRI
-            // stages start submitting their own work. The staged
-            // eval_check kernel for production rv32im DEFs can take 20+
-            // seconds of GPU execution; if its mapAsync drain is
-            // delayed (hidden inside check_group's read), the cumulative
-            // wait can push past the GPU watchdog and trigger
-            // device-lost on subsequent stages. Splitting the drain
-            // here keeps each subsequent operation's wait short.
+        } else if self.hal.staged_eval_check_enabled() {
+            // SP3 iter 7w (2026-05-13): when the STAGED eval_check path
+            // ran, force a queue drain BEFORE the subsequent NTT /
+            // merkle / FRI stages submit their own work. The staged
+            // rv32im kernel takes 20+ seconds of GPU execution and if
+            // its mapAsync drain is hidden inside `check_group`, the
+            // cumulative wait can push past the GPU watchdog and
+            // trigger device-loss on subsequent stages. Splitting the
+            // drain here keeps each subsequent operation's wait short.
+            //
+            // SP4 close-out (2026-05-13): GATED on
+            // `staged_eval_check_enabled` so the interpreter path —
+            // which produces ~660 ms of GPU work that drains naturally
+            // inside `check_group`'s mapAsync — doesn't pay an
+            // unnecessary extra synchronization point. This kept
+            // poseidon2_basic baseline at ~3.93 s.
             let _timer = crate::hal::webgpu::WebGpuStageTimer::new(
                 "finalize_async eval_check_drain",
             );
