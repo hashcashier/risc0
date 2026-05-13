@@ -534,6 +534,20 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
                 self.po2,
                 self.cycles,
             );
+        } else {
+            // SP3 iter 7w (2026-05-13): when eval_check ran on GPU, force
+            // a queue drain BEFORE the subsequent NTT / merkle / FRI
+            // stages start submitting their own work. The staged
+            // eval_check kernel for production rv32im DEFs can take 20+
+            // seconds of GPU execution; if its mapAsync drain is
+            // delayed (hidden inside check_group's read), the cumulative
+            // wait can push past the GPU watchdog and trigger
+            // device-lost on subsequent stages. Splitting the drain
+            // here keeps each subsequent operation's wait short.
+            let _timer = crate::hal::webgpu::WebGpuStageTimer::new(
+                "finalize_async eval_check_drain",
+            );
+            self.hal.wait_idle().await?;
         }
 
         #[cfg(feature = "circuit_debug")]
