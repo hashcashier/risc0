@@ -29,7 +29,11 @@
 //! actual `BufferPool` struct (added in SP4 iter 2) wraps a
 //! `Vec<web_sys::GpuBuffer>` keyed by `TileLayout`.
 
-use anyhow::{anyhow, Result};
+use std::mem;
+
+use anyhow::{anyhow, ensure, Result};
+
+use super::{byte_len_for, WebGpuHal};
 
 /// Layout describing how a logical 2D matrix (`total_cols × stride`
 /// elements, column-major) is split across tile buffers. Each tile
@@ -133,6 +137,86 @@ impl TileLayout {
     /// analogous `col_start * stride` calculation).
     pub fn col_offset_within_tile(&self, col_within_tile: usize) -> usize {
         col_within_tile.saturating_mul(self.stride)
+    }
+}
+
+/// SP4 (R8): tiled multi-buffer source representation. Each tile
+/// buffer holds `cols_in_tile(tile_idx) * layout.stride` elements
+/// (column-major, contiguous). Used by
+/// `WebGpuHal::dispatch_gather_sample_tiled` to gather a sample row
+/// across the full logical matrix when the matrix itself can't fit in
+/// a single `maxStorageBufferBindingSize` binding.
+pub struct BufferPool {
+    pub layout: TileLayout,
+    pub buffers: Vec<web_sys::GpuBuffer>,
+    pub name: &'static str,
+}
+
+impl BufferPool {
+    /// Allocate `layout.num_tiles()` per-tile GPU storage buffers
+    /// sized to `cols_in_tile(t) * stride * elem_size` bytes each.
+    /// Buffers are zero-initialized; the caller populates them via
+    /// `upload_tile_from_cpu_slice` (test helper) or by dispatching
+    /// kernels that write per-tile output (production: a future
+    /// `BufferPool`-aware `make_coeffs_async` variant).
+    pub fn new<T>(hal: &WebGpuHal, name: &'static str, layout: TileLayout) -> Result<Self> {
+        let elem_size = mem::size_of::<T>();
+        ensure!(elem_size > 0, "BufferPool::new: T must be sized");
+        let mut buffers = Vec::with_capacity(layout.num_tiles());
+        for tile_idx in 0..layout.num_tiles() {
+            let elems = layout.elems_in_tile(tile_idx).max(1);
+            let buffer = hal.create_storage_buffer(name, byte_len_for::<T>(elems))?;
+            buffers.push(buffer);
+        }
+        Ok(Self {
+            layout,
+            buffers,
+            name,
+        })
+    }
+
+    /// Number of tile buffers backing this pool.
+    pub fn num_tiles(&self) -> usize {
+        self.buffers.len()
+    }
+
+    /// Borrow tile buffer `tile_idx`. Panics if out of range.
+    pub fn tile_buffer(&self, tile_idx: usize) -> &web_sys::GpuBuffer {
+        &self.buffers[tile_idx]
+    }
+
+    /// Test/setup helper: populate the entire pool from a contiguous
+    /// column-major CPU slice (`cpu[col * stride + row]`). Sliced into
+    /// per-tile uploads. Used by the browser-prove regression test
+    /// (`webgpu_hal_recursion_sized_gather_sample_uses_buffer_pool`)
+    /// and by production callers in SP5 that build the recursion
+    /// data group from a CPU-side staging buffer.
+    #[doc(hidden)]
+    pub fn upload_from_cpu_slice<T: bytemuck::Pod>(
+        &self,
+        hal: &WebGpuHal,
+        cpu: &[T],
+    ) -> Result<()> {
+        ensure!(
+            cpu.len() == self.layout.total_cols * self.layout.stride,
+            "BufferPool::upload size mismatch: cpu={} layout={}*{}",
+            cpu.len(),
+            self.layout.total_cols,
+            self.layout.stride,
+        );
+        for tile_idx in 0..self.num_tiles() {
+            let col_start = tile_idx * self.layout.tile_cols;
+            let cols = self.layout.cols_in_tile(tile_idx);
+            let elem_start = col_start * self.layout.stride;
+            let elem_end = elem_start + cols * self.layout.stride;
+            hal.write_buffer_named(
+                &self.buffers[tile_idx],
+                self.name,
+                0,
+                bytemuck::cast_slice(&cpu[elem_start..elem_end]),
+            )?;
+        }
+        Ok(())
     }
 }
 

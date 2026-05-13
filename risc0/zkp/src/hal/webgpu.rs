@@ -55,8 +55,9 @@ use crate::{
 // SP4 (R8): `BufferPool` + `TileLayout` for tiled multi-buffer source
 // representations of recursion-sized data groups. Lives in a child
 // module so the pure addressing math has its own unit tests without
-// dragging in all of `webgpu.rs`.
-pub(crate) mod buffer_pool;
+// dragging in all of `webgpu.rs`. Public so the browser-prove harness
+// can construct a BufferPool from its regression test.
+pub mod buffer_pool;
 
 /// Target chunk size for multi-stage staged WGSL emission. Chosen so the
 /// rv32im production DEF (~20k ops) emits ~4 stages, mirroring the CUDA
@@ -7566,6 +7567,26 @@ impl WebGpuHal {
         Ok(())
     }
 
+    /// SP4 iter 3 test hook: exercise `dispatch_gather_sample_tiled`
+    /// over a `BufferPool` source. The pool's `layout` must match the
+    /// caller's `stride` and `size`. Production callers will fall into
+    /// this path automatically once SP5 wires the recursion data group
+    /// to be `BufferPool`-backed; for now the test exercises it
+    /// directly.
+    #[doc(hidden)]
+    pub fn debug_dispatch_gather_sample_tiled(
+        &self,
+        dst: &WebGpuBuffer<BabyBearElem>,
+        src_pool: &buffer_pool::BufferPool,
+        idx: usize,
+        size: usize,
+        stride: usize,
+    ) -> Result<()> {
+        self.dispatch_gather_sample_tiled(dst, src_pool, idx, size, stride)?;
+        dst.mark_gpu_dirty();
+        Ok(())
+    }
+
     /// Test hook for validating `mix_poly_coeffs` under GPU-authoritative state
     /// without enabling that path in production proving.
     #[doc(hidden)]
@@ -8740,6 +8761,127 @@ impl WebGpuHal {
                 .div_ceil(WEBGPU_WORKGROUP_SIZE);
             self.dispatch_compute(&kernel, &bind_group, workgroups, 1, 1);
             params_buffers.push(params);
+            bind_groups.push(bind_group);
+        }
+
+        drop(bind_groups);
+        drop(params_buffers);
+        Ok(())
+    }
+
+    /// SP4 iter 2 (R8): tiled gather variant operating over a
+    /// `BufferPool`. Each tile holds a contiguous column-slab of the
+    /// logical 2D source; the kernel runs per-tile with the same
+    /// `GATHER_SAMPLE_ELEM_WGSL` shader as `dispatch_gather_sample`,
+    /// but binding the per-tile buffer instead of a sub-range of one
+    /// oversize buffer. Replaces the locked CPU fallback in
+    /// `gather_sample_async` that previously fired when the source
+    /// exceeded `maxStorageBufferBindingSize`.
+    ///
+    /// `idx`, `size`, and `stride` follow the same contract as
+    /// `gather_sample`: read `pool[col * stride + idx]` into `dst[col]`
+    /// for `col` in `[0, size)`. `size` must equal `pool.layout.total_cols`
+    /// and `stride` must equal `pool.layout.stride`; the layout's
+    /// `tile_cols` is what we iterate over.
+    fn dispatch_gather_sample_tiled(
+        &self,
+        dst: &WebGpuBuffer<BabyBearElem>,
+        src_pool: &buffer_pool::BufferPool,
+        idx: usize,
+        size: usize,
+        stride: usize,
+    ) -> Result<()> {
+        ensure!(
+            stride == src_pool.layout.stride,
+            "dispatch_gather_sample_tiled: stride mismatch (caller={stride}, pool={})",
+            src_pool.layout.stride
+        );
+        ensure!(
+            size == src_pool.layout.total_cols,
+            "dispatch_gather_sample_tiled: size mismatch (caller={size}, pool.total_cols={})",
+            src_pool.layout.total_cols
+        );
+        ensure!(
+            size <= dst.size(),
+            "dispatch_gather_sample_tiled: dst capacity {} < size {size}",
+            dst.size()
+        );
+        if size == 0 {
+            return Ok(());
+        }
+        let dst_gpu = dst
+            .raw_buffer()
+            .ok_or_else(|| anyhow!("dispatch_gather_sample_tiled: dst has no GPU backing"))?;
+        ensure!(
+            self.storage_binding_fits(dst),
+            "dispatch_gather_sample_tiled: dst exceeds max storage binding"
+        );
+        dst.sync_cpu_to_gpu(self)?;
+
+        let layout = self.create_bind_group_layout(
+            "webgpu_gather_sample_tiled_layout",
+            &[
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::read_only_storage(1, 0),
+                WebGpuBindingLayout::uniform(2, 32),
+            ],
+        )?;
+        let kernel = self.create_compute_kernel(
+            "webgpu_gather_sample_tiled",
+            GATHER_SAMPLE_ELEM_WGSL,
+            "main",
+            &[layout.clone()],
+        )?;
+
+        // Hold per-tile params + bind group references until submit
+        // completes (we issue one dispatch per tile inside this fn).
+        let mut params_buffers: Vec<web_sys::GpuBuffer> = Vec::with_capacity(src_pool.num_tiles());
+        let mut bind_groups: Vec<web_sys::GpuBindGroup> =
+            Vec::with_capacity(src_pool.num_tiles());
+
+        for tile_idx in 0..src_pool.num_tiles() {
+            let cols = src_pool.layout.cols_in_tile(tile_idx);
+            if cols == 0 {
+                continue;
+            }
+            let col_start = tile_idx * src_pool.layout.tile_cols;
+            // Per-tile params: dst_base advances by col_start; src_base
+            // is 0 because each tile buffer starts at the first column
+            // it owns (no sub-range offset inside the buffer).
+            let params = [
+                u32::try_from(dst.elem_offset + col_start)
+                    .expect("WebGPU gather dst offset exceeds u32"),
+                0u32,
+                u32::try_from(idx).expect("WebGPU gather idx exceeds u32"),
+                u32::try_from(cols).expect("WebGPU gather tile cols exceeds u32"),
+                u32::try_from(stride).expect("WebGPU gather stride exceeds u32"),
+                0,
+                0,
+                0,
+            ];
+            let params_buf = self.create_uniform_buffer(
+                "webgpu_gather_sample_tiled_params",
+                bytemuck::cast_slice(&params),
+            )?;
+            let bind_group = self.create_bind_group(
+                "webgpu_gather_sample_tiled_bind_group",
+                &layout,
+                &[
+                    WebGpuBufferBinding::new(0, dst_gpu),
+                    WebGpuBufferBinding::new(1, src_pool.tile_buffer(tile_idx)),
+                    WebGpuBufferBinding {
+                        binding: 2,
+                        buffer: &params_buf,
+                        offset: 0,
+                        size: Some(32),
+                    },
+                ],
+            )?;
+            let workgroups = u32::try_from(cols)
+                .expect("WebGPU gather tile cols exceeds u32")
+                .div_ceil(WEBGPU_WORKGROUP_SIZE);
+            self.dispatch_compute(&kernel, &bind_group, workgroups, 1, 1);
+            params_buffers.push(params_buf);
             bind_groups.push(bind_group);
         }
 
