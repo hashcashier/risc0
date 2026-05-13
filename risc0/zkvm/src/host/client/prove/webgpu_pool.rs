@@ -125,39 +125,58 @@ impl WebGpuProverPool {
             "composite receipt has no segments"
         );
 
-        // Phase 1: lifts across slots in parallel.
-        let mut lift_futures = Vec::with_capacity(composite.segments.len());
-        for (idx, seg) in composite.segments.iter().enumerate() {
-            let hal = self.provers[idx % self.provers.len()].hal_handle();
-            let seg = seg.clone();
-            lift_futures.push(async move { lift_webgpu(&seg, hal).await });
+        let pool_size = self.provers.len();
+
+        // Phase 1: lifts in chunks of pool_size. Each lift peaks at
+        // ~6 GiB of CPU+GPU buffers; concurrent lifts > pool_size will
+        // OOM wasm32 (Vec capacity overflow). Chunking matches the
+        // bounded-concurrency pattern used by prove_keccak_requests_async.
+        let mut lifted: Vec<SuccinctReceipt<ReceiptClaim>> =
+            Vec::with_capacity(composite.segments.len());
+        for chunk in composite.segments.chunks(pool_size) {
+            let mut futures = Vec::with_capacity(chunk.len());
+            for (offset, seg) in chunk.iter().enumerate() {
+                let hal = self.provers[offset].hal_handle();
+                let seg = seg.clone();
+                futures.push(async move { lift_webgpu(&seg, hal).await });
+            }
+            let chunk_lifts = futures::future::try_join_all(futures)
+                .await
+                .context("pool lift phase chunk")?;
+            lifted.extend(chunk_lifts);
         }
-        let mut tier = futures::future::try_join_all(lift_futures)
-            .await
-            .context("pool lift phase")?;
 
         // Phase 2: balanced-tree joins. At each level pair receipts
-        // left-to-right; odd receipt at the end passes through unchanged.
+        // left-to-right and run pairs in chunks of pool_size; odd tail
+        // receipt passes through unchanged.
+        let mut tier = lifted;
         let mut level = 0_u32;
         while tier.len() > 1 {
-            let mut join_futures = Vec::with_capacity((tier.len() + 1) / 2);
-            let mut carry: Option<SuccinctReceipt<ReceiptClaim>> = None;
-            let mut chunks = tier.chunks_exact(2);
-            let mut slot_idx = 0;
-            for pair in &mut chunks {
-                let hal = self.provers[slot_idx % self.provers.len()].hal_handle();
-                let a = pair[0].clone();
-                let b = pair[1].clone();
-                join_futures.push(async move { join_webgpu(&a, &b, hal).await });
-                slot_idx += 1;
+            let pairs: Vec<(SuccinctReceipt<ReceiptClaim>, SuccinctReceipt<ReceiptClaim>)> = tier
+                .chunks_exact(2)
+                .map(|pair| (pair[0].clone(), pair[1].clone()))
+                .collect();
+            let carry: Option<SuccinctReceipt<ReceiptClaim>> = if tier.len() % 2 == 1 {
+                tier.last().cloned()
+            } else {
+                None
+            };
+            let mut next_tier: Vec<SuccinctReceipt<ReceiptClaim>> = Vec::with_capacity(
+                pairs.len() + carry.as_ref().map_or(0, |_| 1),
+            );
+            for chunk in pairs.chunks(pool_size) {
+                let mut futures = Vec::with_capacity(chunk.len());
+                for (offset, (a, b)) in chunk.iter().enumerate() {
+                    let hal = self.provers[offset].hal_handle();
+                    let a = a.clone();
+                    let b = b.clone();
+                    futures.push(async move { join_webgpu(&a, &b, hal).await });
+                }
+                let joined = futures::future::try_join_all(futures)
+                    .await
+                    .with_context(|| format!("pool join level {level}"))?;
+                next_tier.extend(joined);
             }
-            // Odd tail receipt passes through this level.
-            if let Some(remainder) = chunks.remainder().first() {
-                carry = Some(remainder.clone());
-            }
-            let mut next_tier = futures::future::try_join_all(join_futures)
-                .await
-                .with_context(|| format!("pool join level {level}"))?;
             if let Some(c) = carry {
                 next_tier.push(c);
             }

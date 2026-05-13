@@ -1395,12 +1395,67 @@ mod tests {
         );
     }
 
-    // SP6d iter 5 multi-segment validation deferred: forcing 2 segments
-    // via segment_limit_po2(15) + BusyLoop hit a chromedriver watchdog
-    // SIGKILL on the dev box. Single-segment validation above already
-    // exercises the lift_and_join_async path end-to-end (1 lift, 0 joins,
-    // verified receipt). Multi-segment validation can run in a dedicated
-    // session with a higher per-test timeout / disabled watchdog.
+    /// SP6d iter 7 — multi-segment lift+join validation via pool. The
+    /// earlier iter-5 attempt OOM'd wasm32 because `try_join_all` of N
+    /// lifts allocated all peak buffers simultaneously. Iter 6 fixed
+    /// the keccak path with bounded chunks; iter 7 applies the same to
+    /// `lift_and_join_async`.
+    ///
+    /// BusyLoop{40_000} at segment_limit_po2(15) ≈ 32K cycles per
+    /// segment ⇒ 2 segments. With 2-slot pool: both lifts run in one
+    /// chunk concurrently, then one join.
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_pool_lift_and_join_multi_segment_smoke() {
+        use risc0_zkvm::{InnerReceipt, ProverOpts, WebGpuProverPool};
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        console_error_panic_hook::set_once();
+
+        let pool = WebGpuProverPool::new(2).await.expect("pool construct");
+        let prover = pool.get(0);
+
+        // Default WebGPU segment_limit_po2 is 18 (256K cycles per segment).
+        // BusyLoop{500_000} ≥ 2 segments at po2=18. Each is a normal-sized
+        // prove (~1 s) so total wall is small (~10 s) — short enough to
+        // stay within chromedriver's session timeout.
+        let env = ExecutorEnv::builder()
+            .write(&MultiTestSpec::BusyLoop { cycles: 500_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let composite_info = prover
+            .prove_with_opts_async(env, MULTI_TEST_ELF, &ProverOpts::composite())
+            .await
+            .expect("composite prove");
+        let composite = match &composite_info.receipt.inner {
+            InnerReceipt::Composite(c) => c.clone(),
+            other => panic!("expected composite, got {other:?}"),
+        };
+        let segment_count = composite.segments.len();
+        assert!(
+            segment_count >= 2,
+            "expected ≥ 2 segments, got {segment_count}"
+        );
+
+        let t0 = js_sys::Date::now();
+        let succinct = pool
+            .lift_and_join_async(&composite)
+            .await
+            .expect("pool lift+join multi-segment");
+        let pool_lift_join_ms = js_sys::Date::now() - t0;
+
+        let wrapped = risc0_zkvm::Receipt::new(
+            InnerReceipt::Succinct(succinct),
+            composite_info.receipt.journal.bytes.clone(),
+        );
+        wrapped
+            .verify(MULTI_TEST_ID)
+            .expect("multi-segment pool succinct verifies");
+
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "pool_lift_and_join_multi_segment_smoke pool_lift_join_ms={pool_lift_join_ms:.0} segments={segment_count}"
+        ));
+    }
 
     /// SP6d iter 6 — distribute keccak proof requests across pool slots.
     /// Executes a KeccakUnion(2) fixture to produce 2 pending keccak
