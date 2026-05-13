@@ -395,6 +395,46 @@ impl<'a> WgslEmitter<'a> {
         })
     }
 
+    /// SP3 iter 7t: reset the emitter's slot allocators and slot maps
+    /// at a chunk boundary. Caller must then call `seed_live_fp` /
+    /// `seed_live_mix` for each var that was live across the
+    /// boundary, in `live_idx` order — that re-establishes the
+    /// `var_idx → slot` mapping for the new chunk before any ops are
+    /// emitted.
+    fn reset_chunk_slots(&mut self) {
+        self.fp_alloc = EvalCheckSlotAllocator::default();
+        self.mix_alloc = EvalCheckSlotAllocator::default();
+        for slot in self.fp_slot_map.iter_mut() {
+            *slot = None;
+        }
+        for slot in self.mix_slot_map.iter_mut() {
+            *slot = None;
+        }
+    }
+
+    /// SP3 iter 7t: allocate a fresh slot for `var` in the current
+    /// chunk's allocator. The caller has the var live (from prev
+    /// boundary's `live_fp`) and emits a scratch-load into the
+    /// returned slot. Returns the assigned slot.
+    fn seed_live_fp(&mut self, var: usize) -> usize {
+        let slot = self.fp_alloc.alloc();
+        if var >= self.fp_slot_map.len() {
+            self.fp_slot_map.resize(var + 1, None);
+        }
+        self.fp_slot_map[var] = Some(slot);
+        slot
+    }
+
+    /// SP3 iter 7t: mix-side counterpart to `seed_live_fp`.
+    fn seed_live_mix(&mut self, var: usize) -> usize {
+        let slot = self.mix_alloc.alloc();
+        if var >= self.mix_slot_map.len() {
+            self.mix_slot_map.resize(var + 1, None);
+        }
+        self.mix_slot_map[var] = Some(slot);
+        slot
+    }
+
     /// Look up the physical slot a still-live fp var was assigned to.
     fn fp_slot_for(&self, var: usize) -> Result<usize, CodegenError> {
         eval_check_fp_slot(&self.fp_slot_map, var)
@@ -849,16 +889,29 @@ pub fn staged_full_kernel_wgsl(
 /// of the chunk that produced ops `[prev_end, end)`, along with their
 /// physical slot assignments at that moment.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// SP3 iter 7t: live-set snapshot at a chunk boundary.
+///
+/// Stores `var_idx` (poly_ext fp/mix var indices) for each live var.
+/// The `live_idx` (position in the vec) is the stable cross-chunk
+/// identifier used in the scratch buffer: chunk K stores `fp[slot]`
+/// into `fp_scratch[live_idx]`, chunk K+1 reads `fp_scratch[live_idx]`
+/// into its own freshly-allocated slot for the same var. Slots are
+/// chunk-local (each chunk's emitter resets its allocator), so a
+/// single `var_idx` may live in slot 5 in chunk K and slot 0 in
+/// chunk K+1.
 pub struct ChunkBoundary {
     /// Exclusive end op_idx for this chunk. Chunk K runs ops
     /// `[boundaries[K-1].end, boundaries[K].end)` (with boundary -1 = 0).
     pub end: usize,
-    /// Fp vars live at this boundary, recorded as `(var_idx, slot_idx)`
-    /// pairs. The next chunk reads these from scratch and recovers each
-    /// var's slot assignment.
-    pub live_fp: Vec<(usize, usize)>,
-    /// Mix vars live at this boundary, recorded as `(var_idx, slot_idx)`.
-    pub live_mix: Vec<(usize, usize)>,
+    /// SP3 iter 7t: fp vars live at this boundary, in stable
+    /// `live_idx` order. Each entry is the `var_idx` (poly_ext fp
+    /// var index). The `live_idx` is the position in this vec and
+    /// is the cross-chunk scratch buffer offset.
+    pub live_fp: Vec<usize>,
+    /// SP3 iter 7t: mix vars live at this boundary, in stable
+    /// `live_idx` order. Each entry is the `var_idx` (poly_ext mix
+    /// var index).
+    pub live_mix: Vec<usize>,
 }
 
 /// Plan output: per-chunk boundaries + slot/scratch-stride dimensioning.
@@ -923,6 +976,14 @@ fn emit_chunk_wgsl(
     ret_var: usize,
 ) -> Result<StagedKernel, CodegenError> {
     emitter.body.clear();
+    // SP3 iter 7t: reset the emitter's slot allocators at every chunk
+    // boundary (including chunk 0, where the reset is a no-op since the
+    // emitter was just created). Live-in vars re-allocate fresh slots
+    // below. This is what bounds each chunk's `fp_slots` /
+    // `mix_slots` to the per-chunk high-water instead of the global
+    // DEF max — drops the rv32im poseidon2_basic emit from 927 fp
+    // slots down to whatever the widest chunk actually needs.
+    emitter.reset_chunk_slots();
     // 1) Live-in scratch loads (only for chunks > 0). Scratch is indexed
     // by `tile_local` (the thread's offset within the current tile),
     // NOT the global `cycle` — so the scratch buffer can be sized to
@@ -939,14 +1000,16 @@ fn emit_chunk_wgsl(
             FieldMode::Base => "read_fp_scratch_scalar",
             FieldMode::Ext => "read_fp_scratch_ext",
         };
-        for (live_idx, (var, slot)) in prev.live_fp.iter().enumerate() {
+        for (live_idx, var) in prev.live_fp.iter().enumerate() {
+            let slot = emitter.seed_live_fp(*var);
             writeln!(
                 emitter.body,
                 "  fp[{slot}] = {fp_helper}(tile_local, {live_idx}u); // fp_var{var}",
             )
             .unwrap();
         }
-        for (live_idx, (var, slot)) in prev.live_mix.iter().enumerate() {
+        for (live_idx, var) in prev.live_mix.iter().enumerate() {
+            let slot = emitter.seed_live_mix(*var);
             writeln!(
                 emitter.body,
                 "  mix_tot[{slot}] = read_mix_tot_scratch(tile_local, {live_idx}u); mix_mul[{slot}] = read_mix_mul_scratch(tile_local, {live_idx}u); // mix_var{var}",
@@ -954,12 +1017,14 @@ fn emit_chunk_wgsl(
             .unwrap();
         }
     }
-    // 2) Run the chunk's ops via the persistent emitter.
+    // 2) Run the chunk's ops via the (chunk-local) emitter.
     for (offset, op) in ops.iter().enumerate() {
         let global_idx = op_start_idx + offset;
         emitter.emit(global_idx, op)?;
     }
-    // 3) Live-out scratch stores OR write_check.
+    // 3) Live-out scratch stores OR write_check. Use the emitter's
+    // CURRENT slot for each live var (post-emit, possibly different
+    // from the planner's slot because allocators diverged).
     if !is_last {
         writeln!(
             emitter.body,
@@ -972,14 +1037,16 @@ fn emit_chunk_wgsl(
             FieldMode::Base => "write_fp_scratch_scalar",
             FieldMode::Ext => "write_fp_scratch_ext",
         };
-        for (live_idx, (var, slot)) in this_boundary.live_fp.iter().enumerate() {
+        for (live_idx, var) in this_boundary.live_fp.iter().enumerate() {
+            let slot = emitter.fp_slot_for(*var)?;
             writeln!(
                 emitter.body,
                 "  {fp_helper}(tile_local, {live_idx}u, fp[{slot}]); // fp_var{var}",
             )
             .unwrap();
         }
-        for (live_idx, (var, slot)) in this_boundary.live_mix.iter().enumerate() {
+        for (live_idx, var) in this_boundary.live_mix.iter().enumerate() {
+            let slot = emitter.mix_slot_for(*var)?;
             writeln!(
                 emitter.body,
                 "  write_mix_tot_scratch(tile_local, {live_idx}u, mix_tot[{slot}]); write_mix_mul_scratch(tile_local, {live_idx}u, mix_mul[{slot}]); // mix_var{var}",
@@ -1003,12 +1070,15 @@ fn emit_chunk_wgsl(
         writeln!(emitter.body, "  write_check(cycle, mix_tot[{ret_slot}]);").unwrap();
     }
 
-    // 4) Materialize as a StagedKernel. We reuse the local array sizes
-    // across stages (each chunk declares fp/mix arrays of the same size
-    // as the single-kernel emission would).
+    // 4) Materialize as a StagedKernel. SP3 iter 7t: `fp_slots` /
+    // `mix_slots` are now PER-CHUNK (the emitter resets at every
+    // boundary and re-seeds live-ins, so its `max_used()` after
+    // emitting this chunk is the chunk-local high-water). Each
+    // stage's WGSL declares `array<..., fp_slots>` sized to its own
+    // tight maximum, not the global DEF max.
     let stage_name = format!("{name}_stage{chunk_idx}");
-    let fp_slots = plan.fp_slots;
-    let mix_slots = plan.mix_slots;
+    let fp_slots = emitter.fp_alloc.max_used().max(1);
+    let mix_slots = emitter.mix_alloc.max_used().max(1);
     let mut wgsl = String::new();
     writeln!(wgsl, "// staged eval_check kernel: {stage_name}").unwrap();
     writeln!(
@@ -1267,15 +1337,18 @@ pub fn plan_multi_kernel(
         let is_last_op = op_idx + 1 == block_len;
         let at_boundary = op_idx + 1 >= next_boundary_at;
         if at_boundary || is_last_op {
-            let live_fp: Vec<(usize, usize)> = fp_slot_map
+            // SP3 iter 7t: store only var_idx (not slot). The slot is
+            // chunk-local now; the live_idx (position in this vec) is
+            // the stable scratch-buffer identifier.
+            let live_fp: Vec<usize> = fp_slot_map
                 .iter()
                 .enumerate()
-                .filter_map(|(var, slot)| slot.map(|s| (var, s)))
+                .filter_map(|(var, slot)| if slot.is_some() { Some(var) } else { None })
                 .collect();
-            let live_mix: Vec<(usize, usize)> = mix_slot_map
+            let live_mix: Vec<usize> = mix_slot_map
                 .iter()
                 .enumerate()
-                .filter_map(|(var, slot)| slot.map(|s| (var, s)))
+                .filter_map(|(var, slot)| if slot.is_some() { Some(var) } else { None })
                 .collect();
             if !is_last_op {
                 max_live_fp = max_live_fp.max(live_fp.len());
@@ -1620,23 +1693,24 @@ mod tests {
         assert_eq!(plan.boundaries[1].end, 4);
         assert_eq!(plan.boundaries[2].end, 5);
 
-        // After chunk 0 (ops Const(7), Const(3)): fp_var 0 (slot 0) and
-        // fp_var 1 (slot 1) are live (used by Add at op 2 in chunk 1).
+        // After chunk 0 (ops Const(7), Const(3)): fp_var 0 and fp_var 1
+        // are live (used by Add at op 2 in chunk 1). SP3 iter 7t: the
+        // boundary now records just var_idx (slot is chunk-local).
         assert_eq!(
             plan.boundaries[0].live_fp,
-            vec![(0, 0), (1, 1)],
+            vec![0, 1],
             "after chunk 0 both consts are live for the upcoming Add"
         );
         assert!(plan.boundaries[0].live_mix.is_empty());
 
-        // After chunk 1 (ops Add(0,1), True): fp_var 2 (slot 2) is live
-        // (used by AndEqz at op 4); mix_var 0 (slot 0) is live.
-        assert_eq!(plan.boundaries[1].live_fp, vec![(2, 2)]);
-        assert_eq!(plan.boundaries[1].live_mix, vec![(0, 0)]);
+        // After chunk 1 (ops Add(0,1), True): fp_var 2 is live (used by
+        // AndEqz at op 4); mix_var 0 is live.
+        assert_eq!(plan.boundaries[1].live_fp, vec![2]);
+        assert_eq!(plan.boundaries[1].live_mix, vec![0]);
 
         // Final chunk's snapshot is recorded for completeness but excluded
         // from max_live_* (no scratch save needed at the end of the program).
-        assert_eq!(plan.boundaries[2].live_mix, vec![(1, 1)]);
+        assert_eq!(plan.boundaries[2].live_mix, vec![1]);
 
         // Max live across non-final boundaries: 2 fp vars (boundary 0), 1 mix var (boundary 1).
         assert_eq!(plan.max_live_fp, 2);
@@ -1692,8 +1766,11 @@ mod tests {
         assert!(!s1.contains("write_check(cycle, mix_tot["));
 
         // Stage 2: load 1 fp + 1 mix, run AndEqz, write_check.
+        // SP3 iter 7t: per-chunk allocator restarts at slot 0 for each
+        // stage. Stage 2's first live-in (fp_var 2) lands in fp[0],
+        // not fp[2] (the global single-allocator slot).
         let s2 = &multi.stages[2].wgsl_source;
-        assert!(s2.contains("fp[2] = read_fp_scratch_scalar(tile_local, 0u)"));
+        assert!(s2.contains("fp[0] = read_fp_scratch_scalar(tile_local, 0u)"));
         assert!(s2.contains("mix_tot[0] = read_mix_tot_scratch(tile_local, 0u)"));
         assert!(s2.contains("write_check(cycle, mix_tot[1])"));
 
@@ -1733,12 +1810,12 @@ mod tests {
         // The slot reuse from iter 6 still applies — the planner runs the
         // same allocator.
         assert_eq!(plan.fp_slots, 5);
-        // Liveness at boundary 2 (end of [6,9)): mix_var 1 slot 1 is live
-        // (used by AndCond at op 9). fp_var 0 slot 0 is live (used by
-        // AndCond's cond operand). All other slots freed.
+        // Liveness at boundary 2 (end of [6,9)): mix_var 1 is live
+        // (used by AndCond at op 9). fp_var 0 is live (used by AndCond's
+        // cond operand). All other vars freed.
         let b2 = &plan.boundaries[2];
         assert!(
-            b2.live_fp.iter().any(|(v, _)| *v == 0),
+            b2.live_fp.contains(&0),
             "fp_var 0 must be live at end of chunk 2 (AndCond at op 9 reads it)"
         );
     }

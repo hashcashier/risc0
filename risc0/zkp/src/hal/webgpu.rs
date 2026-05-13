@@ -5203,15 +5203,20 @@ impl WebGpuHal {
         .map_err(|err: CodegenError| {
             anyhow!("staged eval_check codegen failed: {:?}", err)
         })?;
-        // SP3 iter 7n: log the planner's output so we can see what
-        // workgroup_size + per-chunk slot footprint the codegen
-        // produced. Helps diagnose why iter 7m didn't move the
-        // staged-path runtime (storage-bandwidth-bound vs compute-bound).
-        let first_stage_fp = multi.stages.first().map(|s| s.fp_slots).unwrap_or(0);
-        let first_stage_mix = multi.stages.first().map(|s| s.mix_slots).unwrap_or(0);
-        let first_stage_wg = multi.stages.first().map(|s| s.workgroup_size).unwrap_or(0);
+        // SP3 iter 7n+t: log per-stage fp_slots/mix_slots/workgroup_size
+        // so we can see the per-chunk allocator's effect. Each stage
+        // now resets the slot allocator (iter 7t), so the high-water
+        // varies per chunk and may be much smaller than the cross-chunk
+        // global max.
+        let per_stage_summary = multi
+            .stages
+            .iter()
+            .enumerate()
+            .map(|(i, s)| format!("s{i}:fp={},mix={},wg={}", s.fp_slots, s.mix_slots, s.workgroup_size))
+            .collect::<Vec<_>>()
+            .join(" ");
         log_webgpu_stage(&format!(
-            "browser-prove:staged-plan field_mode={field_mode:?} stages={} fp_slots={first_stage_fp} mix_slots={first_stage_mix} workgroup_size={first_stage_wg} fp_scratch_stride_u32={} mix_scratch_stride_u32={} def_block_len={}",
+            "browser-prove:staged-plan field_mode={field_mode:?} stages={} per_stage=[{per_stage_summary}] fp_scratch_stride_u32={} mix_scratch_stride_u32={} def_block_len={}",
             multi.stages.len(),
             multi.fp_scratch_stride_u32,
             multi.mix_scratch_stride_u32,
