@@ -289,84 +289,94 @@ struct StagedScratchParams {
     tile_size: u32,
 };
 
+// SP3 iter 7bb (2026-05-13): the storage bindings on 10/11/12 are now
+// the per-cycle WORKING SET (renamed from "scratch") for fp / mix_tot
+// / mix_mul. Each thread's slot N lives at
+// `tile_local * stride + N * (elem_words)`. This mimics what nvcc
+// implicitly does with register spill to per-thread local memory in
+// CUDA — but explicit, so the WGSL compiler doesn't fight itself
+// trying to keep 900+ live vec4 values in registers across a 5000-op
+// straight-line body. Coalesced access at workgroup_size=32: adjacent
+// threads access adjacent words for the same slot.
+//
+// `fp_stride` is now `plan.fp_slots * fp_elem_words` (not max-live-fp);
+// `mix_stride` is `plan.mix_slots * 4` (vec4 per mix slot). Buffers
+// are sized to `tile_size * stride * 4 B`.
 @group(0) @binding(9) var<uniform> staged_scratch_params: StagedScratchParams;
-@group(0) @binding(10) var<storage, read_write> fp_scratch: ElemBuffer;
-@group(0) @binding(11) var<storage, read_write> mix_tot_scratch: ElemBuffer;
-@group(0) @binding(12) var<storage, read_write> mix_mul_scratch: ElemBuffer;
+@group(0) @binding(10) var<storage, read_write> fp_workset: ElemBuffer;
+@group(0) @binding(11) var<storage, read_write> mix_tot_workset: ElemBuffer;
+@group(0) @binding(12) var<storage, read_write> mix_mul_workset: ElemBuffer;
 
-// Per-tile-local-cycle base for fp_scratch in u32 indices. `tile_local`
-// is the thread's offset within the current tile (gid.x), NOT the global
-// cycle — scratch buffers are sized to `tile_size * stride`, independent
-// of the prove's full domain.
-fn fp_scratch_base(tile_local: u32) -> u32 {
+// Per-tile-local-cycle base for fp_workset in u32 indices.
+fn fp_workset_base(tile_local: u32) -> u32 {
     return tile_local * staged_scratch_params.fp_stride;
 }
 
-fn mix_scratch_base(tile_local: u32) -> u32 {
+fn mix_workset_base(tile_local: u32) -> u32 {
     return tile_local * staged_scratch_params.mix_stride;
 }
 
-// Base-field fp read/write: one u32 per live slot.
-fn read_fp_scratch_scalar(tile_local: u32, live_idx: u32) -> u32 {
-    return fp_scratch.data[fp_scratch_base(tile_local) + live_idx];
+// Base-field fp read/write: one u32 per slot.
+fn read_fp_workset_scalar(tile_local: u32, slot: u32) -> u32 {
+    return fp_workset.data[fp_workset_base(tile_local) + slot];
 }
 
-fn write_fp_scratch_scalar(tile_local: u32, live_idx: u32, val: u32) {
-    fp_scratch.data[fp_scratch_base(tile_local) + live_idx] = val;
+fn write_fp_workset_scalar(tile_local: u32, slot: u32, val: u32) {
+    fp_workset.data[fp_workset_base(tile_local) + slot] = val;
 }
 
-// Extension fp read/write: four u32s per live slot (a vec4 BabyBearExt).
-fn read_fp_scratch_ext(tile_local: u32, live_idx: u32) -> vec4<u32> {
-    let base = fp_scratch_base(tile_local) + live_idx * 4u;
+// Extension fp read/write: four u32s per slot (a vec4 BabyBearExt).
+fn read_fp_workset_ext(tile_local: u32, slot: u32) -> vec4<u32> {
+    let base = fp_workset_base(tile_local) + slot * 4u;
     return vec4<u32>(
-        fp_scratch.data[base + 0u],
-        fp_scratch.data[base + 1u],
-        fp_scratch.data[base + 2u],
-        fp_scratch.data[base + 3u],
+        fp_workset.data[base + 0u],
+        fp_workset.data[base + 1u],
+        fp_workset.data[base + 2u],
+        fp_workset.data[base + 3u],
     );
 }
 
-fn write_fp_scratch_ext(tile_local: u32, live_idx: u32, val: vec4<u32>) {
-    let base = fp_scratch_base(tile_local) + live_idx * 4u;
-    fp_scratch.data[base + 0u] = val.x;
-    fp_scratch.data[base + 1u] = val.y;
-    fp_scratch.data[base + 2u] = val.z;
-    fp_scratch.data[base + 3u] = val.w;
+fn write_fp_workset_ext(tile_local: u32, slot: u32, val: vec4<u32>) {
+    let base = fp_workset_base(tile_local) + slot * 4u;
+    fp_workset.data[base + 0u] = val.x;
+    fp_workset.data[base + 1u] = val.y;
+    fp_workset.data[base + 2u] = val.z;
+    fp_workset.data[base + 3u] = val.w;
 }
 
 // Mix state is always vec4<u32> regardless of field mode.
-fn read_mix_tot_scratch(tile_local: u32, live_idx: u32) -> vec4<u32> {
-    let base = mix_scratch_base(tile_local) + live_idx * 4u;
+fn read_mix_tot_workset(tile_local: u32, slot: u32) -> vec4<u32> {
+    let base = mix_workset_base(tile_local) + slot * 4u;
     return vec4<u32>(
-        mix_tot_scratch.data[base + 0u],
-        mix_tot_scratch.data[base + 1u],
-        mix_tot_scratch.data[base + 2u],
-        mix_tot_scratch.data[base + 3u],
+        mix_tot_workset.data[base + 0u],
+        mix_tot_workset.data[base + 1u],
+        mix_tot_workset.data[base + 2u],
+        mix_tot_workset.data[base + 3u],
     );
 }
 
-fn write_mix_tot_scratch(tile_local: u32, live_idx: u32, val: vec4<u32>) {
-    let base = mix_scratch_base(tile_local) + live_idx * 4u;
-    mix_tot_scratch.data[base + 0u] = val.x;
-    mix_tot_scratch.data[base + 1u] = val.y;
-    mix_tot_scratch.data[base + 2u] = val.z;
-    mix_tot_scratch.data[base + 3u] = val.w;
+fn write_mix_tot_workset(tile_local: u32, slot: u32, val: vec4<u32>) {
+    let base = mix_workset_base(tile_local) + slot * 4u;
+    mix_tot_workset.data[base + 0u] = val.x;
+    mix_tot_workset.data[base + 1u] = val.y;
+    mix_tot_workset.data[base + 2u] = val.z;
+    mix_tot_workset.data[base + 3u] = val.w;
 }
 
-fn read_mix_mul_scratch(tile_local: u32, live_idx: u32) -> vec4<u32> {
-    let base = mix_scratch_base(tile_local) + live_idx * 4u;
+fn read_mix_mul_workset(tile_local: u32, slot: u32) -> vec4<u32> {
+    let base = mix_workset_base(tile_local) + slot * 4u;
     return vec4<u32>(
-        mix_mul_scratch.data[base + 0u],
-        mix_mul_scratch.data[base + 1u],
-        mix_mul_scratch.data[base + 2u],
-        mix_mul_scratch.data[base + 3u],
+        mix_mul_workset.data[base + 0u],
+        mix_mul_workset.data[base + 1u],
+        mix_mul_workset.data[base + 2u],
+        mix_mul_workset.data[base + 3u],
     );
 }
 
-fn write_mix_mul_scratch(tile_local: u32, live_idx: u32, val: vec4<u32>) {
-    let base = mix_scratch_base(tile_local) + live_idx * 4u;
-    mix_mul_scratch.data[base + 0u] = val.x;
-    mix_mul_scratch.data[base + 1u] = val.y;
-    mix_mul_scratch.data[base + 2u] = val.z;
-    mix_mul_scratch.data[base + 3u] = val.w;
+fn write_mix_mul_workset(tile_local: u32, slot: u32, val: vec4<u32>) {
+    let base = mix_workset_base(tile_local) + slot * 4u;
+    mix_mul_workset.data[base + 0u] = val.x;
+    mix_mul_workset.data[base + 1u] = val.y;
+    mix_mul_workset.data[base + 2u] = val.z;
+    mix_mul_workset.data[base + 3u] = val.w;
 }

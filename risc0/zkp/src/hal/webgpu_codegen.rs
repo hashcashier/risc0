@@ -401,6 +401,12 @@ impl<'a> WgslEmitter<'a> {
     /// boundary, in `live_idx` order — that re-establishes the
     /// `var_idx → slot` mapping for the new chunk before any ops are
     /// emitted.
+    ///
+    /// Unused as of iter 7bb (slots are global across chunks again
+    /// because the storage-backed workset persists state naturally).
+    /// Retained as scaffold in case a future variant wants per-chunk
+    /// reset for some other reason.
+    #[allow(dead_code)]
     fn reset_chunk_slots(&mut self) {
         self.fp_alloc = EvalCheckSlotAllocator::default();
         self.mix_alloc = EvalCheckSlotAllocator::default();
@@ -416,6 +422,10 @@ impl<'a> WgslEmitter<'a> {
     /// chunk's allocator. The caller has the var live (from prev
     /// boundary's `live_fp`) and emits a scratch-load into the
     /// returned slot. Returns the assigned slot.
+    ///
+    /// Unused as of iter 7bb (storage-backed workset persists state
+    /// across chunks; no re-seeding needed). Retained as scaffold.
+    #[allow(dead_code)]
     fn seed_live_fp(&mut self, var: usize) -> usize {
         let slot = self.fp_alloc.alloc();
         if var >= self.fp_slot_map.len() {
@@ -426,6 +436,8 @@ impl<'a> WgslEmitter<'a> {
     }
 
     /// SP3 iter 7t: mix-side counterpart to `seed_live_fp`.
+    /// Unused as of iter 7bb (see `seed_live_fp` doc).
+    #[allow(dead_code)]
     fn seed_live_mix(&mut self, var: usize) -> usize {
         let slot = self.mix_alloc.alloc();
         if var >= self.mix_slot_map.len() {
@@ -533,12 +545,12 @@ impl<'a> WgslEmitter<'a> {
             (PolyExtStep::Const(v), FieldMode::Base) => {
                 let (var, slot) = self.alloc_fp(idx);
                 writeln!(self.body, "  // [{idx}] fp_var{var} (slot {slot}) = Const({v})").unwrap();
-                writeln!(self.body, "  fp[{slot}] = {v}u;").unwrap();
+                writeln!(self.body, "  write_fp_workset_scalar(tile_local, {slot}u, {v}u);").unwrap();
             }
             (PolyExtStep::Const(v), FieldMode::Ext) => {
                 let (var, slot) = self.alloc_fp(idx);
                 writeln!(self.body, "  // [{idx}] fp_var{var} (slot {slot}) = Const({v})").unwrap();
-                writeln!(self.body, "  fp[{slot}] = vec4<u32>({v}u, 0u, 0u, 0u);").unwrap();
+                writeln!(self.body, "  write_fp_workset_ext(tile_local, {slot}u, vec4<u32>({v}u, 0u, 0u, 0u));").unwrap();
             }
             (PolyExtStep::ConstExt(_, _, _, _), FieldMode::Base) => {
                 return Err(CodegenError::ConstExtInBaseField);
@@ -550,7 +562,11 @@ impl<'a> WgslEmitter<'a> {
                     "  // [{idx}] fp_var{var} (slot {slot}) = ConstExt({a}, {b}, {c}, {d})"
                 )
                 .unwrap();
-                writeln!(self.body, "  fp[{slot}] = vec4<u32>({a}u, {b}u, {c}u, {d}u);").unwrap();
+                writeln!(
+                    self.body,
+                    "  write_fp_workset_ext(tile_local, {slot}u, vec4<u32>({a}u, {b}u, {c}u, {d}u));"
+                )
+                .unwrap();
             }
             (PolyExtStep::Get(tap_idx), mode) => {
                 let tap = self.resolve_tap(*tap_idx)?;
@@ -567,7 +583,7 @@ impl<'a> WgslEmitter<'a> {
                 };
                 writeln!(
                     self.body,
-                    "  fp[{slot}] = read_g{}_{suffix}({}u, {}u, cycle);",
+                    "  write_fp_workset_{suffix}(tile_local, {slot}u, read_g{}_{suffix}({}u, {}u, cycle));",
                     tap.group, tap.offset, tap.back_inv_rate
                 )
                 .unwrap();
@@ -585,7 +601,7 @@ impl<'a> WgslEmitter<'a> {
                 };
                 writeln!(
                     self.body,
-                    "  fp[{slot}] = read_global_{suffix}({arg}u, {off}u);"
+                    "  write_fp_workset_{suffix}(tile_local, {slot}u, read_global_{suffix}({arg}u, {off}u));"
                 )
                 .unwrap();
             }
@@ -593,9 +609,9 @@ impl<'a> WgslEmitter<'a> {
                 let x_slot = self.fp_slot_for(*x)?;
                 let y_slot = self.fp_slot_for(*y)?;
                 let (var, slot) = self.alloc_fp(idx);
-                let helper = match mode {
-                    FieldMode::Base => "add",
-                    FieldMode::Ext => "ext_add",
+                let (helper, suffix) = match mode {
+                    FieldMode::Base => ("add", "scalar"),
+                    FieldMode::Ext => ("ext_add", "ext"),
                 };
                 writeln!(
                     self.body,
@@ -604,7 +620,7 @@ impl<'a> WgslEmitter<'a> {
                 .unwrap();
                 writeln!(
                     self.body,
-                    "  fp[{slot}] = {helper}(fp[{x_slot}], fp[{y_slot}]);"
+                    "  write_fp_workset_{suffix}(tile_local, {slot}u, {helper}(read_fp_workset_{suffix}(tile_local, {x_slot}u), read_fp_workset_{suffix}(tile_local, {y_slot}u)));"
                 )
                 .unwrap();
                 self.free_dead_fp_operands(idx, &[*x, *y]);
@@ -613,9 +629,9 @@ impl<'a> WgslEmitter<'a> {
                 let x_slot = self.fp_slot_for(*x)?;
                 let y_slot = self.fp_slot_for(*y)?;
                 let (var, slot) = self.alloc_fp(idx);
-                let helper = match mode {
-                    FieldMode::Base => "sub",
-                    FieldMode::Ext => "ext_sub",
+                let (helper, suffix) = match mode {
+                    FieldMode::Base => ("sub", "scalar"),
+                    FieldMode::Ext => ("ext_sub", "ext"),
                 };
                 writeln!(
                     self.body,
@@ -624,7 +640,7 @@ impl<'a> WgslEmitter<'a> {
                 .unwrap();
                 writeln!(
                     self.body,
-                    "  fp[{slot}] = {helper}(fp[{x_slot}], fp[{y_slot}]);"
+                    "  write_fp_workset_{suffix}(tile_local, {slot}u, {helper}(read_fp_workset_{suffix}(tile_local, {x_slot}u), read_fp_workset_{suffix}(tile_local, {y_slot}u)));"
                 )
                 .unwrap();
                 self.free_dead_fp_operands(idx, &[*x, *y]);
@@ -633,9 +649,9 @@ impl<'a> WgslEmitter<'a> {
                 let x_slot = self.fp_slot_for(*x)?;
                 let y_slot = self.fp_slot_for(*y)?;
                 let (var, slot) = self.alloc_fp(idx);
-                let helper = match mode {
-                    FieldMode::Base => "mul",
-                    FieldMode::Ext => "ext_mul",
+                let (helper, suffix) = match mode {
+                    FieldMode::Base => ("mul", "scalar"),
+                    FieldMode::Ext => ("ext_mul", "ext"),
                 };
                 writeln!(
                     self.body,
@@ -644,7 +660,7 @@ impl<'a> WgslEmitter<'a> {
                 .unwrap();
                 writeln!(
                     self.body,
-                    "  fp[{slot}] = {helper}(fp[{x_slot}], fp[{y_slot}]);"
+                    "  write_fp_workset_{suffix}(tile_local, {slot}u, {helper}(read_fp_workset_{suffix}(tile_local, {x_slot}u), read_fp_workset_{suffix}(tile_local, {y_slot}u)));"
                 )
                 .unwrap();
                 self.free_dead_fp_operands(idx, &[*x, *y]);
@@ -659,7 +675,7 @@ impl<'a> WgslEmitter<'a> {
                 .unwrap();
                 writeln!(
                     self.body,
-                    "  mix_tot[{slot}] = vec4<u32>(0u, 0u, 0u, 0u); mix_mul[{slot}] = load_mix_pow({exp}u);"
+                    "  write_mix_tot_workset(tile_local, {slot}u, vec4<u32>(0u, 0u, 0u, 0u)); write_mix_mul_workset(tile_local, {slot}u, load_mix_pow({exp}u));"
                 )
                 .unwrap();
             }
@@ -670,9 +686,13 @@ impl<'a> WgslEmitter<'a> {
                 let exp = self.mix_exps[var];
                 let inner_combine = match mode {
                     // Base mode: scalar fp[inner] combined via ext_scale.
-                    FieldMode::Base => format!("ext_scale(mix_mul[{chain_slot}], fp[{inner_slot}])"),
+                    FieldMode::Base => format!(
+                        "ext_scale(read_mix_mul_workset(tile_local, {chain_slot}u), read_fp_workset_scalar(tile_local, {inner_slot}u))"
+                    ),
                     // Ext mode: vec4 fp[inner] combined via full ext_mul.
-                    FieldMode::Ext => format!("ext_mul(mix_mul[{chain_slot}], fp[{inner_slot}])"),
+                    FieldMode::Ext => format!(
+                        "ext_mul(read_mix_mul_workset(tile_local, {chain_slot}u), read_fp_workset_ext(tile_local, {inner_slot}u))"
+                    ),
                 };
                 writeln!(
                     self.body,
@@ -681,7 +701,7 @@ impl<'a> WgslEmitter<'a> {
                 .unwrap();
                 writeln!(
                     self.body,
-                    "  mix_tot[{slot}] = ext_add(mix_tot[{chain_slot}], {inner_combine}); mix_mul[{slot}] = load_mix_pow({exp}u);"
+                    "  write_mix_tot_workset(tile_local, {slot}u, ext_add(read_mix_tot_workset(tile_local, {chain_slot}u), {inner_combine})); write_mix_mul_workset(tile_local, {slot}u, load_mix_pow({exp}u));"
                 )
                 .unwrap();
                 self.free_dead_mix_operands(idx, &[*chain]);
@@ -695,10 +715,10 @@ impl<'a> WgslEmitter<'a> {
                 let exp = self.mix_exps[var];
                 let cond_combine = match mode {
                     FieldMode::Base => format!(
-                        "ext_scale(ext_mul(mix_tot[{inner_slot}], mix_mul[{chain_slot}]), fp[{cond_slot}])"
+                        "ext_scale(ext_mul(read_mix_tot_workset(tile_local, {inner_slot}u), read_mix_mul_workset(tile_local, {chain_slot}u)), read_fp_workset_scalar(tile_local, {cond_slot}u))"
                     ),
                     FieldMode::Ext => format!(
-                        "ext_mul(ext_mul(mix_tot[{inner_slot}], mix_mul[{chain_slot}]), fp[{cond_slot}])"
+                        "ext_mul(ext_mul(read_mix_tot_workset(tile_local, {inner_slot}u), read_mix_mul_workset(tile_local, {chain_slot}u)), read_fp_workset_ext(tile_local, {cond_slot}u))"
                     ),
                 };
                 writeln!(
@@ -708,7 +728,7 @@ impl<'a> WgslEmitter<'a> {
                 .unwrap();
                 writeln!(
                     self.body,
-                    "  mix_tot[{slot}] = ext_add(mix_tot[{chain_slot}], {cond_combine}); mix_mul[{slot}] = load_mix_pow({exp}u);"
+                    "  write_mix_tot_workset(tile_local, {slot}u, ext_add(read_mix_tot_workset(tile_local, {chain_slot}u), {cond_combine})); write_mix_mul_workset(tile_local, {slot}u, load_mix_pow({exp}u));"
                 )
                 .unwrap();
                 self.free_dead_mix_operands(idx, &[*chain, *inner]);
@@ -976,83 +996,25 @@ fn emit_chunk_wgsl(
     ret_var: usize,
 ) -> Result<StagedKernel, CodegenError> {
     emitter.body.clear();
-    // SP3 iter 7t: reset the emitter's slot allocators at every chunk
-    // boundary (including chunk 0, where the reset is a no-op since the
-    // emitter was just created). Live-in vars re-allocate fresh slots
-    // below. This is what bounds each chunk's `fp_slots` /
-    // `mix_slots` to the per-chunk high-water instead of the global
-    // DEF max — drops the rv32im poseidon2_basic emit from 927 fp
-    // slots down to whatever the widest chunk actually needs.
-    emitter.reset_chunk_slots();
-    // 1) Live-in scratch loads (only for chunks > 0). Scratch is indexed
-    // by `tile_local` (the thread's offset within the current tile),
-    // NOT the global `cycle` — so the scratch buffer can be sized to
-    // `tile_size * stride` regardless of the prove's full domain.
-    if let Some(prev) = prev_boundary {
-        writeln!(
-            emitter.body,
-            "  // === chunk {chunk_idx} live-in: restore {} fp + {} mix from scratch (tile_local) ===",
-            prev.live_fp.len(),
-            prev.live_mix.len()
-        )
-        .unwrap();
-        let fp_helper = match field_mode {
-            FieldMode::Base => "read_fp_scratch_scalar",
-            FieldMode::Ext => "read_fp_scratch_ext",
-        };
-        for (live_idx, var) in prev.live_fp.iter().enumerate() {
-            let slot = emitter.seed_live_fp(*var);
-            writeln!(
-                emitter.body,
-                "  fp[{slot}] = {fp_helper}(tile_local, {live_idx}u); // fp_var{var}",
-            )
-            .unwrap();
-        }
-        for (live_idx, var) in prev.live_mix.iter().enumerate() {
-            let slot = emitter.seed_live_mix(*var);
-            writeln!(
-                emitter.body,
-                "  mix_tot[{slot}] = read_mix_tot_scratch(tile_local, {live_idx}u); mix_mul[{slot}] = read_mix_mul_scratch(tile_local, {live_idx}u); // mix_var{var}",
-            )
-            .unwrap();
-        }
-    }
-    // 2) Run the chunk's ops via the (chunk-local) emitter.
+    // SP3 iter 7bb: slots are GLOBAL across chunks again (revert iter
+    // 7t's per-chunk reset). Each chunk reads/writes through the
+    // shared workset storage buffers (`fp_workset` / `mix_tot_workset`
+    // / `mix_mul_workset` at bindings 10/11/12) keyed by global slot
+    // index. Cross-stage state persists naturally — no live-in/out
+    // scratch I/O needed. Mirrors what nvcc does with implicit
+    // register spill to per-thread local memory; here it's explicit
+    // so the WGSL compiler treats each access as a memory op and
+    // doesn't try to hold 900+ live vec4 values in registers.
+    let _ = prev_boundary;
+    // 2) Run the chunk's ops via the persistent emitter.
     for (offset, op) in ops.iter().enumerate() {
         let global_idx = op_start_idx + offset;
         emitter.emit(global_idx, op)?;
     }
-    // 3) Live-out scratch stores OR write_check. Use the emitter's
-    // CURRENT slot for each live var (post-emit, possibly different
-    // from the planner's slot because allocators diverged).
+    // 3) Final chunk emits write_check; intermediate chunks leave
+    // their state in the workset for the next stage to read.
     if !is_last {
-        writeln!(
-            emitter.body,
-            "  // === chunk {chunk_idx} live-out: save {} fp + {} mix to scratch (tile_local) ===",
-            this_boundary.live_fp.len(),
-            this_boundary.live_mix.len()
-        )
-        .unwrap();
-        let fp_helper = match field_mode {
-            FieldMode::Base => "write_fp_scratch_scalar",
-            FieldMode::Ext => "write_fp_scratch_ext",
-        };
-        for (live_idx, var) in this_boundary.live_fp.iter().enumerate() {
-            let slot = emitter.fp_slot_for(*var)?;
-            writeln!(
-                emitter.body,
-                "  {fp_helper}(tile_local, {live_idx}u, fp[{slot}]); // fp_var{var}",
-            )
-            .unwrap();
-        }
-        for (live_idx, var) in this_boundary.live_mix.iter().enumerate() {
-            let slot = emitter.mix_slot_for(*var)?;
-            writeln!(
-                emitter.body,
-                "  write_mix_tot_scratch(tile_local, {live_idx}u, mix_tot[{slot}]); write_mix_mul_scratch(tile_local, {live_idx}u, mix_mul[{slot}]); // mix_var{var}",
-            )
-            .unwrap();
-        }
+        let _ = this_boundary;
     } else {
         let ret_slot = emitter
             .mix_slot_for(ret_var)
@@ -1067,7 +1029,7 @@ fn emit_chunk_wgsl(
             "  // === chunk {chunk_idx} final: write_check ===",
         )
         .unwrap();
-        writeln!(emitter.body, "  write_check(cycle, mix_tot[{ret_slot}]);").unwrap();
+        writeln!(emitter.body, "  write_check(cycle, read_mix_tot_workset(tile_local, {ret_slot}u));").unwrap();
     }
 
     // 4) Materialize as a StagedKernel. SP3 iter 7t: `fp_slots` /
@@ -1099,23 +1061,14 @@ fn emit_chunk_wgsl(
     // `plan.fp_slots` / `plan.mix_slots` (the cross-chunk high-water)
     // so all stages share a stable size.
     let workgroup_size = choose_workgroup_size(field_mode, fp_slots, mix_slots);
-    // SP3 iter 7z: CUDA-inspired structure. CUDA's `eval_check` calls
-    // `poly_fp` which calls `rv32im_v2_0..19` device functions — nvcc
-    // optimizes register allocation per function. We mirror that by
-    // declaring `fp`/`mix_tot`/`mix_mul` at module scope (`var<private>`,
-    // per-thread persistent) and emitting the chunk body as a separate
-    // `fn chunk_body(...)`. Main does the dispatch math + bounds check
-    // and calls chunk_body. The driver can analyze each function's
-    // register pressure independently — should generate tighter code
-    // than one ~1.6 MB straight-line main.
-    writeln!(
-        wgsl,
-        "var<private> fp: array<{}, {fp_slots}>;",
-        field_mode.fp_ty()
-    )
-    .unwrap();
-    writeln!(wgsl, "var<private> mix_tot: array<vec4<u32>, {mix_slots}>;").unwrap();
-    writeln!(wgsl, "var<private> mix_mul: array<vec4<u32>, {mix_slots}>;").unwrap();
+    // SP3 iter 7bb: `fp` / `mix_tot` / `mix_mul` are STORAGE-BACKED
+    // working sets (bindings 10/11/12, declared in the prelude). The
+    // chunk body emits explicit `read_/write_fp_workset_*`,
+    // `read_/write_mix_*_workset` calls keyed by global slot index.
+    // No `var<private>` declarations needed — the compiler treats each
+    // access as a coalesced storage op (mimics nvcc's implicit register
+    // spill to per-thread local memory). chunk_body wrapper kept for
+    // CUDA-aligned source structure.
     wgsl.push_str("fn chunk_body(tile_local: u32, cycle: u32) {\n");
     wgsl.push_str(&emitter.body);
     wgsl.push_str("}\n");
@@ -1196,8 +1149,13 @@ pub fn staged_multi_kernel_from_def(
         FieldMode::Base => 1,
         FieldMode::Ext => 4,
     };
-    let fp_scratch_stride_u32 = plan.max_live_fp * fp_per_slot_u32;
-    let mix_scratch_stride_u32 = plan.max_live_mix * 4;
+    // SP3 iter 7bb: workset stride sized to the GLOBAL slot count
+    // (plan.fp_slots / plan.mix_slots), not max_live. The workset
+    // replaces the old cross-stage scratch buffer; every slot the
+    // emitter assigns needs storage, not just cross-boundary live
+    // ones. Buffers are sized `tile_size * stride * 4 bytes`.
+    let fp_scratch_stride_u32 = plan.fp_slots * fp_per_slot_u32;
+    let mix_scratch_stride_u32 = plan.mix_slots * 4;
 
     Ok(StagedMultiKernel {
         id: name.to_string(),
@@ -1484,14 +1442,16 @@ mod tests {
             staged_kernel_from_def_with_mode("tiny_base", &TINY_DEF, &[], FieldMode::Base).unwrap();
         assert_eq!(kernel.field_mode, FieldMode::Base);
         assert!(kernel.wgsl_source.contains("var fp: array<u32, 3>"));
-        assert!(kernel.wgsl_source.contains("fp[0] = 7u;"));
-        assert!(kernel.wgsl_source.contains("fp[1] = 3u;"));
-        assert!(kernel.wgsl_source.contains("fp[2] = add(fp[0], fp[1]);"));
-        assert!(!kernel.wgsl_source.contains("fp[2] = ext_add"));
+        assert!(kernel.wgsl_source.contains("write_fp_workset_scalar(tile_local, 0u, 7u);"));
+        assert!(kernel.wgsl_source.contains("write_fp_workset_scalar(tile_local, 1u, 3u);"));
+        assert!(kernel.wgsl_source.contains(
+            "write_fp_workset_scalar(tile_local, 2u, add(read_fp_workset_scalar(tile_local, 0u), read_fp_workset_scalar(tile_local, 1u)));"
+        ));
+        assert!(!kernel.wgsl_source.contains("write_fp_workset_scalar(tile_local, 2u, ext_add"));
         assert!(
             kernel
                 .wgsl_source
-                .contains("ext_scale(mix_mul[0], fp[2])"),
+                .contains("ext_scale(read_mix_mul_workset(tile_local, 0u), read_fp_workset_scalar(tile_local, 2u))"),
             "AndEqz under Base mode must use ext_scale to promote fp[inner]"
         );
     }
@@ -1512,17 +1472,25 @@ mod tests {
         assert!(
             kernel
                 .wgsl_source
-                .contains("fp[1] = vec4<u32>(1u, 2u, 3u, 4u);")
+                .contains("write_fp_workset_ext(tile_local, 1u, vec4<u32>(1u, 2u, 3u, 4u));")
         );
         // var 4 Add(0, 2) -> fp[4] = ext_add(fp[0], fp[2]).
-        assert!(kernel.wgsl_source.contains("fp[4] = ext_add(fp[0], fp[2]);"));
+        assert!(kernel.wgsl_source.contains(
+            "write_fp_workset_ext(tile_local, 4u, ext_add(read_fp_workset_ext(tile_local, 0u), read_fp_workset_ext(tile_local, 2u)));"
+        ));
         // var 5 Sub(4, 1) reuses slot 2 (var 2's slot was freed after Add).
-        assert!(kernel.wgsl_source.contains("fp[2] = ext_sub(fp[4], fp[1]);"));
+        assert!(kernel.wgsl_source.contains(
+            "write_fp_workset_ext(tile_local, 2u, ext_sub(read_fp_workset_ext(tile_local, 4u), read_fp_workset_ext(tile_local, 1u)));"
+        ));
         // var 6 Mul(5, 3) reuses slot 1 (var 1's slot was freed after Sub).
-        assert!(kernel.wgsl_source.contains("fp[1] = ext_mul(fp[2], fp[3]);"));
+        assert!(kernel.wgsl_source.contains(
+            "write_fp_workset_ext(tile_local, 1u, ext_mul(read_fp_workset_ext(tile_local, 2u), read_fp_workset_ext(tile_local, 3u)));"
+        ));
         // AndEqz combines mix_mul[chain_slot=0] with fp[inner_slot=1] (var 6 lives in slot 1).
         assert!(
-            kernel.wgsl_source.contains("ext_mul(mix_mul[0], fp[1])"),
+            kernel.wgsl_source.contains(
+                "ext_mul(read_mix_mul_workset(tile_local, 0u), read_fp_workset_ext(tile_local, 1u))"
+            ),
             "AndEqz under Ext mode must use ext_mul over fp[6]'s reused slot 1"
         );
     }
@@ -1741,70 +1709,85 @@ mod tests {
         assert!(!stage0.wgsl_source.contains("read_fp_scratch_"));
         assert!(!stage0.wgsl_source.contains("write_fp_scratch_"));
         // Last chunk emits write_check.
-        assert!(stage0.wgsl_source.contains("write_check(cycle, mix_tot[1])"));
-        // Strides are zero — no scratch needed.
-        assert_eq!(multi.fp_scratch_stride_u32, 0);
-        assert_eq!(multi.mix_scratch_stride_u32, 0);
+        assert!(
+            stage0
+                .wgsl_source
+                .contains("write_check(cycle, read_mix_tot_workset(tile_local, 1u))")
+        );
+        // SP3 iter 7bb: workset stride sized to global fp_slots /
+        // mix_slots (3 / 2 for TINY_DEF). Base mode: 1 u32 per fp slot,
+        // 4 u32 per mix slot.
+        assert_eq!(multi.fp_scratch_stride_u32, 3);
+        assert_eq!(multi.mix_scratch_stride_u32, 8);
     }
 
     #[test]
     fn multi_kernel_three_chunks_emit_scratch_io_at_boundaries() {
-        // target 2 ops/chunk → 3 chunks. Stage 0 stores 2 fp vars at the
-        // end; stage 1 loads them and stores its live-out; stage 2 loads.
+        // target 2 ops/chunk → 3 chunks. SP3 iter 7bb: slots are GLOBAL
+        // across chunks again (workset persists state, no boundary
+        // scratch I/O). Stage 0 writes Consts into workset slots 0/1;
+        // stage 1's Add reads slots 0/1 and writes to slot 2, then
+        // True writes mix slot 0; stage 2's AndEqz reads slot 2 + mix
+        // slot 0 and write_checks mix slot 1 (ret_var = 1).
         let multi =
             staged_multi_kernel_from_def("tiny3", &TINY_DEF, &[], FieldMode::Base, 2).unwrap();
         assert_eq!(multi.stages.len(), 3);
 
-        // Stage 0: no live-in, two fp live-out (live_idx 0 = var 0 slot 0,
-        // live_idx 1 = var 1 slot 1). "write_check" appears in the
-        // prelude-reference comment in every stage; the CALL doesn't.
+        // Stage 0: Const(7), Const(3) → workset writes at slots 0 and 1.
+        // No scratch I/O. "write_check" appears in the prelude-reference
+        // comment in every stage; the CALL doesn't.
         let s0 = &multi.stages[0].wgsl_source;
         assert!(!s0.contains("fp[0] = read_fp_scratch_scalar"));
-        assert!(s0.contains("write_fp_scratch_scalar(tile_local, 0u, fp[0])"));
-        assert!(s0.contains("write_fp_scratch_scalar(tile_local, 1u, fp[1])"));
-        assert!(!s0.contains("write_check(cycle, mix_tot["));
+        assert!(s0.contains("write_fp_workset_scalar(tile_local, 0u, 7u)"));
+        assert!(s0.contains("write_fp_workset_scalar(tile_local, 1u, 3u)"));
+        assert!(!s0.contains("write_check(cycle, read_mix_tot_workset"));
 
-        // Stage 1: load 2 fp, run Add + True, store 1 fp + 1 mix.
+        // Stage 1: Add(0, 1) reads workset slots 0/1, writes slot 2;
+        // True writes mix_tot/mix_mul slot 0.
         let s1 = &multi.stages[1].wgsl_source;
-        assert!(s1.contains("fp[0] = read_fp_scratch_scalar(tile_local, 0u)"));
-        assert!(s1.contains("fp[1] = read_fp_scratch_scalar(tile_local, 1u)"));
+        assert!(s1.contains("read_fp_workset_scalar(tile_local, 0u)"));
+        assert!(s1.contains("read_fp_workset_scalar(tile_local, 1u)"));
         // After Add, fp_var 2 lives at slot 2 (slots 0/1 freed by Add).
-        assert!(s1.contains("write_fp_scratch_scalar(tile_local, 0u, fp[2])"));
+        assert!(s1.contains("write_fp_workset_scalar(tile_local, 2u, add("));
         // After True, mix_var 0 lives at slot 0.
-        assert!(s1.contains("write_mix_tot_scratch(tile_local, 0u, mix_tot[0])"));
-        assert!(!s1.contains("write_check(cycle, mix_tot["));
+        assert!(s1.contains("write_mix_tot_workset(tile_local, 0u, vec4<u32>(0u, 0u, 0u, 0u))"));
+        assert!(s1.contains("write_mix_mul_workset(tile_local, 0u, load_mix_pow(0u))"));
+        assert!(!s1.contains("write_check(cycle, read_mix_tot_workset"));
 
-        // Stage 2: load 1 fp + 1 mix, run AndEqz, write_check.
-        // SP3 iter 7t: per-chunk allocator restarts at slot 0 for each
-        // stage. Stage 2's first live-in (fp_var 2) lands in fp[0],
-        // not fp[2] (the global single-allocator slot).
+        // Stage 2: AndEqz(0, 2) reads mix slot 0 + fp slot 2 from
+        // workset, writes mix slot 1. SP3 iter 7bb: slots are GLOBAL
+        // across chunks (iter 7t's per-chunk reset was reverted), so
+        // fp_var 2 stays at slot 2 and mix_var 0 stays at mix slot 0.
         let s2 = &multi.stages[2].wgsl_source;
-        assert!(s2.contains("fp[0] = read_fp_scratch_scalar(tile_local, 0u)"));
-        assert!(s2.contains("mix_tot[0] = read_mix_tot_scratch(tile_local, 0u)"));
-        assert!(s2.contains("write_check(cycle, mix_tot[1])"));
+        assert!(s2.contains("read_fp_workset_scalar(tile_local, 2u)"));
+        assert!(s2.contains("read_mix_tot_workset(tile_local, 0u)"));
+        assert!(s2.contains("read_mix_mul_workset(tile_local, 0u)"));
+        assert!(s2.contains("write_check(cycle, read_mix_tot_workset(tile_local, 1u))"));
 
-        // Strides: max_live_fp = 2 (after stage 0), max_live_mix = 1
-        // (after stage 1). Base mode: 1 u32 per fp slot.
-        assert_eq!(multi.fp_scratch_stride_u32, 2);
-        assert_eq!(multi.mix_scratch_stride_u32, 4); // 1 mix * 4 u32 per vec4
+        // SP3 iter 7bb: workset stride sized to global plan.fp_slots /
+        // plan.mix_slots (3 / 2 for TINY_DEF). Base mode: 1 u32 per fp
+        // slot, 4 u32 per mix slot.
+        assert_eq!(multi.fp_scratch_stride_u32, 3);
+        assert_eq!(multi.mix_scratch_stride_u32, 8);
     }
 
     #[test]
     fn multi_kernel_uses_ext_helpers_for_ext_field_mode() {
         // FULL_DEF requires Ext mode. Two-chunk split exercises ext
-        // scratch helpers.
+        // workset helpers (iter 7bb: no separate scratch I/O, every
+        // fp write goes to the workset via the _ext suffix).
         let multi =
             staged_multi_kernel_from_def("full2", &FULL_DEF, TEST_TAPS, FieldMode::Ext, 5).unwrap();
         assert!(multi.stages.len() >= 2);
         let early = &multi.stages[0].wgsl_source;
-        // Boundary live-out for ext mode uses _ext helpers.
+        // Ext-mode writes go through write_fp_workset_ext.
         assert!(
-            early.contains("write_fp_scratch_ext(tile_local"),
-            "ext mode must use write_fp_scratch_ext at chunk boundaries"
+            early.contains("write_fp_workset_ext(tile_local"),
+            "ext mode must use write_fp_workset_ext for fp writes"
         );
         let last = &multi.stages.last().unwrap().wgsl_source;
         assert!(
-            last.contains("write_check(cycle, mix_tot["),
+            last.contains("write_check(cycle, read_mix_tot_workset(tile_local,"),
             "last stage must call write_check"
         );
         // Strides: ext mode uses 4 u32s per fp slot.
@@ -1912,7 +1895,9 @@ mod tests {
         let prelude_pos = full.find(prelude_anchor).expect("prelude present");
         let body_pos = full.find(body_anchor).expect("emitter body present");
         assert!(prelude_pos < body_pos, "prelude must precede emitter body");
-        assert!(full.contains("fp[2] = add(fp[0], fp[1]);"));
+        assert!(full.contains(
+            "write_fp_workset_scalar(tile_local, 2u, add(read_fp_workset_scalar(tile_local, 0u), read_fp_workset_scalar(tile_local, 1u)));"
+        ));
     }
 
     #[test]
@@ -1927,7 +1912,9 @@ mod tests {
             .expect("Ext mode accepts ConstExt");
         assert!(full.contains("fn ext_mul(lhs: vec4<u32>, rhs: vec4<u32>)"));
         // Mul(5, 3) under slot reuse: f5 lives in slot 2, f3 in slot 3, f6 in slot 1.
-        assert!(full.contains("fp[1] = ext_mul(fp[2], fp[3]);"));
+        assert!(full.contains(
+            "write_fp_workset_ext(tile_local, 1u, ext_mul(read_fp_workset_ext(tile_local, 2u), read_fp_workset_ext(tile_local, 3u)));"
+        ));
         // iter 7m: workgroup_size is picked by choose_workgroup_size to
         // fit fp_slots+mix_slots in the per-workgroup storage budget.
         // For FULL_DEF in Ext mode the chosen size is non-zero; we
@@ -1958,7 +1945,9 @@ mod tests {
             assert!(
                 kernel
                     .wgsl_source
-                    .contains(&format!("mix_mul[{n}] = load_mix_pow({exp}u)")),
+                    .contains(&format!(
+                        "write_mix_mul_workset(tile_local, {n}u, load_mix_pow({exp}u))"
+                    )),
                 "mix var {n} must load mix_pow at exponent {exp}"
             );
         }
