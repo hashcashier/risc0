@@ -56,12 +56,21 @@ Landed in this push (post Phase 03 lock):
 - SP6c iter 2 — `commit_group_async` + `witgen_accum` instrumented; metric tightens 0.46→0.34 on R1 smokes.
 - SP6c iter 3 — PARKED with documented structural reason (single-thread + single-device limit).
 - SP6d iter 1 — `risc0_zkvm::WebGpuProverPool` scaffold + 2-slot construct smoke; browser confirms independent `web_sys::GpuDevice` per slot.
+- SP6d iter 2 — concurrent composite prove smoke: 7% wall win on 2-slot pool.
+- SP6d iter 3 — concurrent **succinct** prove smoke + nvidia-smi capture: **GPU util 12.6%→52.7% mean, 30%→100% peak, 53.7W→104.4W mean.** The 5090 is finally engaged. Single-prove wall expanded, but per-prove throughput improves 10% on 2-slot.
+- SP6d iter 4 — per-HAL `gpu_active_ms` accumulator (`new_active_for(label, hal)`). Multi-HAL pools now report accurate per-slot `gpu_idle_ratio`. Concurrent succinct on 2-slot: per-slot idle 0.19 / 0.15 (vs 0.34 single-slot).
+- SP6d iter 5 — DESIGN ONLY (`evidence/perf/sp6c-overlap/2026-05-13-sp6d-iter5-design.md`); orchestrator for single-prove segment distribution requires ~3-4 days public-API surgery on ProverImpl + WebGpuProver + the pool method. Foundation work is done; the orchestrator is the next session's task.
 
-Current R1 measurements (post-iter-2):
+Current R1 measurements (post iter 4, single-slot):
 | Fixture | wall_ms | gpu_idle_ratio |
 |---|---:|---:|
-| poseidon2_basic | 3219 | 0.344 |
-| libm | 3213 | 0.343 |
-| keccak_union_small | 107138 | 0.353 |
+| poseidon2_basic | 3220 | 0.342 |
+| libm | 3247 | 0.341 |
 
-Status snapshot for future sessions: `addenda/03-implementation-status-2026-05-13.md`. Roadmap: SP6d iter 2 (distribute lift/join work across pool slots, expected 30–50% wall win on multi-segment); then SP7 (GPU-resident witness, expected ~7% per circuit); SP8 (readback coalesce, ~3%); SP9 (pipeline cache, ~5%); SP10 (R9 matrix re-measurement); SP11 (closing audit).
+2-slot concurrent succinct (one poseidon2_basic + one libm, single trial):
+| Slot | wall_ms | gpu_active_ms | gpu_idle_ratio |
+|---|---:|---:|---:|
+| 0 | 5753 | 4664 | 0.189 |
+| 1 | 5541 | 4730 | 0.146 |
+
+Roadmap: SP6d iter 5 (single-prove segment distribution, expected 30–50% wall win on multi-segment); SP7 (GPU-resident witness, expected ~7% per circuit); SP8 (readback coalesce, ~3%); SP9 (pipeline cache, ~5%); SP10 (R9 matrix re-measurement); SP11 (closing audit).
