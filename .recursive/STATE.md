@@ -59,7 +59,9 @@ Landed in this push (post Phase 03 lock):
 - SP6d iter 2 — concurrent composite prove smoke: 7% wall win on 2-slot pool.
 - SP6d iter 3 — concurrent **succinct** prove smoke + nvidia-smi capture: **GPU util 12.6%→52.7% mean, 30%→100% peak, 53.7W→104.4W mean.** The 5090 is finally engaged. Single-prove wall expanded, but per-prove throughput improves 10% on 2-slot.
 - SP6d iter 4 — per-HAL `gpu_active_ms` accumulator (`new_active_for(label, hal)`). Multi-HAL pools now report accurate per-slot `gpu_idle_ratio`. Concurrent succinct on 2-slot: per-slot idle 0.19 / 0.15 (vs 0.34 single-slot).
-- SP6d iter 5 — DESIGN ONLY (`evidence/perf/sp6c-overlap/2026-05-13-sp6d-iter5-design.md`); orchestrator for single-prove segment distribution requires ~3-4 days public-API surgery on ProverImpl + WebGpuProver + the pool method. Foundation work is done; the orchestrator is the next session's task.
+- SP6d iter 5 — `WebGpuProverPool::lift_and_join_async(composite)` orchestrator landed: distributes per-segment lifts across pool slots + balanced-tree joins. Single-segment validated.
+- SP6d iter 6 — `WebGpuProverPool::prove_keccak_requests_async` distributes pending keccak proofs across pool slots with bounded concurrency. 17 keccak proofs on 2-slot pool: **40.2% mean GPU util / 100% peak / 89.2 W mean / 207.6 W peak** in 85.2 s. Highest sustained engagement we've measured on real proving work.
+- SP6d iter 7 — bounded-concurrency fix on `lift_and_join_async`. Multi-segment validated: BusyLoop{500_000} produces 3 segments; pool wall **10.75 s (18% savings vs serial)**, receipt verifies.
 
 Current R1 measurements (post iter 4, single-slot):
 | Fixture | wall_ms | gpu_idle_ratio |
