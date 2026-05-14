@@ -531,7 +531,7 @@ impl ProverImpl {
         Ok(Some(item))
     }
 
-    async fn composite_to_succinct_async(
+    pub(crate) async fn composite_to_succinct_async(
         &self,
         composite_receipt: &CompositeReceipt,
     ) -> Result<SuccinctReceipt<ReceiptClaim>> {

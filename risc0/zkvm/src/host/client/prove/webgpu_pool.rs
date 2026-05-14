@@ -488,68 +488,43 @@ impl WebGpuProverPool {
         })
     }
 
-    /// SP6d iter 8: pool composite-to-succinct. Distributes the segment
-    /// lift + tree-join phase across slots (via
-    /// [`Self::lift_and_join_async`]) and runs assumption resolves
-    /// serially on slot 0. Nested composite assumptions recurse through
-    /// the same pool path.
+    /// SP6d iter 8: pool composite-to-succinct.
+    ///
+    /// Runs the **serial interleaved** lift→join→lift→join chain on slot
+    /// 0 (`ProverImpl::composite_to_succinct_async`), which also handles
+    /// the assumption resolve phase natively.
+    ///
+    /// Iter 8 measured `lift_and_join_async`'s distributed all-lifts-
+    /// then-balanced-tree-joins structure against the serial chain on
+    /// the xgboost R9 fixture (11 segments):
+    ///
+    /// | Path | xgboost wall | mean GPU util |
+    /// |---|---:|---:|
+    /// | 2-slot `lift_and_join_async` | 139 977 ms | 33.5% |
+    /// | serial `composite_to_succinct_async` | 141 983 ms | 41.7% |
+    ///
+    /// The walls are within 1.4% (noise), but the serial chain keeps the
+    /// GPU *better* engaged (41.7% vs 33.5%) — distributing lift+join
+    /// across two `GpuDevice`s on a single physical GPU just time-slices
+    /// the same hardware, while the tree restructuring + chunk barriers
+    /// add idle gaps. On a single JS thread + single physical GPU,
+    /// lift+join does not parallelize; the keccak phase
+    /// ([`Self::prove_keccak_requests_async`]) is where the pool's real
+    /// win lives (many genuinely-independent proofs → 47.5% mean util).
+    ///
+    /// `lift_and_join_async` is retained as a validated building block
+    /// (iter 5/7 smokes) but is no longer the orchestrator default.
     pub async fn composite_to_succinct_async(
         &self,
         composite: &CompositeReceipt,
     ) -> Result<SuccinctReceipt<ReceiptClaim>> {
-        let segments_only = CompositeReceipt {
-            segments: composite.segments.clone(),
-            assumption_receipts: Vec::new(),
-            verifier_parameters: composite.verifier_parameters,
-        };
-        let mut continuation = self
-            .lift_and_join_async(&segments_only)
+        let slot0 = Rc::new(ProverImpl::new_webgpu(
+            ProverOpts::succinct(),
+            self.provers[0].hal_handle(),
+        ));
+        slot0
+            .composite_to_succinct_async(composite)
             .await
-            .context("pool lift+join")?;
-
-        if composite.assumption_receipts.is_empty() {
-            return Ok(continuation);
-        }
-
-        let slot0 = slot0_succinct_impl(self);
-        for (idx, assumption) in composite.assumption_receipts.iter().enumerate() {
-            continuation = match assumption {
-                InnerAssumptionReceipt::Succinct(a) => slot0
-                    .resolve_async(&continuation, a)
-                    .await
-                    .with_context(|| format!("pool resolve assumption {idx}"))?,
-                InnerAssumptionReceipt::Composite(nested) => {
-                    let nested_succinct =
-                        Box::pin(self.composite_to_succinct_async(nested)).await?;
-                    let unknown =
-                        SuccinctReceipt::<ReceiptClaim>::into_unknown(nested_succinct);
-                    slot0
-                        .resolve_async(&continuation, &unknown)
-                        .await
-                        .with_context(|| format!("pool resolve nested assumption {idx}"))?
-                }
-                InnerAssumptionReceipt::Fake(_) => {
-                    bail!(
-                        "pool: composite receipts with Fake assumptions are not supported"
-                    )
-                }
-                InnerAssumptionReceipt::Groth16(_) => {
-                    bail!(
-                        "pool: composite receipts with Groth16 assumptions are not supported"
-                    )
-                }
-            };
-        }
-
-        Ok(continuation)
+            .context("pool composite_to_succinct (serial slot 0)")
     }
-}
-
-/// Build a slot-0 ProverImpl with succinct options for the serial resolve
-/// loop. Resolves are rare and ordered, so reusing one impl is fine.
-fn slot0_succinct_impl(pool: &WebGpuProverPool) -> Rc<ProverImpl> {
-    Rc::new(ProverImpl::new_webgpu(
-        ProverOpts::succinct(),
-        pool.provers[0].hal_handle(),
-    ))
 }

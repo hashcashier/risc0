@@ -1599,6 +1599,58 @@ mod tests {
         ));
     }
 
+    /// SP6d iter 8 — end-to-end pool prove on the xgboost R9 fixture.
+    /// xgboost is the canonical multi-segment workload (several po2_18
+    /// segments, no assumptions): the pool proves segments serially on
+    /// slot 0, then distributes the per-segment lifts + tree joins
+    /// across both slots via `composite_to_succinct_async`. This is the
+    /// SP6d QA-gate fixture — it must produce a verifying succinct
+    /// receipt with the expected journal output.
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_pool_xgboost_smoke() {
+        use forust_ml::GradientBooster;
+        use risc0_zkvm::{ProverOpts, VerifierContext, WebGpuProverPool};
+        use xgboost_methods::{XGBOOST_ELF, XGBOOST_ID};
+
+        console_error_panic_hook::set_once();
+
+        let pool = WebGpuProverPool::new(2).await.expect("pool construct");
+
+        let model: GradientBooster =
+            serde_json::from_str(include_str!("../../xgboost/res/trained_model.json")).unwrap();
+        let model_bytes = rmp_serde::to_vec(&model).unwrap();
+        let data: Vec<f64> = vec![18511304.0, 117.0];
+        let env = ExecutorEnv::builder()
+            .write(&data)
+            .unwrap()
+            .write(&model_bytes)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let ctx = VerifierContext::default();
+        let opts = ProverOpts::succinct();
+
+        let t0 = js_sys::Date::now();
+        let info = pool
+            .prove_with_ctx_async(env, &ctx, XGBOOST_ELF, &opts)
+            .await
+            .expect("pool prove_with_ctx xgboost");
+        let wall_ms = js_sys::Date::now() - t0;
+
+        info.receipt
+            .verify(XGBOOST_ID)
+            .expect("pool xgboost succinct verifies");
+        assert_eq!(
+            info.receipt.journal.decode::<f64>().unwrap(),
+            30.528042544062632
+        );
+
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "pool_xgboost_smoke wall_ms={wall_ms:.0}"
+        ));
+    }
+
     #[wasm_bindgen_test(async)]
     async fn webgpu_hal_oversized_async_gather_reads_only_sample() {
         console_error_panic_hook::set_once();
