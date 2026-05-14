@@ -1,9 +1,71 @@
 Run: `/.recursive/run/wasm-webgpu-prover-perf/`
 Phase: `SP7 iter 5 — chunk the validated WGSL module under the device cliff`
 DraftedAt: `2026-05-14`
-Status: `BLOCKED — the iter-1 cliff is a phantom; the browser WebGPU
-device is in a broken environmental state. Needs machine-level
-intervention before iter 5/6 can proceed.`
+Status: `iter 5a COMPLETE — cliff is reachable-code-based; iter 5b
+(chunking transformation) designed below.`
+
+## iter 5a FINAL (2026-05-14, post-reboot, NVIDIA ICD forced)
+
+The "broken device" was **Vulkan ICD mis-selection**: with `nvidia`,
+`lvp` (lavapipe), and `nouveau` ICDs all installed, Chrome's Dawn
+non-deterministically picked a broken Mesa device. **Fix:
+`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json`** on the
+browser test invocation. iter 6 must set this.
+
+With the NVIDIA ICD forced, the refined probe
+(`sp7_cliff_reachability_smoke`, fresh `WebGpuHal` per probe, ordered
+passes-first) gave a clean, decisive verdict:
+
+| probe | module | reachable cold? | result |
+|---|---:|---|---|
+| anchor_lo | 1.87 MB | n/a (sub-cliff) | **OK** |
+| unreachable_cold6144 | 3.73 MB | **no** | **OK** |
+| reachable_cold6144 | 3.73 MB | **yes** | **FAILED** (device lost) |
+| many_dispatch (×1000) | 478 KB | n/a | **OK** |
+
+**`cliff_type = reachable_code`.** Same 3.73 MB module: unreachable
+cold → dispatches; reachable cold → device lost. So the device/Tint
+capacity cliff counts **code reachable from the `@compute` entry**
+(post-DCE, per-pipeline), NOT whole-module source size. The reachable
+cliff is **~1.9–2.8 MB** (cold=3072/1.87 MB OK, cold=4608/2.80 MB FAIL
+from the prior run) — iter-1's "478 KB" was the broken-Mesa-device
+artifact. No degradation: a sub-cliff module survived 1000 dispatches.
+
+Operational fact for iter 6: a device-loss makes `requestAdapter()`
+fail for the **rest of that Chrome process** — recovery needs a fresh
+process.
+
+## iter 5b plan — staged `@compute` entries, ONE module (no pruning)
+
+Because the cliff is reachable-code-based, chunking is much simpler
+than the whole-module case would have been:
+
+- Emit **one** WGSL module containing the prelude + all type defs +
+  all layout constants + all 211 step functions (the 4.7 MB module
+  iter 4 already produces and naga-validates).
+- Partition `step_Top`'s body (and `step_TopAccum`'s) into N contiguous
+  segments. Each segment becomes a separate `@compute` entry
+  `step_Top_chunk_i` whose transitively-reachable code is < ~1.5 MB
+  (safe margin under the ~1.9 MB-confirmed-OK point). Tint DCEs
+  everything not reached from that entry per-pipeline, so the 4.7 MB
+  module is fine — only each entry's closure counts.
+- Liveness analysis across segment boundaries: values defined in
+  segment i and used in segment j>i are live-outs → written to a
+  `scratch` storage buffer; segment j reads them back as live-ins
+  (the iter-2 staged model — ~0.10 ns/cycle per boundary, no
+  catastrophe).
+- Estimated ~3–4 chunks for `step_Top` (~4.5 MB reachable / ~1.3 MB
+  budget), ~1–2 for `step_TopAccum`.
+- Likely a new MLIR pass in zirgen (mirrors how `createUnrollPass`
+  runs on a WGSL-only clone in `gen_zirgen.cpp`): split the
+  `Zhlt::StepFuncOp` body, compute liveness, emit per-segment
+  `StepFuncOp`s with scratch read/write prologue/epilogue.
+- Validate each chunk-entry's reachable closure stays < cliff with the
+  probe harness; then iter 6 wires it in.
+
+---
+
+## (superseded) earlier status + plan
 
 ## iter 5a probe result (2026-05-14) — the cliff is a phantom
 

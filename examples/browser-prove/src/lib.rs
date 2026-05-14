@@ -2500,62 +2500,61 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     /// a ceiling hit kills the device for anything after it.
     #[wasm_bindgen_test(async)]
     async fn sp7_cliff_reachability_smoke() {
-        use risc0_zkp::core::hash::poseidon2::Poseidon2HashSuite;
-        use risc0_zkp::hal::webgpu::{WebGpuBindingLayout, WebGpuHal};
-
         console_error_panic_hook::set_once();
-        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
-            .await
-            .expect("hal");
 
-        const N_ROWS: u32 = 1u32 << 17;
-        const N_COLS: u32 = 256;
-        const N_CYCLES: u32 = N_ROWS;
-        const HOT_DEPTH: u32 = 24;
-        const OPS_PER_FN: u32 = 16;
-        let workgroups = N_CYCLES / 64;
+        // Each probe gets a FRESH WebGpuHal/device. The prior version reused
+        // one device across the whole sweep, so once a module lost the device
+        // every result after it was garbage. Builds the witgen-shaped module,
+        // compiles it, dispatches it `n_dispatches` times, reads back.
+        // true = the dispatch(es) completed; false = compile or device loss.
+        async fn probe(tag: &str, cold: u32, cold_reachable: bool, n_dispatches: u32) -> bool {
+            use risc0_zkp::core::hash::poseidon2::Poseidon2HashSuite;
+            use risc0_zkp::hal::webgpu::{WebGpuBindingLayout, WebGpuBufferBinding, WebGpuHal};
 
-        let data_bytes = (N_ROWS * N_COLS) as u64 * 4;
-        // Same params layout as sp7_witgen_codegen_scale_smoke.
-        let params = [N_ROWS, N_CYCLES, N_COLS, 200u32, 255u32, 0u32, 0u32, 0u32];
-        let params_bytes: &[u8] = bytemuck::cast_slice(&params);
+            const N_ROWS: u32 = 1u32 << 17;
+            const N_COLS: u32 = 256;
+            const N_CYCLES: u32 = N_ROWS;
+            const HOT_DEPTH: u32 = 24;
+            const OPS_PER_FN: u32 = 16;
 
-        let layout = hal
-            .create_bind_group_layout(
-                "sp7_cliff_layout",
-                &[
-                    WebGpuBindingLayout::storage(0, 0),
-                    WebGpuBindingLayout::uniform(1, params_bytes.len() as u64),
-                ],
-            )
-            .expect("layout");
-
-        // Compile a kernel, dispatch it once, read back. Returns true if the
-        // dispatch completed; false if compile failed or the first dispatch
-        // killed the device (a failed readback).
-        async fn probe(
-            hal: &risc0_zkp::hal::webgpu::WebGpuHal,
-            layout: &web_sys::GpuBindGroupLayout,
-            tag: &str,
-            wgsl: &str,
-            data_bytes: u64,
-            params_bytes: &[u8],
-            workgroups: u32,
-            n_dispatches: u32,
-        ) -> bool {
+            let wgsl = sp7_build_witgen_shaped_wgsl(HOT_DEPTH, OPS_PER_FN, cold, cold_reachable);
             let wgsl_bytes = wgsl.len();
-            // The kernel name must be 'static; `tag` (a &str param) is for logs.
+            let data_bytes = (N_ROWS * N_COLS) as u64 * 4;
+            let params = [N_ROWS, N_CYCLES, N_COLS, 200u32, 255u32, 0u32, 0u32, 0u32];
+            let params_bytes: &[u8] = bytemuck::cast_slice(&params);
+            let workgroups = N_CYCLES / 64;
+            let log = |phase: &str| {
+                risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                    "sp7_cliff {tag} cold={cold} reachable={cold_reachable} \
+                     wgsl_bytes={wgsl_bytes} dispatches={n_dispatches} phase={phase}"
+                ));
+            };
+
+            let hal = match WebGpuHal::new(Poseidon2HashSuite::new_suite()).await {
+                Ok(h) => h,
+                Err(e) => {
+                    log(&format!("hal_FAILED err={e:?}"));
+                    return false;
+                }
+            };
+            let layout = hal
+                .create_bind_group_layout(
+                    "sp7_cliff_layout",
+                    &[
+                        WebGpuBindingLayout::storage(0, 0),
+                        WebGpuBindingLayout::uniform(1, params_bytes.len() as u64),
+                    ],
+                )
+                .expect("layout");
             let kernel = match hal.create_compute_kernel(
                 "sp7_cliff_kernel",
-                wgsl,
+                &wgsl,
                 "main",
                 &[layout.clone()],
             ) {
                 Ok(k) => k,
                 Err(e) => {
-                    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "sp7_cliff {tag} wgsl_bytes={wgsl_bytes} phase=compile_FAILED err={e:?}"
-                    ));
+                    log(&format!("compile_FAILED err={e:?}"));
                     return false;
                 }
             };
@@ -2568,10 +2567,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let bind_group = hal
                 .create_bind_group(
                     "sp7_cliff_bg",
-                    layout,
+                    &layout,
                     &[
-                        risc0_zkp::hal::webgpu::WebGpuBufferBinding::new(0, &data_buf),
-                        risc0_zkp::hal::webgpu::WebGpuBufferBinding::new(1, &params_buf),
+                        WebGpuBufferBinding::new(0, &data_buf),
+                        WebGpuBufferBinding::new(1, &params_buf),
                     ],
                 )
                 .expect("bind group");
@@ -2580,104 +2579,58 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             match hal.read_buffer(&data_buf, 4).await {
                 Ok(_) => {
-                    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "sp7_cliff {tag} wgsl_bytes={wgsl_bytes} dispatches={n_dispatches} phase=OK"
-                    ));
+                    log("OK");
                     true
                 }
                 Err(e) => {
-                    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "sp7_cliff {tag} wgsl_bytes={wgsl_bytes} dispatches={n_dispatches} phase=FAILED err={e:?}"
-                    ));
+                    log(&format!("dispatch_FAILED err={e:?}"));
                     false
                 }
             }
         }
 
-        // Capacity sweep: REACHABLE cold subtrees (worst case -- no DCE
-        // possible) at growing sizes. cold=768 ~= 0.5 MB (iter-1's claimed
-        // death size), 3072 ~= 1.9 MB, 6144 ~= 3.7 MB, 9216 ~= 5.5 MB (past
-        // the real ~4.7 MB witgen module), 12288 ~= 7.4 MB. One full-grid
-        // dispatch each -- a light load, distinct from iter-1's timing loop
-        // which did thousands of dispatches before reaching cold=768.
-        let mut largest_ok_bytes: usize = 0;
-        let mut first_fail_cold: Option<u32> = None;
-        for &cold in &[768u32, 3072, 6144, 9216, 12288] {
-            let wgsl = sp7_build_witgen_shaped_wgsl(HOT_DEPTH, OPS_PER_FN, cold, true);
-            let wgsl_bytes = wgsl.len();
-            let ok = probe(
-                &hal,
-                &layout,
-                &format!("sweep_cold{cold}"),
-                &wgsl,
-                data_bytes,
-                params_bytes,
-                workgroups,
-                1,
-            )
-            .await;
-            if ok {
-                largest_ok_bytes = largest_ok_bytes.max(wgsl_bytes);
-            } else {
-                first_fail_cold = Some(cold);
-                break;
-            }
-        }
+        // KEY CONSTRAINT (found the hard way): a device-loss in one probe
+        // makes requestAdapter() fail for the REST of this Chrome process --
+        // "fresh HAL per probe" is not enough isolation. So a single run gets
+        // many clean PASSES plus at most one clean FAIL. Probes are ordered so
+        // the decisive one (reachable-vs-whole-module) runs second, behind
+        // only anchor_lo, which reliably passes. The cliff RANGE is already
+        // pinned from the prior run (cold=3072 ~1.87 MB OK, cold=4608
+        // ~2.80 MB FAILED); tightening it would need a fresh Chrome per size.
 
-        // If a reachable size failed, re-probe the SAME size UNREACHABLE: if
-        // that passes, the device DCEs per pipeline (reachable-code cliff); if
-        // it also fails, the cliff is whole-module.
-        let cliff_type = match first_fail_cold {
-            None => "none_up_to_tested",
-            Some(cold) => {
-                let wgsl = sp7_build_witgen_shaped_wgsl(HOT_DEPTH, OPS_PER_FN, cold, false);
-                let unreachable_ok = probe(
-                    &hal,
-                    &layout,
-                    &format!("unreachable_cold{cold}"),
-                    &wgsl,
-                    data_bytes,
-                    params_bytes,
-                    workgroups,
-                    1,
-                )
-                .await;
-                if unreachable_ok {
-                    "reachable_code"
-                } else {
-                    "whole_module"
-                }
-            }
+        // 1. Sub-cliff anchor -- expected OK; if this fails the device/ICD is
+        //    wrong and nothing else is meaningful.
+        let anchor_lo_ok = probe("anchor_lo", 3072, true, 1).await;
+
+        // 2. THE DECISIVE PROBE: a ~3.73 MB module whose huge cold subtree is
+        //    UNREACHABLE from `main`. If it dispatches, the device/Tint DCEs
+        //    unreachable code per pipeline => reachable-code cliff (iter 5
+        //    splits step_Top by reachability, no per-chunk type/layout
+        //    pruning). If it dies, the cliff counts the whole module => each
+        //    chunk must be emitted as a minimal self-contained module.
+        let unreachable_big_ok = probe("unreachable_cold6144", 6144, false, 1).await;
+        let cliff_type = if unreachable_big_ok {
+            "reachable_code"
+        } else {
+            "whole_module"
         };
 
-        // Many-dispatch stress on the largest reachable size that passed: does
-        // repeated full-grid dispatch degrade the device? (iter-1's "cliff"
-        // appeared only after a thousands-of-dispatches timing loop -- real
-        // witgen dispatches each kernel only a handful of times.)
-        let stress_cold = if first_fail_cold == Some(768) { 0 } else { 768 };
-        let stress_wgsl = sp7_build_witgen_shaped_wgsl(HOT_DEPTH, OPS_PER_FN, stress_cold, true);
-        let many_dispatch_ok = probe(
-            &hal,
-            &layout,
-            "many_dispatch_stress",
-            &stress_wgsl,
-            data_bytes,
-            params_bytes,
-            workgroups,
-            1000,
-        )
-        .await;
+        // 3. Same size REACHABLE -- confirms the cliff. Loses the device.
+        let reachable_big_fail = !probe("reachable_cold6144", 6144, true, 1).await;
+
+        // 4. Degradation under load -- 1000 full-grid dispatches of a sub-cliff
+        //    module. Runs last; may be contaminated if 2/3 lost the device.
+        let many_dispatch_ok = probe("many_dispatch", 768, true, 1000).await;
 
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "sp7_cliff verdict largest_reachable_ok_bytes={largest_ok_bytes} \
-             first_fail_cold={first_fail_cold:?} cliff_type={cliff_type} \
-             many_dispatch_1000_ok={many_dispatch_ok}"
+            "sp7_cliff verdict cliff_type={cliff_type} cliff_range=1.87MB_OK..2.80MB_FAIL \
+             unreachable_3.73MB_ok={unreachable_big_ok} reachable_3.73MB_fail={reachable_big_fail} \
+             sub_cliff_1.87MB_ok={anchor_lo_ok} many_dispatch_1000_ok={many_dispatch_ok}"
         ));
-        // The probe is informational -- it must not falsely fail the suite. A
-        // sweep that reaches at least the iter-1 size is enough to record.
         assert!(
-            largest_ok_bytes > 0,
-            "sp7_cliff: even the smallest sweep module failed to dispatch"
+            anchor_lo_ok,
+            "sp7_cliff: anchor_lo (cold=3072, ~1.87 MB) failed to dispatch -- \
+             device is unhealthy or the VK_ICD_FILENAMES override is missing"
         );
     }
 
