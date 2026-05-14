@@ -1803,7 +1803,18 @@ fn buf_load(col: u32, cycle: u32, back: u32) -> u32 {
     /// `cold_count` functions reachable only through a runtime-false
     /// guard. Functions are emitted leaves-first (WGSL has no forward
     /// references). Returns the full WGSL source.
-    fn sp7_build_witgen_shaped_wgsl(hot_depth: u32, ops_per_fn: u32, cold_count: u32) -> String {
+    /// `cold_reachable`: when true (iter-1 behavior) the cold subtree is
+    /// reached via a runtime-false guard, so the device must compile AND keep
+    /// it. When false the cold functions are emitted but never referenced from
+    /// `main` — a truly-dead subtree. The iter-5a cliff probe compares the two:
+    /// if a huge unreachable cold set still dispatches, the device cliff is
+    /// reachable-code-based (Tint DCEs per pipeline); if it dies, whole-module.
+    fn sp7_build_witgen_shaped_wgsl(
+        hot_depth: u32,
+        ops_per_fn: u32,
+        cold_count: u32,
+        cold_reachable: bool,
+    ) -> String {
         let mut out = sp7_field_prelude();
         // Cold subtree: binary tree, node i has children 2i+1, 2i+2.
         // Emit highest index first so children precede parents.
@@ -1854,7 +1865,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   acc = hot_0(cycle, acc);
 "#,
         );
-        if cold_count > 0 {
+        if cold_count > 0 && cold_reachable {
             out.push_str(
                 "  let guard = buf_load(params.guard_col, cycle, 0u);\n  if (guard == 0xdeadbeefu) { acc = cold_0(cycle, acc); }\n",
             );
@@ -2055,7 +2066,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let mut completed = 0u32;
 
         for &cold in COLD_SWEEP.iter() {
-            let wgsl = sp7_build_witgen_shaped_wgsl(HOT_DEPTH, OPS_PER_FN, cold);
+            let wgsl = sp7_build_witgen_shaped_wgsl(HOT_DEPTH, OPS_PER_FN, cold, true);
             let wgsl_bytes = wgsl.len();
             let t_compile = js_sys::Date::now();
             let kernel = match hal.create_compute_kernel(
@@ -2139,7 +2150,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // 1.0 measurement.
         let mut recheck_ratio: f64 = -1.0;
         if completed >= 1 {
-            let wgsl = sp7_build_witgen_shaped_wgsl(HOT_DEPTH, OPS_PER_FN, 0);
+            let wgsl = sp7_build_witgen_shaped_wgsl(HOT_DEPTH, OPS_PER_FN, 0, true);
             if let Ok(kernel) =
                 hal.create_compute_kernel("sp7_scale_recheck", &wgsl, "main", &[layout.clone()])
             {
@@ -2467,6 +2478,206 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         assert!(
             completed >= 1,
             "SP7 iter 2: even the n_stages=1 baseline failed to compile + run"
+        );
+    }
+
+    /// SP7 iter 5a — device capacity cliff: reachable-code vs whole-module.
+    ///
+    /// iter 1 found a single WGSL pipeline dies on its first dispatch at
+    /// ~478 KB of *reachable* code. The full rv32im witgen module is ~4.7 MB
+    /// (~10x over), so iter 5 must chunk it — but HOW depends on a fact iter 1
+    /// left open: does the device cliff count *reachable* (per-pipeline,
+    /// post-DCE) code, or the *whole module*?
+    ///
+    /// This probe emits modules with the SAME tiny reachable hot path plus a
+    /// huge cold subtree that is *truly unreachable* (emitted but never
+    /// referenced from `main`, cold_reachable=false). If a huge unreachable
+    /// cold set still dispatches, the device DCEs per pipeline ->
+    /// REACHABLE_CODE_CLIFF (iter 5 = split step_Top by reachability, no
+    /// per-chunk type/layout pruning). If it dies -> WHOLE_MODULE_CLIFF (each
+    /// chunk must be a minimal self-contained module). A reachable cold=768
+    /// control runs LAST — iter 1 found that size dies on first dispatch, and
+    /// a ceiling hit kills the device for anything after it.
+    #[wasm_bindgen_test(async)]
+    async fn sp7_cliff_reachability_smoke() {
+        use risc0_zkp::core::hash::poseidon2::Poseidon2HashSuite;
+        use risc0_zkp::hal::webgpu::{WebGpuBindingLayout, WebGpuHal};
+
+        console_error_panic_hook::set_once();
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .expect("hal");
+
+        const N_ROWS: u32 = 1u32 << 17;
+        const N_COLS: u32 = 256;
+        const N_CYCLES: u32 = N_ROWS;
+        const HOT_DEPTH: u32 = 24;
+        const OPS_PER_FN: u32 = 16;
+        let workgroups = N_CYCLES / 64;
+
+        let data_bytes = (N_ROWS * N_COLS) as u64 * 4;
+        // Same params layout as sp7_witgen_codegen_scale_smoke.
+        let params = [N_ROWS, N_CYCLES, N_COLS, 200u32, 255u32, 0u32, 0u32, 0u32];
+        let params_bytes: &[u8] = bytemuck::cast_slice(&params);
+
+        let layout = hal
+            .create_bind_group_layout(
+                "sp7_cliff_layout",
+                &[
+                    WebGpuBindingLayout::storage(0, 0),
+                    WebGpuBindingLayout::uniform(1, params_bytes.len() as u64),
+                ],
+            )
+            .expect("layout");
+
+        // Compile a kernel, dispatch it once, read back. Returns true if the
+        // dispatch completed; false if compile failed or the first dispatch
+        // killed the device (a failed readback).
+        async fn probe(
+            hal: &risc0_zkp::hal::webgpu::WebGpuHal,
+            layout: &web_sys::GpuBindGroupLayout,
+            tag: &str,
+            wgsl: &str,
+            data_bytes: u64,
+            params_bytes: &[u8],
+            workgroups: u32,
+            n_dispatches: u32,
+        ) -> bool {
+            let wgsl_bytes = wgsl.len();
+            // The kernel name must be 'static; `tag` (a &str param) is for logs.
+            let kernel = match hal.create_compute_kernel(
+                "sp7_cliff_kernel",
+                wgsl,
+                "main",
+                &[layout.clone()],
+            ) {
+                Ok(k) => k,
+                Err(e) => {
+                    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                        "sp7_cliff {tag} wgsl_bytes={wgsl_bytes} phase=compile_FAILED err={e:?}"
+                    ));
+                    return false;
+                }
+            };
+            let data_buf = hal
+                .create_storage_buffer("sp7_cliff_data", data_bytes)
+                .expect("data buf");
+            let params_buf = hal
+                .create_uniform_buffer("sp7_cliff_params", params_bytes)
+                .expect("params buf");
+            let bind_group = hal
+                .create_bind_group(
+                    "sp7_cliff_bg",
+                    layout,
+                    &[
+                        risc0_zkp::hal::webgpu::WebGpuBufferBinding::new(0, &data_buf),
+                        risc0_zkp::hal::webgpu::WebGpuBufferBinding::new(1, &params_buf),
+                    ],
+                )
+                .expect("bind group");
+            for _ in 0..n_dispatches {
+                hal.dispatch_compute_1d(&kernel, &bind_group, workgroups);
+            }
+            match hal.read_buffer(&data_buf, 4).await {
+                Ok(_) => {
+                    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                        "sp7_cliff {tag} wgsl_bytes={wgsl_bytes} dispatches={n_dispatches} phase=OK"
+                    ));
+                    true
+                }
+                Err(e) => {
+                    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                        "sp7_cliff {tag} wgsl_bytes={wgsl_bytes} dispatches={n_dispatches} phase=FAILED err={e:?}"
+                    ));
+                    false
+                }
+            }
+        }
+
+        // Capacity sweep: REACHABLE cold subtrees (worst case -- no DCE
+        // possible) at growing sizes. cold=768 ~= 0.5 MB (iter-1's claimed
+        // death size), 3072 ~= 1.9 MB, 6144 ~= 3.7 MB, 9216 ~= 5.5 MB (past
+        // the real ~4.7 MB witgen module), 12288 ~= 7.4 MB. One full-grid
+        // dispatch each -- a light load, distinct from iter-1's timing loop
+        // which did thousands of dispatches before reaching cold=768.
+        let mut largest_ok_bytes: usize = 0;
+        let mut first_fail_cold: Option<u32> = None;
+        for &cold in &[768u32, 3072, 6144, 9216, 12288] {
+            let wgsl = sp7_build_witgen_shaped_wgsl(HOT_DEPTH, OPS_PER_FN, cold, true);
+            let wgsl_bytes = wgsl.len();
+            let ok = probe(
+                &hal,
+                &layout,
+                &format!("sweep_cold{cold}"),
+                &wgsl,
+                data_bytes,
+                params_bytes,
+                workgroups,
+                1,
+            )
+            .await;
+            if ok {
+                largest_ok_bytes = largest_ok_bytes.max(wgsl_bytes);
+            } else {
+                first_fail_cold = Some(cold);
+                break;
+            }
+        }
+
+        // If a reachable size failed, re-probe the SAME size UNREACHABLE: if
+        // that passes, the device DCEs per pipeline (reachable-code cliff); if
+        // it also fails, the cliff is whole-module.
+        let cliff_type = match first_fail_cold {
+            None => "none_up_to_tested",
+            Some(cold) => {
+                let wgsl = sp7_build_witgen_shaped_wgsl(HOT_DEPTH, OPS_PER_FN, cold, false);
+                let unreachable_ok = probe(
+                    &hal,
+                    &layout,
+                    &format!("unreachable_cold{cold}"),
+                    &wgsl,
+                    data_bytes,
+                    params_bytes,
+                    workgroups,
+                    1,
+                )
+                .await;
+                if unreachable_ok {
+                    "reachable_code"
+                } else {
+                    "whole_module"
+                }
+            }
+        };
+
+        // Many-dispatch stress on the largest reachable size that passed: does
+        // repeated full-grid dispatch degrade the device? (iter-1's "cliff"
+        // appeared only after a thousands-of-dispatches timing loop -- real
+        // witgen dispatches each kernel only a handful of times.)
+        let stress_cold = if first_fail_cold == Some(768) { 0 } else { 768 };
+        let stress_wgsl = sp7_build_witgen_shaped_wgsl(HOT_DEPTH, OPS_PER_FN, stress_cold, true);
+        let many_dispatch_ok = probe(
+            &hal,
+            &layout,
+            "many_dispatch_stress",
+            &stress_wgsl,
+            data_bytes,
+            params_bytes,
+            workgroups,
+            1000,
+        )
+        .await;
+
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "sp7_cliff verdict largest_reachable_ok_bytes={largest_ok_bytes} \
+             first_fail_cold={first_fail_cold:?} cliff_type={cliff_type} \
+             many_dispatch_1000_ok={many_dispatch_ok}"
+        ));
+        // The probe is informational -- it must not falsely fail the suite. A
+        // sweep that reaches at least the iter-1 size is enough to record.
+        assert!(
+            largest_ok_bytes > 0,
+            "sp7_cliff: even the smallest sweep module failed to dispatch"
         );
     }
 
