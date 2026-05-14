@@ -1517,6 +1517,87 @@ mod tests {
         ));
     }
 
+    /// SP6d iter 8 — keccak distribution WALL-TIME comparison.
+    ///
+    /// GPU utilization is a proxy; the goal is minimal wall time. This
+    /// test settles whether distributing keccak proofs across pool
+    /// slots actually reduces wall time, or just raises utilization.
+    ///
+    /// A 1-slot pool's `prove_keccak_requests_async` chunks the request
+    /// list into groups of 1 — i.e. it IS the serial baseline (one
+    /// `prove_keccak_webgpu` at a time on a single HAL). A 2-slot pool
+    /// chunks into groups of 2 and runs each pair via `try_join_all`.
+    /// Same code path, same fixture, same browser session — the only
+    /// variable is pool width. The ratio `pool_ms / serial_ms` is the
+    /// honest answer.
+    ///
+    /// Mechanism note: keccak proofs are fully independent (no
+    /// dependency chain), so slot 0's CPU witgen *can* overlap slot 1's
+    /// GPU work — unlike lift+join. If multi-device concurrency ever
+    /// wins on wall time, it wins here.
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_pool_keccak_serial_vs_pool_smoke() {
+        use risc0_zkvm::{ExecutorImpl, SimpleSegmentRef, WebGpuProverPool};
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF};
+
+        console_error_panic_hook::set_once();
+
+        let env = ExecutorEnv::builder()
+            .keccak_max_po2(14)
+            .unwrap()
+            .write(&MultiTestSpec::KeccakUnion(2))
+            .unwrap()
+            .build()
+            .unwrap();
+        let session = ExecutorImpl::from_elf(env, MULTI_TEST_ELF)
+            .expect("executor build")
+            .run_with_callback(|seg| Ok(Box::new(SimpleSegmentRef::new(seg))))
+            .expect("executor run");
+
+        let requests = session.pending_keccaks().to_vec();
+        assert!(
+            requests.len() >= 2,
+            "expected ≥2 keccak requests for a meaningful comparison, got {}",
+            requests.len()
+        );
+
+        // Serial baseline: a 1-slot pool chunks into groups of 1.
+        let serial_ms = {
+            let pool1 = WebGpuProverPool::new(1).await.expect("1-slot pool");
+            let t0 = js_sys::Date::now();
+            let receipts = pool1
+                .prove_keccak_requests_async(&requests)
+                .await
+                .expect("serial keccak prove");
+            let elapsed = js_sys::Date::now() - t0;
+            assert_eq!(receipts.len(), requests.len());
+            elapsed
+        };
+
+        // Distributed: a 2-slot pool chunks into groups of 2.
+        let pool_ms = {
+            let pool2 = WebGpuProverPool::new(2).await.expect("2-slot pool");
+            let t0 = js_sys::Date::now();
+            let receipts = pool2
+                .prove_keccak_requests_async(&requests)
+                .await
+                .expect("pool keccak prove");
+            let elapsed = js_sys::Date::now() - t0;
+            assert_eq!(receipts.len(), requests.len());
+            elapsed
+        };
+
+        let ratio = if serial_ms > 0.0 {
+            pool_ms / serial_ms
+        } else {
+            1.0
+        };
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "pool_keccak_serial_vs_pool count={} serial_ms={serial_ms:.0} pool_ms={pool_ms:.0} ratio={ratio:.3}",
+            requests.len()
+        ));
+    }
+
     /// SP6d iter 8 — end-to-end pool prove that exercises segment
     /// distribution + composite_to_succinct on a multi-segment fixture.
     /// BusyLoop{500_000} at default po2_18 produces ≥ 2 segments; the
