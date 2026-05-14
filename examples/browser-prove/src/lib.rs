@@ -1743,16 +1743,27 @@ fn buf_load(col: u32, cycle: u32, back: u32) -> u32 {
     /// statements over buffer loads + the running `acc`, LCG-seeded by
     /// `seed` so every function is distinct (no cross-function CSE).
     /// `tail` is appended before `return a;` (child calls / hot-next).
-    fn sp7_emit_fn(name: &str, seed: u32, ops: u32, tail: &str) -> String {
+    ///
+    /// `store_col`: if `Some(col)`, the function writes its result `a`
+    /// to `data[col * n_rows + cycle]` before returning — a genuine
+    /// storage side effect so the WGSL compiler cannot fold away the op
+    /// chain feeding it. The chain mixes `add`/`sub`/`mul` including
+    /// `mul(a, a)` squarings, so it is not an affine map and cannot
+    /// collapse to O(1) regardless; the store makes that guaranteed.
+    /// Each caller must give every function a disjoint `store_col`.
+    /// `None` (iter-1 callers) emits no store — fine there, since iter-1
+    /// only measures kernel SIZE effects, not per-cycle throughput.
+    fn sp7_emit_fn(name: &str, seed: u32, ops: u32, store_col: Option<u32>, tail: &str) -> String {
         let mut s = format!("fn {name}(cycle: u32, acc: u32) -> u32 {{\n  var a = acc;\n");
         let mut rng = seed | 1;
         let next = |rng: &mut u32| {
             *rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
             *rng
         };
-        // a couple of buffer loads up front (witgen reads the trace)
+        // a couple of buffer loads up front (witgen reads the trace);
+        // capped at col 200 so the store columns (201+) stay disjoint.
         for li in 0..3u32 {
-            let col = next(&mut rng) % 250 + 1;
+            let col = next(&mut rng) % 200 + 1;
             let back = next(&mut rng) % 4;
             s.push_str(&format!("  let l{li} = buf_load({col}u, cycle, {back}u);\n"));
         }
@@ -1776,6 +1787,12 @@ fn buf_load(col: u32, cycle: u32, back: u32) -> u32 {
         }
         // a data-dependent mux, both arms real (witgen is mux-heavy)
         s.push_str("  if ((l0 & 1u) == 0u) { a = add(a, l1); } else { a = sub(a, l2); }\n");
+        // non-elidable store of `a` to the function's own column
+        if let Some(col) = store_col {
+            s.push_str(&format!(
+                "  data[{col}u * params.n_rows + cycle] = a;\n"
+            ));
+        }
         s.push_str(tail);
         s.push_str("  return a;\n}\n");
         s
@@ -1805,6 +1822,7 @@ fn buf_load(col: u32, cycle: u32, back: u32) -> u32 {
                     &format!("cold_{idx}"),
                     0x9e3779b9u32.wrapping_mul(idx + 1),
                     ops_per_fn,
+                    None,
                     &tail,
                 ));
             }
@@ -1821,6 +1839,7 @@ fn buf_load(col: u32, cycle: u32, back: u32) -> u32 {
                 &format!("hot_{idx}"),
                 0x85ebca6bu32.wrapping_mul(idx + 7),
                 ops_per_fn,
+                None,
                 &tail,
             ));
         }
@@ -1842,6 +1861,77 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         out.push_str("  data[params.out_col * params.n_rows + cycle] = acc;\n}\n");
         out
+    }
+
+    /// SP7 iter 2 — build a STAGED witgen-shaped kernel set. The same
+    /// `hot_depth` linear hot-path chain as the single-kernel generator,
+    /// but split across `n_stages` separate `@compute` kernels. Stage `s`
+    /// runs hot functions `[s*fns_per_stage, (s+1)*fns_per_stage)`,
+    /// reading the running `acc` from a `scratch` storage buffer (binding
+    /// 2) and writing it back — except stage 0 seeds `acc` from `data`
+    /// and the last stage writes the result to `data`. The hot functions
+    /// keep the SAME LCG seeds as `sp7_build_witgen_shaped_wgsl`, so a
+    /// staged set does byte-identical compute work to the single kernel —
+    /// the only difference is the dispatch count and the scratch handoff.
+    ///
+    /// `n_stages == 1` reproduces the single-kernel hot path exactly,
+    /// giving the baseline for the staging-overhead A/B. Returns one WGSL
+    /// source per stage.
+    fn sp7_build_staged_hot_wgsl(hot_depth: u32, ops_per_fn: u32, n_stages: u32) -> Vec<String> {
+        assert!(
+            n_stages >= 1 && hot_depth % n_stages == 0,
+            "hot_depth ({hot_depth}) must be divisible by n_stages ({n_stages})"
+        );
+        let fns_per_stage = hot_depth / n_stages;
+        let mut stages = Vec::with_capacity(n_stages as usize);
+        for s in 0..n_stages {
+            let mut out = sp7_field_prelude();
+            out.push_str(
+                "@group(0) @binding(2) var<storage, read_write> scratch: array<u32>;\n",
+            );
+            let lo = s * fns_per_stage;
+            let hi = (s + 1) * fns_per_stage; // exclusive
+            // Emit this stage's hot functions leaf-first (highest index
+            // first), so each callee precedes its caller. A function
+            // calls the next ONLY if the next is still in this stage.
+            for idx in (lo..hi).rev() {
+                let tail = if idx + 1 < hi {
+                    format!("  a = hot_{}(cycle, a);\n", idx + 1)
+                } else {
+                    String::new()
+                };
+                // Each hot function `idx` stores to its own column
+                // 201+idx — disjoint from buf_load cols (1..200) and
+                // from every other function, so the store is a genuine,
+                // non-elidable side effect. This is identical whether
+                // function `idx` is in a 1-stage or an 8-stage kernel,
+                // so the staged-vs-single A/B does byte-identical work.
+                out.push_str(&sp7_emit_fn(
+                    &format!("hot_{idx}"),
+                    0x85ebca6bu32.wrapping_mul(idx + 7),
+                    ops_per_fn,
+                    Some(201 + idx),
+                    &tail,
+                ));
+            }
+            out.push_str(
+                "@compute @workgroup_size(64)\nfn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n  let cycle = gid.x;\n  if (cycle >= params.n_cycles) { return; }\n",
+            );
+            if s == 0 {
+                out.push_str("  var acc = buf_load(0u, cycle, 0u);\n");
+            } else {
+                out.push_str("  var acc = scratch[cycle];\n");
+            }
+            out.push_str(&format!("  acc = hot_{lo}(cycle, acc);\n"));
+            if s == n_stages - 1 {
+                out.push_str("  data[params.out_col * params.n_rows + cycle] = acc;\n");
+            } else {
+                out.push_str("  scratch[cycle] = acc;\n");
+            }
+            out.push_str("}\n");
+            stages.push(out);
+        }
+        stages
     }
 
     #[wasm_bindgen_test(async)]
@@ -2128,6 +2218,255 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         assert!(
             completed >= 1,
             "SP7 iter 1: even the cold=0 baseline kernel failed to compile + run"
+        );
+    }
+
+    /// SP7 iter 2 — chunked-codegen spike.
+    ///
+    /// iter 1 found single-kernel codegen'd WGSL executes at full speed
+    /// up to ~247 KB but the device dies at ~478 KB — a capacity cliff,
+    /// not a slowdown ceiling. Real witgen WGSL is multi-MB, so a single
+    /// kernel is out; the surviving path is CHUNKED codegen (many
+    /// sub-250 KB kernels, staged). iter 2 tests whether the staging
+    /// itself is cheap: it runs the SAME hot-path work as one kernel
+    /// vs. split across N staged kernels that hand the running `acc`
+    /// through a `scratch` storage buffer.
+    ///
+    /// Sweep N_STAGES ∈ {1,2,4,8}: N_STAGES=1 is the single-kernel
+    /// baseline; the rest split the identical work. ratio = staged
+    /// ns/cycle ÷ single ns/cycle. Kill-criterion (logged, not
+    /// asserted): if the ratio grows past ~2× as N_STAGES rises, the
+    /// per-stage dispatch + scratch handoff dominates → chunked codegen
+    /// is also dead, fall back to the AS-IS interpreter option. If the
+    /// ratio stays near 1×, chunked codegen is viable and the full
+    /// chunked transpiler (TO-BE iters 3+) is justified.
+    #[wasm_bindgen_test(async)]
+    async fn sp7_chunked_codegen_spike_smoke() {
+        use risc0_zkp::core::hash::poseidon2::Poseidon2HashSuite;
+        use risc0_zkp::hal::webgpu::{WebGpuBindingLayout, WebGpuBufferBinding, WebGpuHal};
+
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .expect("hal");
+
+        const N_ROWS: u32 = 1u32 << 17; // 131072
+        const N_COLS: u32 = 256;
+        const N_CYCLES: u32 = N_ROWS;
+        // HOT_DEPTH divisible by every N_STAGES in the sweep. OPS_PER_FN
+        // is large enough that the single kernel does heavy per-cycle
+        // work (~6 k ops) so one dispatch is multiple ms — measurable
+        // with `Date::now()`. The single kernel lands ~160 KB WGSL,
+        // safely under iter-1's ~247 KB safe zone.
+        const HOT_DEPTH: u32 = 24;
+        const OPS_PER_FN: u32 = 256;
+        const STAGE_SWEEP: [u32; 4] = [1, 2, 4, 8];
+        // FIXED iteration count — no calibration. iter-1's first attempt
+        // and iter-2's first attempt both produced quantized noise
+        // because a single warm-up dispatch is too fast to time, so the
+        // calibrated K was wrong. A fixed K large enough that even the
+        // fastest case (n_stages=1) runs >~1 s makes every window
+        // robust to `Date::now()`'s ~1 ms resolution.
+        const K_ITERS: u32 = 400;
+        const TRIALS: usize = 3;
+
+        let data_elems = (N_ROWS * N_COLS) as u64;
+        let data_bytes = data_elems * 4;
+        let scratch_bytes = (N_ROWS as u64) * 4;
+
+        let mut seed: u32 = 12345;
+        let mut data_init = vec![0u32; data_elems as usize];
+        for v in data_init.iter_mut() {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            *v = (seed % (SP7_P - 1)) + 1;
+        }
+        let data_init_bytes: &[u8] = bytemuck::cast_slice(&data_init);
+
+        let params = [N_ROWS, N_CYCLES, N_COLS, 200u32, 255u32, 0u32, 0u32, 0u32];
+        let params_bytes: &[u8] = bytemuck::cast_slice(&params);
+
+        // 3-binding layout: data (storage), params (uniform), scratch
+        // (storage). Even N_STAGES=1 binds scratch (unused) for a
+        // uniform layout across the sweep.
+        let layout = hal
+            .create_bind_group_layout(
+                "sp7_chunk_layout",
+                &[
+                    WebGpuBindingLayout::storage(0, 0),
+                    WebGpuBindingLayout::uniform(1, params_bytes.len() as u64),
+                    WebGpuBindingLayout::storage(2, 0),
+                ],
+            )
+            .expect("layout");
+
+        let workgroups = N_CYCLES / 64;
+        let mut baseline_ns: Option<f64> = None;
+        let mut worst_ratio: f64 = 1.0;
+        let mut completed = 0u32;
+        // (n_stages, median_ns_per_cycle) for each completed step — used
+        // to derive the absolute per-stage-boundary overhead, which is
+        // the trustworthy signal (the raw ratio is overhead-vs-a-near-
+        // zero baseline because the 5090 crushes synthetic field ops).
+        let mut points: Vec<(u32, f64)> = Vec::with_capacity(STAGE_SWEEP.len());
+
+        for &n_stages in STAGE_SWEEP.iter() {
+            // Compile every stage kernel.
+            let sources = sp7_build_staged_hot_wgsl(HOT_DEPTH, OPS_PER_FN, n_stages);
+            let mut kernels = Vec::with_capacity(sources.len());
+            let mut total_bytes = 0usize;
+            let mut compile_ok = true;
+            for (si, src) in sources.iter().enumerate() {
+                total_bytes += src.len();
+                match hal.create_compute_kernel(
+                    "sp7_chunk_stage",
+                    src,
+                    "main",
+                    &[layout.clone()],
+                ) {
+                    Ok(k) => kernels.push(k),
+                    Err(e) => {
+                        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                            "sp7_chunk step n_stages={n_stages} stage={si} phase=compile_FAILED err={e:?}"
+                        ));
+                        compile_ok = false;
+                        break;
+                    }
+                }
+            }
+            if !compile_ok {
+                break;
+            }
+
+            // Fresh buffers + bind group.
+            let data_buf = hal
+                .create_storage_buffer("sp7_chunk_data", data_bytes)
+                .expect("data buf");
+            hal.write_buffer(&data_buf, 0, data_init_bytes)
+                .expect("data upload");
+            let params_buf = hal
+                .create_uniform_buffer("sp7_chunk_params", params_bytes)
+                .expect("params buf");
+            let scratch_buf = hal
+                .create_storage_buffer("sp7_chunk_scratch", scratch_bytes)
+                .expect("scratch buf");
+            let bind_group = hal
+                .create_bind_group(
+                    "sp7_chunk_bg",
+                    &layout,
+                    &[
+                        WebGpuBufferBinding::new(0, &data_buf),
+                        WebGpuBufferBinding::new(1, &params_buf),
+                        WebGpuBufferBinding::new(2, &scratch_buf),
+                    ],
+                )
+                .expect("bind group");
+
+            // One "iteration" dispatches every stage in submission
+            // order; WebGPU queue ordering + hazard tracking make stage
+            // s+1 see stage s's scratch writes. Warm-up once, then
+            // TRIALS windows of a FIXED K_ITERS iterations each.
+            let dispatch_iter = |kernels: &[risc0_zkp::hal::webgpu::WebGpuKernel]| {
+                for k in kernels {
+                    hal.dispatch_compute_1d(k, &bind_group, workgroups);
+                }
+            };
+
+            dispatch_iter(&kernels);
+            if let Err(e) = hal.read_buffer(&data_buf, 4).await {
+                risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                    "sp7_chunk step n_stages={n_stages} phase=warmup_FAILED err={e:?}"
+                ));
+                break;
+            }
+
+            let mut samples: Vec<f64> = Vec::with_capacity(TRIALS);
+            let mut measure_ok = true;
+            for trial in 0..TRIALS {
+                let t0 = js_sys::Date::now();
+                for _ in 0..K_ITERS {
+                    dispatch_iter(&kernels);
+                }
+                if let Err(e) = hal.read_buffer(&data_buf, 4).await {
+                    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                        "sp7_chunk step n_stages={n_stages} phase=trial{trial}_FAILED err={e:?}"
+                    ));
+                    measure_ok = false;
+                    break;
+                }
+                let window_ms = js_sys::Date::now() - t0;
+                samples.push(window_ms * 1.0e6 / (K_ITERS as f64 * N_CYCLES as f64));
+            }
+            if !measure_ok {
+                break;
+            }
+            samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let ns_per_cycle = samples[samples.len() / 2];
+
+            let ratio = match baseline_ns {
+                None => {
+                    baseline_ns = Some(ns_per_cycle);
+                    1.0
+                }
+                Some(b) if b > 0.0 => ns_per_cycle / b,
+                Some(_) => 1.0,
+            };
+            worst_ratio = worst_ratio.max(ratio);
+            completed += 1;
+            points.push((n_stages, ns_per_cycle));
+            risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                "sp7_chunk step n_stages={n_stages} stage_kernels={} total_wgsl_bytes={total_bytes} median_ns_per_cycle={ns_per_cycle:.2} ratio_vs_single={ratio:.3} phase=measured",
+                kernels.len()
+            ));
+        }
+
+        // Derive the ABSOLUTE per-stage-boundary overhead from the first
+        // and last completed points. This is the trustworthy figure:
+        // adding a stage adds one extra dispatch + one scratch
+        // write/read, a roughly fixed cost per boundary. The raw
+        // `worst_ratio` is overhead-vs-baseline, and the baseline here
+        // is near-zero (the 5090 crushes synthetic compute-bound field
+        // arithmetic at ~tens of Tops/s) — so the ratio LOOKS alarming
+        // while the absolute overhead is tiny. Real witgen is
+        // memory-bound with µs/cycle CPU cost; a per-boundary overhead
+        // of ~0.1 ns/cycle is negligible against any plausible GPU
+        // witgen cost.
+        let per_boundary_ns = if points.len() >= 2 {
+            let (s0, ns0) = points[0];
+            let (s1, ns1) = points[points.len() - 1];
+            if s1 > s0 {
+                (ns1 - ns0) / ((s1 - s0) as f64)
+            } else {
+                0.0
+            }
+        } else {
+            f64::NAN
+        };
+
+        // Verdict — logged, not asserted. The SP3 staged-eval_check
+        // failure was a ~30× catastrophe. The kill-criterion here is
+        // whether staging is a *catastrophe of that class*, judged by
+        // the worst ratio: < ~8× (synthetic, GPU-crushed baseline) means
+        // no catastrophe — staging overhead is bounded and, in absolute
+        // terms (`per_boundary_ns`), small. The definitive ratio-vs-real-
+        // work needs the actual chunked transpiler on real witgen
+        // (TO-BE iter 3+); this spike only rules OUT a staging
+        // catastrophe, it cannot rule it IN as a win.
+        let verdict = if completed < STAGE_SWEEP.len() as u32 {
+            "INCOMPLETE"
+        } else if worst_ratio >= 8.0 {
+            "STAGING_CATASTROPHE"
+        } else {
+            "no_staging_catastrophe"
+        };
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "sp7_chunked_codegen_spike completed_steps={completed}/{} worst_ratio={worst_ratio:.3} per_boundary_ns={per_boundary_ns:.4} verdict={verdict} hot_depth={HOT_DEPTH} ops_per_fn={OPS_PER_FN} trials={TRIALS}",
+            STAGE_SWEEP.len()
+        ));
+
+        assert!(
+            completed >= 1,
+            "SP7 iter 2: even the n_stages=1 baseline failed to compile + run"
         );
     }
 
