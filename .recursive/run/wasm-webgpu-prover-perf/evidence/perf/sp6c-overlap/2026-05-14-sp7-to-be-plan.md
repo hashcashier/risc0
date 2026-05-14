@@ -84,23 +84,56 @@ port. The synthetic kernel decouples "does Chrome handle scale"
 (testable cheaply, now) from "is the transpiler correct" (iters 2+,
 only worth building if iter 1 clears the bar).
 
-### Iter 2 — the transpiler skeleton
-If iter 1 clears the kill-criterion: build the
-`rust_steps`/`steps.cu` → WGSL transpiler. Source choice: the CUDA
-`steps.cu` (flatter C, closer to WGSL than Rust). Start with the
-substrate prelude (Val/ExtVal arithmetic, layout offset helpers,
-buffer load/store) and the ~20 leaf `exec_*`/`back_*` builtins.
+### Iter 1 RESULT (2026-05-14) — reframes everything below
 
-### Iter 3 — full `step_Top` codegen + witgen wiring
-Transpile the full `exec_Top` call graph, emit the `@compute`
-witgen kernel (one invocation per cycle), wire into `generate_witness`
-behind the flag. Verify: R1 smoke + xgboost receipts still verify.
+The scale test ran. Result (`2026-05-14-sp7-iter1-codegen-scale.md`):
+codegen'd witgen-shaped WGSL **compiles fast and executes at full
+speed** (no slowdown) up to ~247 KB — the SP3 *execution*-slowdown
+ceiling does **not** generalize. But there is a hard **capacity
+cliff**: at ~478 KB the kernel compiles yet the device dies on first
+dispatch. Single-kernel full-witgen codegen is dead (real witgen WGSL
+is multi-MB). The surviving codegen path is **chunked / multi-kernel**,
+because WGSL that fits under ~250 KB runs at full speed.
 
-### Iter 4 — `step_TopAccum` + prefix sums
-Transpile the accum call graph; the two tail prefix-sum passes are
-sequential — emit them as separate small kernels or a serial pass.
+### Iter 2 — chunked-codegen SPIKE (revised by iter 1)
 
-### Iter 5 — measure + integrate
+Do NOT jump to the full transpiler. iter 1 changed the open question
+from "does codegen WGSL run fast" (answered: yes, when it fits) to
+"can `step_Top` be PARTITIONED into < ~250 KB staged kernels without
+the staging overhead reintroducing a slowdown" (SP3's staged
+*eval_check* multi-kernel was ~30× slow — iter 1 shows that slowness
+is not intrinsic to codegen'd WGSL *execution*, so it may have been
+specific to eval_check's staging structure; this must be tested, not
+assumed).
+
+Iter 2 spike: hand-build a *staged* witgen-shaped kernel set — split
+the synthetic hot path of iter 1's generator across N kernels with a
+scratch buffer carrying intermediate `acc` state between stages — and
+measure staged execution vs the single-kernel baseline. Kill-criterion:
+if staged execution is > ~2× the single-kernel speed (i.e. the scratch
+shuffle dominates), chunked codegen is also dead → fall back to the
+AS-IS interpreter option. If staged execution stays fast, the full
+chunked transpiler (iters 3+) is justified.
+
+### Iter 3 — the chunked transpiler skeleton
+If iter 2 clears: build the `steps.cu` → WGSL transpiler with a
+chunking pass that partitions the `exec_Top` call graph into
+< ~250 KB kernels. Source choice: the CUDA `steps.cu` (flatter C,
+closer to WGSL than Rust). Start with the substrate prelude
+(Val/ExtVal arithmetic, layout offset helpers, buffer load/store) and
+the ~20 leaf `exec_*`/`back_*` builtins.
+
+### Iter 4 — full `step_Top` codegen + witgen wiring
+Transpile the full `exec_Top` call graph (chunked), emit the
+`@compute` witgen kernels (one invocation per cycle, staged across
+chunks), wire into `generate_witness` behind a flag. Verify: R1 smoke
++ xgboost receipts still verify.
+
+### Iter 5 — `step_TopAccum` + prefix sums
+Transpile the accum call graph (chunked); the two tail prefix-sum
+passes are sequential — emit them as separate small kernels.
+
+### Iter 6 — measure + integrate
 Full A/B: CPU-witgen vs GPU-witgen on R1 + xgboost + KeccakUnion(3).
 If positive, make GPU witgen the default; feed the shrunk per-segment
 footprint back to the iter-9 scheduler (segment-phase overlap may now
