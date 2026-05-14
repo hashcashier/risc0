@@ -30,21 +30,37 @@
 //! `prove_session_async` work-distribution layer that issues different
 //! segments / lifts / joins to different HALs is deferred to iter 2+.
 
-use std::rc::Rc;
+use std::{collections::HashMap, collections::VecDeque, rc::Rc};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use risc0_zkp::{
     core::hash::poseidon2::Poseidon2HashSuite,
     hal::webgpu::WebGpuHal,
 };
 
 use crate::{
+    claim::merge::Merge,
     host::{
+        prove_info::ProveInfo,
         recursion::prove::{join_webgpu, lift_webgpu},
-        server::prove::keccak::prove_keccak_webgpu,
+        server::{
+            exec::executor::ExecutorImpl,
+            prove::{
+                keccak::prove_keccak_webgpu,
+                prover_impl::{
+                    ProverImpl, WEBGPU_DEFAULT_KECCAK_MAX_PO2,
+                    WEBGPU_DEFAULT_SEGMENT_LIMIT_PO2,
+                },
+                ProverServer,
+            },
+            session::{Segment, SimpleSegmentRef},
+        },
     },
-    receipt::SuccinctReceipt,
-    CompositeReceipt, ProveKeccakRequest, ReceiptClaim, Unknown,
+    receipt::{InnerReceipt, SegmentReceipt, SuccinctReceipt},
+    sha::Digestible,
+    Assumption, AssumptionReceipt, CompositeReceipt, ExecutorEnv,
+    InnerAssumptionReceipt, MaybePruned, Output, ProveKeccakRequest, ProverOpts, Receipt,
+    ReceiptClaim, ReceiptKind, Unknown, VerifierContext,
 };
 
 use super::webgpu::WebGpuProver;
@@ -226,4 +242,314 @@ impl WebGpuProverPool {
         }
         Ok(receipts)
     }
+
+    /// SP6d iter 8: end-to-end pool prove. Drives the same flow as
+    /// `WebGpuProver::prove_with_ctx_async` but distributes the GPU-heavy
+    /// phases across pool slots:
+    ///
+    /// 1. Apply WebGPU env defaults (po2 ≤ 18, keccak po2 ≤ 14).
+    /// 2. Execute the session on CPU (single-threaded; not GPU work).
+    /// 3. Distribute per-segment proves across slots in chunks of
+    ///    `pool.len()` — bounded concurrency, segments preflight on their
+    ///    own slot's `WebGpuSegmentProver` (which routes through the
+    ///    slot's HAL).
+    /// 4. Distribute pending keccak proofs via
+    ///    [`Self::prove_keccak_requests_async`].
+    /// 5. Build the keccak union root on slot 0 (tree depth is small;
+    ///    distributing log-N levels adds little).
+    /// 6. Verify the composite receipt.
+    /// 7. Composite mode: return the composite receipt.
+    /// 8. Succinct mode: distribute lifts + tree joins via
+    ///    [`Self::lift_and_join_async`] and apply any assumption resolves
+    ///    serially on slot 0.
+    ///
+    /// PoVW and Groth16 receipt kinds are not yet supported on the pool
+    /// path (same constraints as `ProverImpl::prove_session_async`).
+    pub async fn prove_with_ctx_async(
+        &self,
+        env: ExecutorEnv<'_>,
+        ctx: &VerifierContext,
+        elf: &[u8],
+        opts: &ProverOpts,
+    ) -> Result<ProveInfo> {
+        anyhow::ensure!(
+            !opts.dev_mode(),
+            "browser WebGPU pool proving does not support dev-mode"
+        );
+        anyhow::ensure!(
+            opts.hashfn == "poseidon2",
+            "ProverOpts hashfn is unsupported: \"{}\"; expected \"poseidon2\"",
+            opts.hashfn
+        );
+
+        let pool_size = self.provers.len();
+        let prove_wall_start = js_sys::Date::now();
+
+        let mut env = env;
+        env.segment_limit_po2 = Some(
+            env.segment_limit_po2
+                .unwrap_or(WEBGPU_DEFAULT_SEGMENT_LIMIT_PO2)
+                .min(WEBGPU_DEFAULT_SEGMENT_LIMIT_PO2),
+        );
+        env.keccak_max_po2 = Some(
+            env.keccak_max_po2
+                .unwrap_or(WEBGPU_DEFAULT_KECCAK_MAX_PO2)
+                .min(WEBGPU_DEFAULT_KECCAK_MAX_PO2),
+        );
+
+        // One ProverImpl per slot so the per-phase async methods route
+        // through the slot's HAL via `WebGpuSegmentProver::with_hal`.
+        let slot_impls: Vec<Rc<ProverImpl>> = self
+            .provers
+            .iter()
+            .map(|p| Rc::new(ProverImpl::new_webgpu(opts.clone(), p.hal_handle())))
+            .collect();
+
+        // Phase 1: execute. CPU-only and single-threaded; runs through
+        // the slot-0 segment_prover for its preflight (unused on this
+        // path) and emits SegmentRefs.
+        let session = ExecutorImpl::from_elf(env, elf)?
+            .run_with_callback(|seg| Ok(Box::new(SimpleSegmentRef::new(seg))))?;
+        anyhow::ensure!(
+            session.povw_job_id.is_none(),
+            "browser WebGPU pool proving does not yet support PoVW receipts"
+        );
+
+        // Phase 2: per-segment proves. Resolve refs first (cheap).
+        //
+        // Segments are proved SERIALLY through slot 0. Iter 8 explored
+        // running two segments concurrently across slots at po2_18; the
+        // commit_group_async peak (≈1.8 GiB per segment for code + data +
+        // accum buffers) overflows wasm32's isize-bounded `Vec` when
+        // two segments allocate their accum poly group at the same
+        // moment. Serial segment proves keep peak memory at one
+        // segment's footprint while still enabling lift+join / keccak
+        // distribution downstream.
+        let resolved_segments: Vec<Segment> = session
+            .segments
+            .iter()
+            .map(|r| r.resolve())
+            .collect::<Result<_>>()?;
+
+        let mut segment_receipts: Vec<SegmentReceipt> =
+            Vec::with_capacity(resolved_segments.len());
+        let segment_slot = slot_impls[0].clone();
+        for seg in &resolved_segments {
+            for hook in &session.hooks {
+                hook.on_pre_prove_segment(seg);
+            }
+            let preflight = segment_slot
+                .segment_preflight(seg)
+                .with_context(|| format!("preflight segment {}", seg.index))?;
+            let receipt = segment_slot
+                .prove_segment_core_async(ctx, preflight)
+                .await
+                .with_context(|| format!("prove segment {}", seg.index))?;
+            segment_receipts.push(receipt);
+            for hook in &session.hooks {
+                hook.on_post_prove_segment(seg);
+            }
+        }
+
+        let (assumptions, session_assumption_receipts): (Vec<_>, Vec<_>) =
+            session.assumptions.iter().cloned().unzip();
+
+        segment_receipts
+            .last_mut()
+            .ok_or_else(|| anyhow!("session is empty"))?
+            .claim
+            .output
+            .merge_with(
+                &session
+                    .journal
+                    .as_ref()
+                    .map(|journal| Output {
+                        journal: MaybePruned::Pruned(journal.digest()),
+                        assumptions: assumptions.into(),
+                    })
+                    .into(),
+            )
+            .context("failed to merge output into final segment claim")?;
+
+        let verifier_parameters = ctx
+            .composite_verifier_parameters()
+            .ok_or_else(|| {
+                anyhow!("composite receipt verifier parameters missing from context")
+            })?
+            .digest();
+
+        // Phase 3: pending keccaks. Distribute via existing pool method.
+        let keccak_receipts: Vec<SuccinctReceipt<Unknown>> =
+            if session.pending_keccaks().is_empty() {
+                Vec::new()
+            } else {
+                self.prove_keccak_requests_async(session.pending_keccaks())
+                    .await
+                    .context("pool prove_keccak_requests")?
+            };
+
+        // Phase 4: keccak union tree on slot 0. MMR insert may chain
+        // unions; root collapses any remaining peaks.
+        let mut zkr_receipts = HashMap::new();
+        let mut peaks: VecDeque<(u32, SuccinctReceipt<Unknown>)> = VecDeque::new();
+        let union_slot = slot_impls[0].clone();
+        for receipt in keccak_receipts {
+            union_slot
+                .insert_union_receipt_async(&mut peaks, receipt)
+                .await
+                .context("pool keccak union insert")?;
+        }
+        if let Some(root_receipt) = union_slot
+            .union_receipts_root_async(peaks)
+            .await
+            .context("pool keccak union root")?
+        {
+            let assumption = Assumption {
+                claim: root_receipt.claim.digest(),
+                control_root: root_receipt.control_root()?,
+            };
+            zkr_receipts.insert(assumption, root_receipt);
+        }
+
+        let inner_assumption_receipts: Vec<_> = session_assumption_receipts
+            .into_iter()
+            .map(|ar| match ar {
+                AssumptionReceipt::Proven(r) => Ok(r),
+                AssumptionReceipt::Unresolved(assumption) => {
+                    let r = zkr_receipts.get(&assumption).ok_or_else(|| {
+                        anyhow!("no receipt for unresolved assumption: {assumption:#?}")
+                    })?;
+                    Ok(InnerAssumptionReceipt::Succinct(r.clone()))
+                }
+            })
+            .collect::<Result<_>>()?;
+
+        let composite_receipt = CompositeReceipt {
+            segments: segment_receipts,
+            assumption_receipts: inner_assumption_receipts,
+            verifier_parameters,
+        };
+
+        let session_claim = session.claim()?;
+        composite_receipt
+            .verify_integrity_with_context(ctx)
+            .context("pool composite verify")?;
+        let composite_claim_digest = composite_receipt.claim()?.digest();
+        let session_claim_digest = session_claim.digest();
+        if session_claim_digest != composite_claim_digest {
+            bail!(
+                "pool session claim mismatch: {} != {}",
+                hex::encode(session_claim_digest),
+                hex::encode(composite_claim_digest)
+            );
+        }
+
+        if opts.receipt_kind == ReceiptKind::Composite {
+            let segments_len = composite_receipt.segments.len();
+            let receipt = Receipt::new(
+                InnerReceipt::Composite(composite_receipt),
+                session.journal.clone().unwrap_or_default().bytes,
+            );
+            let wall_ms: f64 = js_sys::Date::now() - prove_wall_start;
+            risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                "pool_prove_with_ctx_async receipt_kind=Composite wall_ms={wall_ms:.0} segments={segments_len} pool_size={pool_size}",
+            ));
+            return Ok(ProveInfo {
+                receipt,
+                work_receipt: None,
+                stats: session.stats(),
+            });
+        }
+
+        anyhow::ensure!(
+            opts.receipt_kind == ReceiptKind::Succinct,
+            "browser WebGPU pool proving currently supports Composite and Succinct receipts"
+        );
+
+        let succinct = self
+            .composite_to_succinct_async(&composite_receipt)
+            .await
+            .context("pool composite_to_succinct")?;
+
+        let receipt = Receipt::new(
+            InnerReceipt::Succinct(succinct),
+            session.journal.clone().unwrap_or_default().bytes,
+        );
+        let wall_ms: f64 = js_sys::Date::now() - prove_wall_start;
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "pool_prove_with_ctx_async receipt_kind=Succinct wall_ms={wall_ms:.0} segments={} pool_size={}",
+            resolved_segments.len(),
+            pool_size
+        ));
+        Ok(ProveInfo {
+            receipt,
+            work_receipt: None,
+            stats: session.stats(),
+        })
+    }
+
+    /// SP6d iter 8: pool composite-to-succinct. Distributes the segment
+    /// lift + tree-join phase across slots (via
+    /// [`Self::lift_and_join_async`]) and runs assumption resolves
+    /// serially on slot 0. Nested composite assumptions recurse through
+    /// the same pool path.
+    pub async fn composite_to_succinct_async(
+        &self,
+        composite: &CompositeReceipt,
+    ) -> Result<SuccinctReceipt<ReceiptClaim>> {
+        let segments_only = CompositeReceipt {
+            segments: composite.segments.clone(),
+            assumption_receipts: Vec::new(),
+            verifier_parameters: composite.verifier_parameters,
+        };
+        let mut continuation = self
+            .lift_and_join_async(&segments_only)
+            .await
+            .context("pool lift+join")?;
+
+        if composite.assumption_receipts.is_empty() {
+            return Ok(continuation);
+        }
+
+        let slot0 = slot0_succinct_impl(self);
+        for (idx, assumption) in composite.assumption_receipts.iter().enumerate() {
+            continuation = match assumption {
+                InnerAssumptionReceipt::Succinct(a) => slot0
+                    .resolve_async(&continuation, a)
+                    .await
+                    .with_context(|| format!("pool resolve assumption {idx}"))?,
+                InnerAssumptionReceipt::Composite(nested) => {
+                    let nested_succinct =
+                        Box::pin(self.composite_to_succinct_async(nested)).await?;
+                    let unknown =
+                        SuccinctReceipt::<ReceiptClaim>::into_unknown(nested_succinct);
+                    slot0
+                        .resolve_async(&continuation, &unknown)
+                        .await
+                        .with_context(|| format!("pool resolve nested assumption {idx}"))?
+                }
+                InnerAssumptionReceipt::Fake(_) => {
+                    bail!(
+                        "pool: composite receipts with Fake assumptions are not supported"
+                    )
+                }
+                InnerAssumptionReceipt::Groth16(_) => {
+                    bail!(
+                        "pool: composite receipts with Groth16 assumptions are not supported"
+                    )
+                }
+            };
+        }
+
+        Ok(continuation)
+    }
+}
+
+/// Build a slot-0 ProverImpl with succinct options for the serial resolve
+/// loop. Resolves are rare and ordered, so reusing one impl is fine.
+fn slot0_succinct_impl(pool: &WebGpuProverPool) -> Rc<ProverImpl> {
+    Rc::new(ProverImpl::new_webgpu(
+        ProverOpts::succinct(),
+        pool.provers[0].hal_handle(),
+    ))
 }

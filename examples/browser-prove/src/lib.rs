@@ -1517,6 +1517,88 @@ mod tests {
         ));
     }
 
+    /// SP6d iter 8 — end-to-end pool prove that exercises segment
+    /// distribution + composite_to_succinct on a multi-segment fixture.
+    /// BusyLoop{500_000} at default po2_18 produces ≥ 2 segments; the
+    /// pool's `prove_with_ctx_async` distributes per-segment proves
+    /// across 2 slots and then lifts+joins those segments via the
+    /// existing pool lift+join path.
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_pool_prove_session_multi_segment_smoke() {
+        use risc0_zkvm::{ProverOpts, VerifierContext, WebGpuProverPool};
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        console_error_panic_hook::set_once();
+
+        let pool = WebGpuProverPool::new(2).await.expect("pool construct");
+
+        let env = ExecutorEnv::builder()
+            .write(&MultiTestSpec::BusyLoop { cycles: 500_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let ctx = VerifierContext::default();
+        let opts = ProverOpts::succinct();
+
+        let t0 = js_sys::Date::now();
+        let info = pool
+            .prove_with_ctx_async(env, &ctx, MULTI_TEST_ELF, &opts)
+            .await
+            .expect("pool prove_with_ctx multi-segment");
+        let wall_ms = js_sys::Date::now() - t0;
+
+        info.receipt
+            .verify(MULTI_TEST_ID)
+            .expect("pool prove_with_ctx multi-segment verifies");
+
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "pool_prove_session_multi_segment_smoke wall_ms={wall_ms:.0}"
+        ));
+    }
+
+    /// SP6d iter 8 — end-to-end pool prove with pending keccaks +
+    /// assumption resolve. KeccakUnion(2) emits 2 keccak proof requests
+    /// and 1 unresolved assumption (the keccak union root). The pool
+    /// distributes per-segment proves AND per-keccak proves across
+    /// slots, then unions the keccak receipts and resolves the
+    /// assumption to produce a verifying succinct receipt.
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_pool_prove_session_keccak_union_smoke() {
+        use risc0_zkvm::{ProverOpts, VerifierContext, WebGpuProverPool};
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        console_error_panic_hook::set_once();
+
+        let pool = WebGpuProverPool::new(2).await.expect("pool construct");
+
+        let env = ExecutorEnv::builder()
+            .keccak_max_po2(14)
+            .unwrap()
+            .write(&MultiTestSpec::KeccakUnion(2))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let ctx = VerifierContext::default();
+        let opts = ProverOpts::succinct();
+
+        let t0 = js_sys::Date::now();
+        let info = pool
+            .prove_with_ctx_async(env, &ctx, MULTI_TEST_ELF, &opts)
+            .await
+            .expect("pool prove_with_ctx keccak union");
+        let wall_ms = js_sys::Date::now() - t0;
+
+        info.receipt
+            .verify(MULTI_TEST_ID)
+            .expect("pool prove_with_ctx keccak union verifies");
+
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "pool_prove_session_keccak_union_smoke wall_ms={wall_ms:.0}"
+        ));
+    }
+
     #[wasm_bindgen_test(async)]
     async fn webgpu_hal_oversized_async_gather_reads_only_sample() {
         console_error_panic_hook::set_once();

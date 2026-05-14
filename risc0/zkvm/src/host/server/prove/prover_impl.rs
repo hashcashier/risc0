@@ -48,9 +48,9 @@ use crate::{
 };
 
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
-const WEBGPU_DEFAULT_SEGMENT_LIMIT_PO2: u32 = 18;
+pub(crate) const WEBGPU_DEFAULT_SEGMENT_LIMIT_PO2: u32 = 18;
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
-const WEBGPU_DEFAULT_KECCAK_MAX_PO2: u32 = 14;
+pub(crate) const WEBGPU_DEFAULT_KECCAK_MAX_PO2: u32 = 14;
 
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 struct WebGpuStageTimer {
@@ -372,7 +372,7 @@ impl ProverImpl {
         })
     }
 
-    async fn prove_segment_core_async(
+    pub(crate) async fn prove_segment_core_async(
         &self,
         ctx: &VerifierContext,
         preflight_results: PreflightResults,
@@ -457,7 +457,7 @@ impl ProverImpl {
         Ok(receipt)
     }
 
-    async fn resolve_async(
+    pub(crate) async fn resolve_async(
         &self,
         conditional: &SuccinctReceipt<ReceiptClaim>,
         assumption: &SuccinctReceipt<Unknown>,
@@ -498,7 +498,7 @@ impl ProverImpl {
     }
 
     #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
-    async fn insert_union_receipt_async(
+    pub(crate) async fn insert_union_receipt_async(
         &self,
         peaks: &mut VecDeque<(u32, SuccinctReceipt<Unknown>)>,
         item: SuccinctReceipt<Unknown>,
@@ -518,7 +518,7 @@ impl ProverImpl {
     }
 
     #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
-    async fn union_receipts_root_async(
+    pub(crate) async fn union_receipts_root_async(
         &self,
         mut peaks: VecDeque<(u32, SuccinctReceipt<Unknown>)>,
     ) -> Result<Option<SuccinctReceipt<Unknown>>> {

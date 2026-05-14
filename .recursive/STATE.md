@@ -62,12 +62,14 @@ Landed in this push (post Phase 03 lock):
 - SP6d iter 5 — `WebGpuProverPool::lift_and_join_async(composite)` orchestrator landed: distributes per-segment lifts across pool slots + balanced-tree joins. Single-segment validated.
 - SP6d iter 6 — `WebGpuProverPool::prove_keccak_requests_async` distributes pending keccak proofs across pool slots with bounded concurrency. 17 keccak proofs on 2-slot pool: **40.2% mean GPU util / 100% peak / 89.2 W mean / 207.6 W peak** in 85.2 s. Highest sustained engagement we've measured on real proving work.
 - SP6d iter 7 — bounded-concurrency fix on `lift_and_join_async`. Multi-segment validated: BusyLoop{500_000} produces 3 segments; pool wall **10.75 s (18% savings vs serial)**, receipt verifies.
+- SP6d iter 8 — **end-to-end pool prove landed.** `WebGpuProverPool::prove_with_ctx_async` + `composite_to_succinct_async` wire the iter-1..7 substrate into a production prove path: execute → serial segment proves (slot 0) → distributed keccak proofs → serial keccak union tree → distributed lifts+joins → serial resolves. Two new smokes verify: `webgpu_pool_prove_session_multi_segment_smoke` (BusyLoop{500_000}, 3 segs, 33.3 s wall, **35.5% mean GPU util / 100% peak**) and `webgpu_pool_prove_session_keccak_union_smoke` (KeccakUnion(2): 7 segs + ~17 keccaks + 16 unions + 1 resolve, 287 s wall, **47.5% mean GPU util / 100% peak** — highest sustained engagement in the run). Public-API surgery (`ProverImpl` per-phase methods → `pub(crate)`) is additive only; R1 regression green (poseidon2_basic 3999 ms, libm 4020 ms, busy_loop_po2_18 10607 ms — all verify). **Finding:** concurrent per-segment proves OOM wasm32 at po2_18 (two segments' commit_group accum poly-group buffers collide past the ~2 GiB isize Vec ceiling) — segment proves stay serial; lifts/keccaks/joins distribute fine. **Operational:** pool smokes need `WASM_BINDGEN_TEST_TIMEOUT=300+` (default 20 s) and explicit `CHROMEDRIVER=` path.
 
-Current R1 measurements (post iter 4, single-slot):
+Current R1 measurements (post iter 8, single-slot):
 | Fixture | wall_ms | gpu_idle_ratio |
 |---|---:|---:|
-| poseidon2_basic | 3220 | 0.342 |
-| libm | 3247 | 0.341 |
+| poseidon2_basic | 3999 | 0.467 |
+| libm | 4020 | 0.465 |
+| busy_loop_po2_18 | 10607 | 0.607 |
 
 2-slot concurrent succinct (one poseidon2_basic + one libm, single trial):
 | Slot | wall_ms | gpu_active_ms | gpu_idle_ratio |
@@ -75,4 +77,4 @@ Current R1 measurements (post iter 4, single-slot):
 | 0 | 5753 | 4664 | 0.189 |
 | 1 | 5541 | 4730 | 0.146 |
 
-Roadmap: SP6d iter 5 (single-prove segment distribution, expected 30–50% wall win on multi-segment); SP7 (GPU-resident witness, expected ~7% per circuit); SP8 (readback coalesce, ~3%); SP9 (pipeline cache, ~5%); SP10 (R9 matrix re-measurement); SP11 (closing audit).
+SP6d closed at iter 8: the multi-device pool substrate is feature-complete (scaffold → per-HAL metric → lift+join distribution → keccak distribution → end-to-end `prove_with_ctx_async`). Roadmap: SP7 (GPU-resident witness, expected ~7% per circuit — also the unblock for concurrent per-segment proves); SP8 (readback coalesce, ~3%); SP9 (pipeline cache, ~5%); xgboost through the pool path (integration, not yet wired into `DefaultProver`/Hermes APIs); SP10 (R9 matrix re-measurement); SP11 (closing audit).
