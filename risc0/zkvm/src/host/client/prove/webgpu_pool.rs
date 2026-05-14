@@ -30,7 +30,7 @@
 //! `prove_session_async` work-distribution layer that issues different
 //! segments / lifts / joins to different HALs is deferred to iter 2+.
 
-use std::{collections::HashMap, collections::VecDeque, rc::Rc};
+use std::{collections::HashMap, collections::VecDeque, future::Future, pin::Pin, rc::Rc};
 
 use anyhow::{anyhow, bail, Context, Result};
 use risc0_zkp::{
@@ -526,5 +526,545 @@ impl WebGpuProverPool {
             .composite_to_succinct_async(composite)
             .await
             .context("pool composite_to_succinct (serial slot 0)")
+    }
+
+    /// SP6d iter 9: end-to-end pool prove driven by a **dependency-graph
+    /// scheduler** instead of fixed sequential phases.
+    ///
+    /// `prove_with_ctx_async` runs phases strictly in order (all segments
+    /// → all keccaks → union → lift+join → resolve), so segment-proving
+    /// and keccak-proving never overlap. This method instead maintains a
+    /// ready-task set over the full dependency graph and assigns ready
+    /// tasks to free pool slots as they become available — segment
+    /// proves, keccak proves, the keccak union build, and segment lifts
+    /// can all be in flight simultaneously.
+    ///
+    /// The hypothesis under test: a mixed segment+keccak workload is the
+    /// one case where concurrency *could* win on wall time — segment
+    /// proves are CPU-witgen-heavy, keccak proves spend more of their
+    /// time on GPU commit, so overlapping them stresses different
+    /// resources. The homogeneous SP6d A/B tests (keccak-only,
+    /// lift+join-only) showed flat wall time; this scheduler tests
+    /// whether a *heterogeneous* job mix changes that.
+    ///
+    /// **Memory admission — the binding constraint.** A po2_18 rv32im
+    /// segment prove cannot share wasm32's ~2 GiB address space with ANY
+    /// other prove. Iter 9 measured this directly: running 1 segment + 1
+    /// keccak concurrently crashed with `RuntimeError: unreachable` when
+    /// the segment hit its accum poly-group allocation while a keccak's
+    /// finalize buffers were still resident. So a segment runs strictly
+    /// **alone** — admitted only when nothing else is in flight, and
+    /// blocking all other admissions while it runs. Light tasks (keccak
+    /// proofs, lifts, joins, the union build) are individually smaller
+    /// and fill the pool up to `pool_size` among themselves.
+    ///
+    /// Consequence: at po2_18 the scheduler *cannot* overlap segment
+    /// proving with anything — the wasm32 address space, not the GPU or
+    /// the submission mechanism, forbids it. The heterogeneous overlap
+    /// the scheduler was built to exploit is unreachable until the
+    /// per-segment buffer peak shrinks (SP7's GPU-resident witness).
+    ///
+    /// A 1-slot pool runs this scheduler strictly serially (one task at a
+    /// time, dependency-ordered) — that is the honest serial baseline for
+    /// an A/B against an N-slot pool: same code, same fixture, only the
+    /// slot count varies.
+    pub async fn prove_with_ctx_scheduled_async(
+        &self,
+        env: ExecutorEnv<'_>,
+        ctx: &VerifierContext,
+        elf: &[u8],
+        opts: &ProverOpts,
+    ) -> Result<ProveInfo> {
+        anyhow::ensure!(
+            !opts.dev_mode(),
+            "browser WebGPU pool proving does not support dev-mode"
+        );
+        anyhow::ensure!(
+            opts.hashfn == "poseidon2",
+            "ProverOpts hashfn is unsupported: \"{}\"; expected \"poseidon2\"",
+            opts.hashfn
+        );
+
+        let pool_size = self.provers.len();
+        let prove_wall_start = js_sys::Date::now();
+
+        let mut env = env;
+        env.segment_limit_po2 = Some(
+            env.segment_limit_po2
+                .unwrap_or(WEBGPU_DEFAULT_SEGMENT_LIMIT_PO2)
+                .min(WEBGPU_DEFAULT_SEGMENT_LIMIT_PO2),
+        );
+        env.keccak_max_po2 = Some(
+            env.keccak_max_po2
+                .unwrap_or(WEBGPU_DEFAULT_KECCAK_MAX_PO2)
+                .min(WEBGPU_DEFAULT_KECCAK_MAX_PO2),
+        );
+
+        let slot_impls: Vec<Rc<ProverImpl>> = self
+            .provers
+            .iter()
+            .map(|p| Rc::new(ProverImpl::new_webgpu(opts.clone(), p.hal_handle())))
+            .collect();
+
+        let session = ExecutorImpl::from_elf(env, elf)?
+            .run_with_callback(|seg| Ok(Box::new(SimpleSegmentRef::new(seg))))?;
+        anyhow::ensure!(
+            session.povw_job_id.is_none(),
+            "browser WebGPU pool proving does not yet support PoVW receipts"
+        );
+
+        let resolved_segments: Vec<Segment> = session
+            .segments
+            .iter()
+            .map(|r| r.resolve())
+            .collect::<Result<_>>()?;
+        let n_seg = resolved_segments.len();
+        anyhow::ensure!(n_seg > 0, "session has no segments");
+        let n_kec = session.pending_keccaks().len();
+
+        // Pre-prove hooks fire for all segments up front; post-prove
+        // hooks after the whole scheduler. With concurrent scheduling the
+        // strict per-segment pre→prove→post ordering cannot be preserved;
+        // test hooks use Rc<RefCell> flags and are race-free on a single
+        // JS thread (validated by the iter-8 multi-segment smoke).
+        for seg in &resolved_segments {
+            for hook in &session.hooks {
+                hook.on_pre_prove_segment(seg);
+            }
+        }
+
+        let (assumptions, session_assumption_receipts): (Vec<_>, Vec<_>) =
+            session.assumptions.iter().cloned().unzip();
+
+        let verifier_parameters = ctx
+            .composite_verifier_parameters()
+            .ok_or_else(|| {
+                anyhow!("composite receipt verifier parameters missing from context")
+            })?
+            .digest();
+
+        // Join-tree shape: tier 0 has the N lifts; each tier halves
+        // (ceil) until a single receipt remains.
+        let mut tier_sizes = vec![n_seg];
+        while *tier_sizes.last().unwrap() > 1 {
+            let s = *tier_sizes.last().unwrap();
+            tier_sizes.push((s + 1) / 2);
+        }
+        let tier_count = tier_sizes.len();
+
+        // Scheduler state.
+        let mut seg_done: Vec<Option<SegmentReceipt>> = (0..n_seg).map(|_| None).collect();
+        let mut seg_started = vec![false; n_seg];
+        let mut kec_done: Vec<Option<SuccinctReceipt<Unknown>>> =
+            (0..n_kec).map(|_| None).collect();
+        let mut kec_started = vec![false; n_kec];
+        let mut kec_root_started = false;
+        let mut kec_root: Option<Option<SuccinctReceipt<Unknown>>> = None;
+        let mut merged = false;
+        let mut lift_started = vec![false; n_seg];
+        let mut tiers: Vec<Vec<Option<SuccinctReceipt<ReceiptClaim>>>> =
+            tier_sizes.iter().map(|&s| (0..s).map(|_| None).collect()).collect();
+        let mut join_started: Vec<Vec<bool>> =
+            tier_sizes.iter().map(|&s| vec![false; s]).collect();
+
+        let mut free_slots: Vec<usize> = (0..pool_size).collect();
+        let mut seg_in_flight = false;
+        let mut in_flight: Vec<
+            Pin<Box<dyn Future<Output = Result<(usize, SchedDone)>> + '_>>,
+        > = Vec::new();
+
+        loop {
+            // Admission: hand ready tasks to free slots.
+            //
+            // Hard memory constraint (iter 9, measured): a po2_18 rv32im
+            // segment prove cannot share wasm32's ~2 GiB address space
+            // with ANY other prove. Iter 9's first scheduler attempt ran
+            // 1 segment + 1 keccak concurrently and crashed with
+            // `RuntimeError: unreachable` when the segment hit its accum
+            // poly-group allocation while a keccak's finalize buffers
+            // were resident. So a segment runs strictly ALONE: it is only
+            // admitted when nothing else is in flight, and while it runs
+            // nothing else is admitted. Light tasks (keccak / lift / join
+            // / union) are individually smaller and fill the pool up to
+            // `pool_size` among themselves.
+            while let Some(&slot) = free_slots.last() {
+                let picked: Option<SchedTask> = 'pick: {
+                    // A segment in flight blocks everything.
+                    if seg_in_flight {
+                        break 'pick None;
+                    }
+                    if !kec_root_started
+                        && n_kec > 0
+                        && kec_done.iter().all(Option::is_some)
+                    {
+                        break 'pick Some(SchedTask::KeccakRoot);
+                    }
+                    // A segment can only start when nothing else is in
+                    // flight, so it runs alone.
+                    if in_flight.is_empty() {
+                        if let Some(i) = seg_started.iter().position(|s| !s) {
+                            break 'pick Some(SchedTask::Segment(i));
+                        }
+                    }
+                    if let Some(j) = kec_started.iter().position(|s| !s) {
+                        break 'pick Some(SchedTask::Keccak(j));
+                    }
+                    for i in 0..n_seg {
+                        if lift_started[i] {
+                            continue;
+                        }
+                        let dep_ok = if i + 1 < n_seg {
+                            seg_done[i].is_some()
+                        } else {
+                            merged
+                        };
+                        if dep_ok {
+                            break 'pick Some(SchedTask::Lift(i));
+                        }
+                    }
+                    for t in 0..tier_count.saturating_sub(1) {
+                        for p in 0..(tier_sizes[t] / 2) {
+                            if join_started[t][p] {
+                                continue;
+                            }
+                            if tiers[t][2 * p].is_some() && tiers[t][2 * p + 1].is_some() {
+                                break 'pick Some(SchedTask::Join(t, p));
+                            }
+                        }
+                    }
+                    None
+                };
+
+                let Some(task) = picked else {
+                    break;
+                };
+                free_slots.pop();
+
+                let fut: Pin<Box<dyn Future<Output = Result<(usize, SchedDone)>> + '_>> =
+                    match task {
+                        SchedTask::Segment(i) => {
+                            seg_started[i] = true;
+                            seg_in_flight = true;
+                            let impl_rc = slot_impls[slot].clone();
+                            let seg = resolved_segments[i].clone();
+                            Box::pin(async move {
+                                let pf = impl_rc
+                                    .segment_preflight(&seg)
+                                    .with_context(|| {
+                                        format!("preflight segment {}", seg.index)
+                                    })?;
+                                let r = impl_rc
+                                    .prove_segment_core_async(ctx, pf)
+                                    .await
+                                    .with_context(|| {
+                                        format!("prove segment {}", seg.index)
+                                    })?;
+                                Ok((slot, SchedDone::Segment(i, r)))
+                            })
+                        }
+                        SchedTask::Keccak(j) => {
+                            kec_started[j] = true;
+                            let hal = self.provers[slot].hal_handle();
+                            let req = session.pending_keccaks()[j].clone();
+                            Box::pin(async move {
+                                let r = prove_keccak_webgpu(&req, hal)
+                                    .await
+                                    .with_context(|| format!("pool keccak request {j}"))?;
+                                Ok((slot, SchedDone::Keccak(j, r)))
+                            })
+                        }
+                        SchedTask::KeccakRoot => {
+                            kec_root_started = true;
+                            let impl_rc = slot_impls[slot].clone();
+                            let receipts: Vec<SuccinctReceipt<Unknown>> = kec_done
+                                .iter_mut()
+                                .map(|r| {
+                                    r.take().expect("all keccaks done before KeccakRoot")
+                                })
+                                .collect();
+                            Box::pin(async move {
+                                let mut peaks: VecDeque<(u32, SuccinctReceipt<Unknown>)> =
+                                    VecDeque::new();
+                                for r in receipts {
+                                    impl_rc
+                                        .insert_union_receipt_async(&mut peaks, r)
+                                        .await
+                                        .context("pool keccak union insert")?;
+                                }
+                                let root = impl_rc
+                                    .union_receipts_root_async(peaks)
+                                    .await
+                                    .context("pool keccak union root")?;
+                                Ok((slot, SchedDone::KeccakRoot(root)))
+                            })
+                        }
+                        SchedTask::Lift(i) => {
+                            lift_started[i] = true;
+                            let hal = self.provers[slot].hal_handle();
+                            let seg_receipt =
+                                seg_done[i].clone().expect("segment done before lift");
+                            Box::pin(async move {
+                                let r = lift_webgpu(&seg_receipt, hal)
+                                    .await
+                                    .with_context(|| format!("pool lift segment {i}"))?;
+                                Ok((slot, SchedDone::Lift(i, r)))
+                            })
+                        }
+                        SchedTask::Join(t, p) => {
+                            join_started[t][p] = true;
+                            let hal = self.provers[slot].hal_handle();
+                            let a = tiers[t][2 * p].clone().expect("join left ready");
+                            let b = tiers[t][2 * p + 1].clone().expect("join right ready");
+                            Box::pin(async move {
+                                let r = join_webgpu(&a, &b, hal)
+                                    .await
+                                    .with_context(|| {
+                                        format!("pool join tier {t} pos {p}")
+                                    })?;
+                                Ok((slot, SchedDone::Join(t, p, r)))
+                            })
+                        }
+                    };
+                in_flight.push(fut);
+            }
+
+            if in_flight.is_empty() {
+                break;
+            }
+
+            let (result, _idx, remaining) =
+                futures::future::select_all(in_flight).await;
+            in_flight = remaining;
+            let (slot, done) = result?;
+            free_slots.push(slot);
+
+            match done {
+                SchedDone::Segment(i, r) => {
+                    seg_done[i] = Some(r);
+                    seg_in_flight = false;
+                    if !merged && seg_done.iter().all(Option::is_some) {
+                        // Merge journal digest + assumptions into the
+                        // final segment claim. Depends on all segments;
+                        // gates Lift(n_seg-1).
+                        seg_done
+                            .last_mut()
+                            .unwrap()
+                            .as_mut()
+                            .unwrap()
+                            .claim
+                            .output
+                            .merge_with(
+                                &session
+                                    .journal
+                                    .as_ref()
+                                    .map(|journal| Output {
+                                        journal: MaybePruned::Pruned(journal.digest()),
+                                        assumptions: assumptions.clone().into(),
+                                    })
+                                    .into(),
+                            )
+                            .context("failed to merge output into final segment claim")?;
+                        merged = true;
+                    }
+                }
+                SchedDone::Keccak(j, r) => {
+                    kec_done[j] = Some(r);
+                }
+                SchedDone::KeccakRoot(root) => {
+                    kec_root = Some(root);
+                }
+                SchedDone::Lift(i, r) => {
+                    tiers[0][i] = Some(r);
+                    propagate_join_carries(&mut tiers, &tier_sizes);
+                }
+                SchedDone::Join(t, p, r) => {
+                    tiers[t + 1][p] = Some(r);
+                    propagate_join_carries(&mut tiers, &tier_sizes);
+                }
+            }
+        }
+
+        for seg in &resolved_segments {
+            for hook in &session.hooks {
+                hook.on_post_prove_segment(seg);
+            }
+        }
+
+        // Post-scheduler: assemble + verify the composite receipt, then
+        // run the (inherently serial) resolve chain on slot 0.
+        let kec_root_receipt: Option<SuccinctReceipt<Unknown>> = kec_root.flatten();
+        let mut zkr_receipts = HashMap::new();
+        if let Some(root) = &kec_root_receipt {
+            let assumption = Assumption {
+                claim: root.claim.digest(),
+                control_root: root.control_root()?,
+            };
+            zkr_receipts.insert(assumption, root.clone());
+        }
+
+        let inner_assumption_receipts: Vec<_> = session_assumption_receipts
+            .into_iter()
+            .map(|ar| match ar {
+                AssumptionReceipt::Proven(r) => Ok(r),
+                AssumptionReceipt::Unresolved(assumption) => {
+                    let r = zkr_receipts.get(&assumption).ok_or_else(|| {
+                        anyhow!("no receipt for unresolved assumption: {assumption:#?}")
+                    })?;
+                    Ok(InnerAssumptionReceipt::Succinct(r.clone()))
+                }
+            })
+            .collect::<Result<_>>()?;
+
+        let segment_receipts: Vec<SegmentReceipt> =
+            seg_done.into_iter().map(|r| r.unwrap()).collect();
+        let composite_receipt = CompositeReceipt {
+            segments: segment_receipts,
+            assumption_receipts: inner_assumption_receipts,
+            verifier_parameters,
+        };
+
+        let session_claim = session.claim()?;
+        composite_receipt
+            .verify_integrity_with_context(ctx)
+            .context("pool scheduled composite verify")?;
+        let composite_claim_digest = composite_receipt.claim()?.digest();
+        if session_claim.digest() != composite_claim_digest {
+            bail!(
+                "pool scheduled session claim mismatch: {} != {}",
+                hex::encode(session_claim.digest()),
+                hex::encode(composite_claim_digest)
+            );
+        }
+
+        if opts.receipt_kind == ReceiptKind::Composite {
+            let segments_len = composite_receipt.segments.len();
+            let receipt = Receipt::new(
+                InnerReceipt::Composite(composite_receipt),
+                session.journal.clone().unwrap_or_default().bytes,
+            );
+            let wall_ms: f64 = js_sys::Date::now() - prove_wall_start;
+            risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                "pool_prove_scheduled_async receipt_kind=Composite wall_ms={wall_ms:.0} segments={segments_len} keccaks={n_kec} pool_size={pool_size}",
+            ));
+            return Ok(ProveInfo {
+                receipt,
+                work_receipt: None,
+                stats: session.stats(),
+            });
+        }
+
+        anyhow::ensure!(
+            opts.receipt_kind == ReceiptKind::Succinct,
+            "browser WebGPU pool proving currently supports Composite and Succinct receipts"
+        );
+
+        // The join tree's single output is the lifted+joined continuation
+        // over all segments; resolve the assumptions onto it serially.
+        let mut continuation = tiers
+            .last()
+            .and_then(|t| t.first())
+            .and_then(|r| r.clone())
+            .ok_or_else(|| anyhow!("scheduler produced no joined receipt"))?;
+
+        if !composite_receipt.assumption_receipts.is_empty() {
+            let slot0 = Rc::new(ProverImpl::new_webgpu(
+                ProverOpts::succinct(),
+                self.provers[0].hal_handle(),
+            ));
+            for (idx, assumption) in
+                composite_receipt.assumption_receipts.iter().enumerate()
+            {
+                continuation = match assumption {
+                    InnerAssumptionReceipt::Succinct(a) => slot0
+                        .resolve_async(&continuation, a)
+                        .await
+                        .with_context(|| format!("pool scheduled resolve {idx}"))?,
+                    InnerAssumptionReceipt::Composite(nested) => {
+                        let nested_succinct =
+                            self.composite_to_succinct_async(nested).await?;
+                        let unknown = SuccinctReceipt::<ReceiptClaim>::into_unknown(
+                            nested_succinct,
+                        );
+                        slot0
+                            .resolve_async(&continuation, &unknown)
+                            .await
+                            .with_context(|| {
+                                format!("pool scheduled resolve nested {idx}")
+                            })?
+                    }
+                    InnerAssumptionReceipt::Fake(_) => bail!(
+                        "pool: composite receipts with Fake assumptions are not supported"
+                    ),
+                    InnerAssumptionReceipt::Groth16(_) => bail!(
+                        "pool: composite receipts with Groth16 assumptions are not supported"
+                    ),
+                };
+            }
+        }
+
+        let receipt = Receipt::new(
+            InnerReceipt::Succinct(continuation),
+            session.journal.clone().unwrap_or_default().bytes,
+        );
+        let wall_ms: f64 = js_sys::Date::now() - prove_wall_start;
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "pool_prove_scheduled_async receipt_kind=Succinct wall_ms={wall_ms:.0} segments={n_seg} keccaks={n_kec} pool_size={pool_size}",
+        ));
+        Ok(ProveInfo {
+            receipt,
+            work_receipt: None,
+            stats: session.stats(),
+        })
+    }
+}
+
+/// SP6d iter 9 — dependency-graph scheduler task kinds for
+/// [`WebGpuProverPool::prove_with_ctx_scheduled_async`].
+enum SchedTask {
+    /// Prove rv32im segment `index` (preflight + prove_core).
+    Segment(usize),
+    /// Prove pending keccak request `index`.
+    Keccak(usize),
+    /// Build the keccak union root from all keccak receipts.
+    KeccakRoot,
+    /// Lift segment receipt `index` to a succinct receipt.
+    Lift(usize),
+    /// Join tier `t` position `p` (consumes tier `t` slots `2p`, `2p+1`).
+    Join(usize, usize),
+}
+
+/// SP6d iter 9 — completed-task payloads carried back from the scheduler
+/// futures, tagged so the scheduler can record them into its state.
+enum SchedDone {
+    Segment(usize, SegmentReceipt),
+    Keccak(usize, SuccinctReceipt<Unknown>),
+    KeccakRoot(Option<SuccinctReceipt<Unknown>>),
+    Lift(usize, SuccinctReceipt<ReceiptClaim>),
+    Join(usize, usize, SuccinctReceipt<ReceiptClaim>),
+}
+
+/// Fill in any odd-tail "carry" slots in the join tier table. When a
+/// tier has an odd element count, its last element is not joined — it
+/// passes straight through to the last slot of the next tier. Carries
+/// can cascade, so iterate to a fixed point.
+fn propagate_join_carries(
+    tiers: &mut [Vec<Option<SuccinctReceipt<ReceiptClaim>>>],
+    tier_sizes: &[usize],
+) {
+    loop {
+        let mut changed = false;
+        for t in 0..tier_sizes.len().saturating_sub(1) {
+            if tier_sizes[t] % 2 == 1 {
+                let last_in = tier_sizes[t] - 1;
+                let last_out = tier_sizes[t + 1] - 1;
+                if tiers[t][last_in].is_some() && tiers[t + 1][last_out].is_none() {
+                    tiers[t + 1][last_out] = tiers[t][last_in].clone();
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
     }
 }

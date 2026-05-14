@@ -1598,6 +1598,88 @@ mod tests {
         ));
     }
 
+    /// SP6d iter 9 — dependency-graph scheduler WALL-TIME comparison on a
+    /// scaled-up mixed segment+keccak workload.
+    ///
+    /// This is the benchmark that tests the one hypothesis the SP6d
+    /// homogeneous A/B tests could not: a *heterogeneous* job mix.
+    /// `KeccakUnion(3)` produces ~10 rv32im segments AND ~25 pending
+    /// keccak proofs + a union tree + a resolve. Segment proves are
+    /// CPU-witgen-heavy; keccak proves spend more of their time on GPU
+    /// commit. `prove_with_ctx_scheduled_async` keeps both kinds of work
+    /// in flight at once — if multi-device concurrency ever wins on wall
+    /// time, overlapping these two resource profiles is where it wins.
+    ///
+    /// A 1-slot pool runs the same scheduler strictly serially, so this
+    /// is a true A/B: same code, same fixture, same browser session, the
+    /// only variable is pool width. `ratio = pool_ms / serial_ms` is the
+    /// honest answer. The two pools are scoped so the 1-slot pool's
+    /// `GpuDevice` is released before the 2-slot pool is constructed.
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_pool_scheduled_serial_vs_pool_smoke() {
+        use risc0_zkvm::{ProverOpts, VerifierContext, WebGpuProverPool};
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        console_error_panic_hook::set_once();
+
+        let ctx = VerifierContext::default();
+        let opts = ProverOpts::succinct();
+
+        // Serial baseline: 1-slot pool runs the scheduler one task at a
+        // time, dependency-ordered.
+        let serial_ms = {
+            let pool = WebGpuProverPool::new(1).await.expect("1-slot pool");
+            let env = ExecutorEnv::builder()
+                .keccak_max_po2(14)
+                .unwrap()
+                .write(&MultiTestSpec::KeccakUnion(3))
+                .unwrap()
+                .build()
+                .unwrap();
+            let t0 = js_sys::Date::now();
+            let info = pool
+                .prove_with_ctx_scheduled_async(env, &ctx, MULTI_TEST_ELF, &opts)
+                .await
+                .expect("1-slot scheduled prove");
+            let elapsed = js_sys::Date::now() - t0;
+            info.receipt
+                .verify(MULTI_TEST_ID)
+                .expect("1-slot scheduled receipt verifies");
+            elapsed
+        };
+
+        // Distributed: 2-slot pool, full dependency-driven concurrency.
+        let pool_ms = {
+            let pool = WebGpuProverPool::new(2).await.expect("2-slot pool");
+            let env = ExecutorEnv::builder()
+                .keccak_max_po2(14)
+                .unwrap()
+                .write(&MultiTestSpec::KeccakUnion(3))
+                .unwrap()
+                .build()
+                .unwrap();
+            let t0 = js_sys::Date::now();
+            let info = pool
+                .prove_with_ctx_scheduled_async(env, &ctx, MULTI_TEST_ELF, &opts)
+                .await
+                .expect("2-slot scheduled prove");
+            let elapsed = js_sys::Date::now() - t0;
+            info.receipt
+                .verify(MULTI_TEST_ID)
+                .expect("2-slot scheduled receipt verifies");
+            elapsed
+        };
+
+        let ratio = if serial_ms > 0.0 {
+            pool_ms / serial_ms
+        } else {
+            1.0
+        };
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "pool_scheduled_serial_vs_pool serial_ms={serial_ms:.0} pool_ms={pool_ms:.0} ratio={ratio:.3}"
+        ));
+    }
+
     /// SP6d iter 8 — end-to-end pool prove that exercises segment
     /// distribution + composite_to_succinct on a multi-segment fixture.
     /// BusyLoop{500_000} at default po2_18 produces ≥ 2 segments; the
