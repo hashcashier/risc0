@@ -55,19 +55,34 @@ plus `@compute` entry kernels mirroring `par_stepExec` / `stepAccum`.
 
 ## Iteration sequence
 
-### Iter 1 — codegen spike + kill-criterion (THIS is the bet test)
-Do NOT build the full transpiler first. Hand-translate a *small but
-representative* slice — the simplest real `step_Top` path for one
-cycle type — into a WGSL `@compute` kernel, wire it behind a feature
-flag in `WebGpuCircuitHal::generate_witness`, and **measure**:
-- Does Chrome compile it without choking?
-- Per-cycle throughput vs the CPU `rust_steps` baseline?
+### Iter 1 — synthetic scale test + kill-criterion (THIS is the bet test)
 
-**Kill-criterion:** if the representative codegen'd witgen kernel is
-> ~5× slower than CPU `rust_steps` per cycle, or Chrome refuses to
-compile a kernel of plausible full size, then SP3's result has
-generalized — stop, report, and fall back to the interpreter approach
-(option 1 from the AS-IS) or partial port. Spend a spike, not weeks.
+**Sharpened by recon:** SP3's ceiling is an *execution-model* ceiling,
+not just a compile-time one. The SP3 staged eval_check kernel was a
+~1.6 MB generated WGSL shader (`webgpu.rs:5279`) that ran ~30× slower
+than the interpreter *even with the compile cached* (`:5687`). So a
+small correct hand-translated spike would NOT test the bet — it would
+compile and run fine because it is small. The kill-criterion only
+triggers at scale.
+
+Iter 1 is therefore a **synthetic scale test**: programmatically emit
+a WGSL `@compute` kernel that is *structurally faithful* to codegen'd
+witgen (many small `fn`s in a call DAG, column-major buffer
+loads/stores, BabyBear field arithmetic, if/else mux branches) and
+*scaled* to a plausible full witgen size (target the line/byte scale
+of the 30 K-line `steps.rs.inc` → est. multi-MB WGSL). Dispatch it on
+a `WebGpuHal`, one invocation per "cycle", and measure:
+- Chrome compile time of the scaled kernel.
+- **Per-invocation execution throughput** vs an equivalent amount of
+  CPU `rust_steps` work.
+
+**Kill-criterion:** if the scaled witgen-shaped WGSL kernel executes
+> ~5× slower per cycle than CPU `rust_steps` (compile cost amortized),
+then SP3's *execution* ceiling has generalized to witgen — stop,
+report, fall back to the interpreter (AS-IS option 1) or partial
+port. The synthetic kernel decouples "does Chrome handle scale"
+(testable cheaply, now) from "is the transpiler correct" (iters 2+,
+only worth building if iter 1 clears the bar).
 
 ### Iter 2 — the transpiler skeleton
 If iter 1 clears the kill-criterion: build the
