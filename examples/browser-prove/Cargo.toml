@@ -78,6 +78,10 @@ waldo-core = { path = "../waldo/core", default-features = false }
 waldo-methods = { path = "../waldo/methods" }
 wasm-methods = { path = "../wasm/methods" }
 wasm-bindgen-test = "0.3"
+# web-sys with no explicit features: the WebGPU types (GpuBuffer,
+# GpuBindGroup, ...) are pulled in via feature unification with
+# risc0-zkp's web-sys dependency. Used by the SP7 codegen-scale test.
+web-sys = "0.3"
 wat = "1.0"
 wordle-core = { path = "../wordle/core" }
 wordle-methods = { path = "../wordle/methods" }

@@ -1680,6 +1680,457 @@ mod tests {
         ));
     }
 
+    /// SP7 iter 1 — synthetic witgen-codegen scale test.
+    ///
+    /// SP7's user-directed approach is "codegen WGSL anyway", betting
+    /// SP3's ~30x staged-eval_check ceiling does not generalize to
+    /// witgen. SP3's ceiling is an *execution-model* ceiling (the 1.6 MB
+    /// staged shader ran ~30x slow even with the compile cached), so the
+    /// kill-criterion only triggers at scale. This test emits a
+    /// witgen-*shaped* WGSL kernel — many small `fn`s in a call DAG,
+    /// column-major buffer loads, BabyBear field arithmetic, a
+    /// data-dependent mux — at two scales with an IDENTICAL hot path:
+    ///   - SMALL: hot path only (~`HOT_DEPTH` functions).
+    ///   - LARGE: same hot path + a large cold subtree reachable only
+    ///     through a runtime-false mux (so Chrome must compile it but it
+    ///     never executes).
+    /// Per-cycle execution time is then compared. If LARGE >> SMALL,
+    /// kernel scale itself slows the hot path → SP3's ceiling has
+    /// generalized to witgen → kill SP7-codegen. If LARGE ≈ SMALL,
+    /// codegen scales and the full transpiler is justified.
+    /// BabyBear field modulus, shared by the SP7 synthetic-codegen
+    /// generator and its test (the WGSL prelude defines its own copy).
+    const SP7_P: u32 = 2013265921;
+
+    fn sp7_field_prelude() -> String {
+        // BabyBear scalar arithmetic, copied from
+        // `risc0/zkp/src/hal/webgpu_codegen/prelude.wgsl` so the
+        // synthetic kernel does real field work, not a toy.
+        r#"const P: u32 = 2013265921u;
+const M: u32 = 2281701377u;
+fn add(lhs: u32, rhs: u32) -> u32 { let s = lhs + rhs; if (s >= P) { return s - P; } return s; }
+fn sub(lhs: u32, rhs: u32) -> u32 { if (lhs >= rhs) { return lhs - rhs; } return lhs + P - rhs; }
+fn mul_wide(lhs: u32, rhs: u32) -> vec2<u32> {
+    let ll = lhs & 0xffffu; let lh = lhs >> 16u; let rl = rhs & 0xffffu; let rh = rhs >> 16u;
+    let p0 = ll * rl; let p1 = lh * rl; let p2 = ll * rh; let p3 = lh * rh;
+    let carry = (p0 >> 16u) + (p1 & 0xffffu) + (p2 & 0xffffu);
+    let lo = (p0 & 0xffffu) | ((carry & 0xffffu) << 16u);
+    let hi = p3 + (p1 >> 16u) + (p2 >> 16u) + (carry >> 16u);
+    return vec2<u32>(lo, hi);
+}
+fn mul(lhs: u32, rhs: u32) -> u32 {
+    let prod = mul_wide(lhs, rhs);
+    let low = 0u - prod.x;
+    let red = M * low;
+    let rp = mul_wide(red, P);
+    var ret = prod.y + rp.y;
+    if (prod.x + rp.x < prod.x) { ret = ret + 1u; }
+    if (ret >= P) { return ret - P; }
+    return ret;
+}
+struct Params { n_rows: u32, n_cycles: u32, n_cols: u32, guard_col: u32, out_col: u32 };
+@group(0) @binding(0) var<storage, read_write> data: array<u32>;
+@group(0) @binding(1) var<uniform> params: Params;
+fn buf_load(col: u32, cycle: u32, back: u32) -> u32 {
+    let row = (params.n_rows + cycle - back) % params.n_rows;
+    return data[col * params.n_rows + row];
+}
+"#
+        .to_string()
+    }
+
+    /// Emit one witgen-shaped WGSL function body: `ops` field-arithmetic
+    /// statements over buffer loads + the running `acc`, LCG-seeded by
+    /// `seed` so every function is distinct (no cross-function CSE).
+    /// `tail` is appended before `return a;` (child calls / hot-next).
+    fn sp7_emit_fn(name: &str, seed: u32, ops: u32, tail: &str) -> String {
+        let mut s = format!("fn {name}(cycle: u32, acc: u32) -> u32 {{\n  var a = acc;\n");
+        let mut rng = seed | 1;
+        let next = |rng: &mut u32| {
+            *rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
+            *rng
+        };
+        // a couple of buffer loads up front (witgen reads the trace)
+        for li in 0..3u32 {
+            let col = next(&mut rng) % 250 + 1;
+            let back = next(&mut rng) % 4;
+            s.push_str(&format!("  let l{li} = buf_load({col}u, cycle, {back}u);\n"));
+        }
+        for _ in 0..ops {
+            let opsel = next(&mut rng) % 3;
+            let op = ["add", "sub", "mul"][opsel as usize];
+            let lhs = match next(&mut rng) % 4 {
+                0 => "a".to_string(),
+                1 => "l0".to_string(),
+                2 => "l1".to_string(),
+                _ => "l2".to_string(),
+            };
+            let rhs = match next(&mut rng) % 5 {
+                0 => "a".to_string(),
+                1 => "l0".to_string(),
+                2 => "l1".to_string(),
+                3 => "l2".to_string(),
+                _ => format!("{}u", next(&mut rng) % SP7_P),
+            };
+            s.push_str(&format!("  a = {op}({lhs}, {rhs});\n"));
+        }
+        // a data-dependent mux, both arms real (witgen is mux-heavy)
+        s.push_str("  if ((l0 & 1u) == 0u) { a = add(a, l1); } else { a = sub(a, l2); }\n");
+        s.push_str(tail);
+        s.push_str("  return a;\n}\n");
+        s
+    }
+
+    /// Build a witgen-shaped WGSL kernel. The hot path is `hot_depth`
+    /// chained functions; the cold subtree is a binary tree of
+    /// `cold_count` functions reachable only through a runtime-false
+    /// guard. Functions are emitted leaves-first (WGSL has no forward
+    /// references). Returns the full WGSL source.
+    fn sp7_build_witgen_shaped_wgsl(hot_depth: u32, ops_per_fn: u32, cold_count: u32) -> String {
+        let mut out = sp7_field_prelude();
+        // Cold subtree: binary tree, node i has children 2i+1, 2i+2.
+        // Emit highest index first so children precede parents.
+        if cold_count > 0 {
+            for idx in (0..cold_count).rev() {
+                let c1 = 2 * idx + 1;
+                let c2 = 2 * idx + 2;
+                let mut tail = String::new();
+                if c1 < cold_count {
+                    tail.push_str(&format!("  a = cold_{c1}(cycle, a);\n"));
+                }
+                if c2 < cold_count {
+                    tail.push_str(&format!("  a = cold_{c2}(cycle, a);\n"));
+                }
+                out.push_str(&sp7_emit_fn(
+                    &format!("cold_{idx}"),
+                    0x9e3779b9u32.wrapping_mul(idx + 1),
+                    ops_per_fn,
+                    &tail,
+                ));
+            }
+        }
+        // Hot path: hot_{depth-1} is the leaf, hot_0 the entry. Emit
+        // leaf-first so callees precede callers.
+        for idx in (0..hot_depth).rev() {
+            let tail = if idx + 1 < hot_depth {
+                format!("  a = hot_{}(cycle, a);\n", idx + 1)
+            } else {
+                String::new()
+            };
+            out.push_str(&sp7_emit_fn(
+                &format!("hot_{idx}"),
+                0x85ebca6bu32.wrapping_mul(idx + 7),
+                ops_per_fn,
+                &tail,
+            ));
+        }
+        // Entry: run the hot path, then a runtime-false guard into the
+        // cold subtree (compiled, never executed), then store.
+        out.push_str(
+            r#"@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let cycle = gid.x;
+  if (cycle >= params.n_cycles) { return; }
+  var acc = buf_load(0u, cycle, 0u);
+  acc = hot_0(cycle, acc);
+"#,
+        );
+        if cold_count > 0 {
+            out.push_str(
+                "  let guard = buf_load(params.guard_col, cycle, 0u);\n  if (guard == 0xdeadbeefu) { acc = cold_0(cycle, acc); }\n",
+            );
+        }
+        out.push_str("  data[params.out_col * params.n_rows + cycle] = acc;\n}\n");
+        out
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn sp7_witgen_codegen_scale_smoke() {
+        use risc0_zkp::core::hash::poseidon2::Poseidon2HashSuite;
+        use risc0_zkp::hal::webgpu::{WebGpuBindingLayout, WebGpuBufferBinding, WebGpuHal};
+
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .expect("hal");
+
+        // Kernel geometry. N_CYCLES at po2_17 keeps each dispatch
+        // doing real work; HOT_DEPTH/OPS shape the per-cycle hot path.
+        const N_ROWS: u32 = 1u32 << 17; // 131072
+        const N_COLS: u32 = 256;
+        const N_CYCLES: u32 = N_ROWS;
+        const HOT_DEPTH: u32 = 24;
+        const OPS_PER_FN: u32 = 16;
+        // Sweep of cold-subtree sizes. cold=0 is the hot path alone
+        // (baseline); the rest scale total kernel size while the hot
+        // path stays IDENTICAL. Capped at cold=768 (~414 KB WGSL) — a
+        // throwaway probe past that lost the GPU device outright at
+        // ~692 KB, which would break test isolation in a committed
+        // test, so the device-loss point is recorded in evidence only.
+        const COLD_SWEEP: [u32; 4] = [0, 128, 384, 768];
+        // Each measured window targets >= ~600 ms wall so `Date::now()`'s
+        // ~1 ms resolution contributes < 0.2% error — the iter-1 first
+        // attempt used 2-19 ms windows and produced contradictory
+        // results (9.5x one run, 0.67x the next on the SAME kernel).
+        const TARGET_WINDOW_MS: f64 = 600.0;
+        // Trials per scale; report the MEDIAN (min-biased estimators
+        // are fragile to a single fast/slow outlier).
+        const TRIALS: usize = 3;
+
+        let data_elems = (N_ROWS * N_COLS) as u64;
+        let data_bytes = data_elems * 4;
+
+        // Seed `data` with non-zero, non-sentinel values.
+        let mut seed: u32 = 12345;
+        let mut data_init = vec![0u32; data_elems as usize];
+        for v in data_init.iter_mut() {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            *v = (seed % (SP7_P - 1)) + 1;
+        }
+        let data_init_bytes: &[u8] = bytemuck::cast_slice(&data_init);
+
+        // Params UBO: n_rows, n_cycles, n_cols, guard_col, out_col (+pad to 32 B).
+        let params = [N_ROWS, N_CYCLES, N_COLS, 200u32, 255u32, 0u32, 0u32, 0u32];
+        let params_bytes: &[u8] = bytemuck::cast_slice(&params);
+
+        let layout = hal
+            .create_bind_group_layout(
+                "sp7_scale_layout",
+                &[
+                    WebGpuBindingLayout::storage(0, 0),
+                    WebGpuBindingLayout::uniform(1, params_bytes.len() as u64),
+                ],
+            )
+            .expect("layout");
+
+        let workgroups = N_CYCLES / 64;
+
+        // Measure one compiled kernel: `TRIALS` windows of K dispatches
+        // each, K calibrated so a window is ~`TARGET_WINDOW_MS`. Returns
+        // the MEDIAN ns/cycle, or `None` on a GPU error (device loss).
+        // `hal`, `layout`, buffer descriptors etc. are captured.
+        async fn measure_kernel(
+            hal: &risc0_zkp::hal::webgpu::WebGpuHal,
+            kernel: &risc0_zkp::hal::webgpu::WebGpuKernel,
+            bind_group: &web_sys::GpuBindGroup,
+            data_buf: &web_sys::GpuBuffer,
+            workgroups: u32,
+            n_cycles: u32,
+            target_window_ms: f64,
+            trials: usize,
+            tag: &str,
+        ) -> Option<f64> {
+            // Warm-up + calibration: one dispatch, time it. A failed
+            // readback here means the first dispatch of this kernel
+            // could not complete (capacity ceiling / device loss).
+            let t_cal = js_sys::Date::now();
+            hal.dispatch_compute_1d(kernel, bind_group, workgroups);
+            if let Err(e) = hal.read_buffer(data_buf, 4).await {
+                risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                    "sp7_scale {tag} phase=first_dispatch_FAILED err={e:?}"
+                ));
+                return None;
+            }
+            let calib_ms = (js_sys::Date::now() - t_cal).max(0.25);
+            let k = ((target_window_ms / calib_ms).ceil() as u32).clamp(8, 40000);
+
+            let mut samples: Vec<f64> = Vec::with_capacity(trials);
+            for trial in 0..trials {
+                let t0 = js_sys::Date::now();
+                for _ in 0..k {
+                    hal.dispatch_compute_1d(kernel, bind_group, workgroups);
+                }
+                if let Err(e) = hal.read_buffer(data_buf, 4).await {
+                    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                        "sp7_scale {tag} phase=trial{trial}_FAILED k={k} err={e:?}"
+                    ));
+                    return None;
+                }
+                let window_ms = js_sys::Date::now() - t0;
+                samples.push(window_ms * 1.0e6 / (k as f64 * n_cycles as f64));
+            }
+            samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            Some(samples[samples.len() / 2])
+        }
+
+        // Sweep cold_count. Each step logs before/after compile and
+        // after measurement so a device loss pinpoints the breaking
+        // scale. After the sweep, cold=0 is RE-MEASURED: if the recheck
+        // diverges from the initial cold=0, the device degraded over
+        // the session and the ratios are not trustworthy (this is
+        // exactly the contamination the iter-1 first attempt hit).
+        let mut baseline_ns: Option<f64> = None;
+        let mut worst_ratio: f64 = 1.0;
+        let mut completed = 0u32;
+
+        for &cold in COLD_SWEEP.iter() {
+            let wgsl = sp7_build_witgen_shaped_wgsl(HOT_DEPTH, OPS_PER_FN, cold);
+            let wgsl_bytes = wgsl.len();
+            let t_compile = js_sys::Date::now();
+            let kernel = match hal.create_compute_kernel(
+                "sp7_scale_kernel",
+                &wgsl,
+                "main",
+                &[layout.clone()],
+            ) {
+                Ok(k) => k,
+                Err(e) => {
+                    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                        "sp7_scale step cold={cold} wgsl_bytes={wgsl_bytes} phase=compile_FAILED err={e:?}"
+                    ));
+                    break;
+                }
+            };
+            let compile_ms = js_sys::Date::now() - t_compile;
+            risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                "sp7_scale step cold={cold} wgsl_bytes={wgsl_bytes} compile_ms={compile_ms:.0} phase=compiled"
+            ));
+
+            let data_buf = hal
+                .create_storage_buffer("sp7_data", data_bytes)
+                .expect("data buf");
+            hal.write_buffer(&data_buf, 0, data_init_bytes)
+                .expect("data upload");
+            let params_buf = hal
+                .create_uniform_buffer("sp7_params", params_bytes)
+                .expect("params buf");
+            let bind_group = hal
+                .create_bind_group(
+                    "sp7_scale_bg",
+                    &layout,
+                    &[
+                        WebGpuBufferBinding::new(0, &data_buf),
+                        WebGpuBufferBinding::new(1, &params_buf),
+                    ],
+                )
+                .expect("bind group");
+
+            let cold_tag = format!("step cold={cold}");
+            let Some(ns_per_cycle) = measure_kernel(
+                &hal,
+                &kernel,
+                &bind_group,
+                &data_buf,
+                workgroups,
+                N_CYCLES,
+                TARGET_WINDOW_MS,
+                TRIALS,
+                &cold_tag,
+            )
+            .await
+            else {
+                risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                    "sp7_scale step cold={cold} wgsl_bytes={wgsl_bytes} phase=measure_FAILED"
+                ));
+                break;
+            };
+
+            let ratio = match baseline_ns {
+                None => {
+                    baseline_ns = Some(ns_per_cycle);
+                    1.0
+                }
+                Some(b) if b > 0.0 => ns_per_cycle / b,
+                Some(_) => 1.0,
+            };
+            worst_ratio = worst_ratio.max(ratio);
+            completed += 1;
+            risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                "sp7_scale step cold={cold} wgsl_bytes={wgsl_bytes} compile_ms={compile_ms:.0} median_ns_per_cycle={ns_per_cycle:.2} ratio_vs_baseline={ratio:.3} phase=measured"
+            ));
+        }
+
+        // Degradation recheck: re-measure cold=0. If it has drifted far
+        // from the initial baseline, the device degraded over the
+        // session and the sweep's ratios are contaminated. Sentinel
+        // -1.0 means the recheck could not run at all (e.g. the device
+        // was already dead from a ceiling hit) — distinct from a real
+        // 1.0 measurement.
+        let mut recheck_ratio: f64 = -1.0;
+        if completed >= 1 {
+            let wgsl = sp7_build_witgen_shaped_wgsl(HOT_DEPTH, OPS_PER_FN, 0);
+            if let Ok(kernel) =
+                hal.create_compute_kernel("sp7_scale_recheck", &wgsl, "main", &[layout.clone()])
+            {
+                let data_buf = hal
+                    .create_storage_buffer("sp7_data_rc", data_bytes)
+                    .expect("data buf");
+                hal.write_buffer(&data_buf, 0, data_init_bytes)
+                    .expect("data upload");
+                let params_buf = hal
+                    .create_uniform_buffer("sp7_params_rc", params_bytes)
+                    .expect("params buf");
+                let bind_group = hal
+                    .create_bind_group(
+                        "sp7_scale_bg_rc",
+                        &layout,
+                        &[
+                            WebGpuBufferBinding::new(0, &data_buf),
+                            WebGpuBufferBinding::new(1, &params_buf),
+                        ],
+                    )
+                    .expect("bind group");
+                if let Some(rc_ns) = measure_kernel(
+                    &hal,
+                    &kernel,
+                    &bind_group,
+                    &data_buf,
+                    workgroups,
+                    N_CYCLES,
+                    TARGET_WINDOW_MS,
+                    TRIALS,
+                    "recheck cold=0",
+                )
+                .await
+                {
+                    if let Some(b) = baseline_ns {
+                        if b > 0.0 {
+                            recheck_ratio = rc_ns / b;
+                        }
+                    }
+                    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                        "sp7_scale recheck cold=0 median_ns_per_cycle={rc_ns:.2} recheck_ratio={recheck_ratio:.3}"
+                    ));
+                }
+            }
+        }
+
+        // Verdict — logged, not asserted.
+        //  - recheck ran AND drifted far from baseline → the device
+        //    degraded over the session, the ratios are contaminated,
+        //    INCONCLUSIVE.
+        //  - otherwise, an incomplete sweep (a scale that compiled but
+        //    would not run / lost the device) OR a >= ~3x execution
+        //    slowdown → CEILING_HIT: full-size codegen is not viable.
+        //  - else → codegen_scales.
+        // A failed recheck (recheck_ratio < 0) is NOT treated as
+        // degradation — it just means the recheck came after a ceiling
+        // hit that already killed the device; the completed steps'
+        // ratios are still valid (and a prior clean run confirmed it).
+        let degraded = recheck_ratio > 0.0 && !(0.7..1.4).contains(&recheck_ratio);
+        let verdict = if degraded {
+            "INCONCLUSIVE_device_degraded"
+        } else if worst_ratio >= 3.0 || completed < COLD_SWEEP.len() as u32 {
+            "CEILING_HIT"
+        } else {
+            "codegen_scales"
+        };
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "sp7_witgen_codegen_scale completed_steps={completed}/{} worst_ratio={worst_ratio:.3} recheck_ratio={recheck_ratio:.3} verdict={verdict} n_cycles={N_CYCLES} hot_depth={HOT_DEPTH} ops_per_fn={OPS_PER_FN} trials={TRIALS}",
+            COLD_SWEEP.len()
+        ));
+
+        // Characterization test: passes by completing the sweep and
+        // logging the evidence; the kill-criterion outcome is the
+        // logged `verdict`. Assert only that the cold=0 baseline ran —
+        // if even the pure hot path fails, the harness is broken.
+        assert!(
+            completed >= 1,
+            "SP7 iter 1: even the cold=0 baseline kernel failed to compile + run"
+        );
+    }
+
     /// SP6d iter 8 — end-to-end pool prove that exercises segment
     /// distribution + composite_to_succinct on a multi-segment fixture.
     /// BusyLoop{500_000} at default po2_18 produces ≥ 2 segments; the

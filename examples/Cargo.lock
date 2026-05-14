@@ -880,6 +880,7 @@ dependencies = [
  "wasm-bindgen-test",
  "wasm-methods",
  "wat",
+ "web-sys",
  "wordle-core",
  "wordle-methods",
  "xgboost-methods",
