@@ -2634,6 +2634,455 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         );
     }
 
+    /// SP7 iter 5c — shared device probe: fresh `WebGpuHal`, compile `module`,
+    /// build a pipeline for `entry`, dispatch over 256 rows, read back.
+    /// Returns true iff dispatch+readback succeeded — i.e. the entry's
+    /// reachable closure AND the whole module both clear the device's Tint
+    /// capacity ceilings (iter-5b: whole-module ceiling in (3.73, 4.69] MB;
+    /// reachable closure ~1.9-2.8 MB). Logs
+    /// `{tag} {entry} module_bytes=N phase=...` where phase is one of
+    /// hal_FAILED / compile_FAILED / dispatch_FAILED / OK. MUST run with
+    /// VK_ICD_FILENAMES=.../nvidia_icd.json or Chrome's Dawn may pick a broken
+    /// Mesa Vulkan device (see iter-5a).
+    async fn sp7_probe(tag: &str, module: &str, entry: &'static str) -> bool {
+        use risc0_zkp::core::hash::poseidon2::Poseidon2HashSuite;
+        use risc0_zkp::hal::webgpu::{WebGpuBindingLayout, WebGpuBufferBinding, WebGpuHal};
+
+        // Generous fixed geometry: 16 MB per storage buffer, far past
+        // kRegCount*{data=211,accum=103,global=90,mix=36} * rows, so the
+        // column-major witgen indexing stays in-bounds under
+        // disable_robustness. 256 rows; dispatch 256 threads.
+        const ROWS: u32 = 256;
+        const STORAGE_BYTES: u64 = 16 * 1024 * 1024;
+        let module_bytes = module.len();
+        // WitgenParams { data_rows, global_rows, accum_rows, mix_rows,
+        //                accum_zero_back } padded to 32 B.
+        let params: [u32; 8] = [ROWS, 1, ROWS, 1, 0, 0, 0, 0];
+        let params_bytes: &[u8] = bytemuck::cast_slice(&params);
+        let workgroups = ROWS / 64;
+        let log = |phase: &str| {
+            risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                "{tag} {entry} module_bytes={module_bytes} phase={phase}"
+            ));
+        };
+
+        let hal = match WebGpuHal::new(Poseidon2HashSuite::new_suite()).await {
+            Ok(h) => h,
+            Err(e) => {
+                log(&format!("hal_FAILED err={e:?}"));
+                return false;
+            }
+        };
+        let layout = hal
+            .create_bind_group_layout(
+                "sp7_probe_layout",
+                &[
+                    WebGpuBindingLayout::storage(0, 0),
+                    WebGpuBindingLayout::storage(1, 0),
+                    WebGpuBindingLayout::storage(2, 0),
+                    WebGpuBindingLayout::storage(3, 0),
+                    WebGpuBindingLayout::uniform(4, params_bytes.len() as u64),
+                ],
+            )
+            .expect("layout");
+        let kernel = match hal.create_compute_kernel("sp7_probe_kernel", module, entry, &[layout.clone()])
+        {
+            Ok(k) => k,
+            Err(e) => {
+                log(&format!("compile_FAILED err={e:?}"));
+                return false;
+            }
+        };
+        let data_buf = hal
+            .create_storage_buffer("sp7_probe_data", STORAGE_BYTES)
+            .expect("data buf");
+        let global_buf = hal
+            .create_storage_buffer("sp7_probe_global", STORAGE_BYTES)
+            .expect("global buf");
+        let accum_buf = hal
+            .create_storage_buffer("sp7_probe_accum", STORAGE_BYTES)
+            .expect("accum buf");
+        let mix_buf = hal
+            .create_storage_buffer("sp7_probe_mix", STORAGE_BYTES)
+            .expect("mix buf");
+        let params_buf = hal
+            .create_uniform_buffer("sp7_probe_params", params_bytes)
+            .expect("params buf");
+        let bind_group = hal
+            .create_bind_group(
+                "sp7_probe_bg",
+                &layout,
+                &[
+                    WebGpuBufferBinding::new(0, &data_buf),
+                    WebGpuBufferBinding::new(1, &global_buf),
+                    WebGpuBufferBinding::new(2, &accum_buf),
+                    WebGpuBufferBinding::new(3, &mix_buf),
+                    WebGpuBufferBinding::new(4, &params_buf),
+                ],
+            )
+            .expect("bind group");
+        hal.dispatch_compute_1d(&kernel, &bind_group, workgroups);
+        match hal.read_buffer(&data_buf, 4).await {
+            Ok(_) => {
+                log("OK");
+                true
+            }
+            Err(e) => {
+                log(&format!("dispatch_FAILED err={e:?}"));
+                false
+            }
+        }
+    }
+
+    /// SP7 iter 5c — `@compute` entries for the pruned-module probes.
+    /// `witgen_nop` touches all 5 bindings (so Tint keeps the bind-group
+    /// layout) and stores to data_buf, but reaches ZERO step fns — it is a
+    /// per-module whole-module-ceiling control. `witgen_top` /
+    /// `witgen_top_accum` call the real generated step entry.
+    const SP7_NOP_ENTRY: &str = "
+@compute @workgroup_size(64)
+fn witgen_nop(@builtin(global_invocation_id) gid: vec3<u32>) {
+  cycle = gid.x;
+  data_buf[gid.x] = gid.x + global_buf[0] + accum_buf[0] + mix_buf[0] + params.data_rows;
+}
+";
+    const SP7_TOP_ENTRY: &str = "
+@compute @workgroup_size(64)
+fn witgen_top(@builtin(global_invocation_id) gid: vec3<u32>) {
+  cycle = gid.x;
+  step_Top(buf_data, buf_global);
+}
+";
+    const SP7_ACCUM_ENTRY: &str = "
+@compute @workgroup_size(64)
+fn witgen_top_accum(@builtin(global_invocation_id) gid: vec3<u32>) {
+  cycle = gid.x;
+  step_TopAccum(buf_accum, buf_data, buf_global, buf_mix);
+}
+";
+
+    /// SP7 iter 5c — does step_Top dispatch as a PRUNED per-entry module?
+    ///
+    /// iter 5b proved a whole-module ceiling in (3.73, 4.69] MB: the 4.69 MB
+    /// module loses the device even for a trivial entry. The corrected
+    /// chunking strategy is per-entry pruned modules — prelude + ALL types +
+    /// ALL layout + ONLY this entry's reachable fn closure (closure computed
+    /// by /tmp/wgsl-test/prune_closure.py, emitted as steps_step_Top.pruned.
+    /// wgsl). For step_Top that closure is ~1.68 MB of fns -> a ~1.99 MB
+    /// module: under BOTH the whole-module ceiling and the reachable ceiling
+    /// (~1.9 MB). If witgen_top dispatches, the per-entry-pruned-module design
+    /// is confirmed and step_Top needs no body-split. Run as its OWN
+    /// wasm-bindgen-test-runner invocation (fresh Chrome — avoids device-loss
+    /// contamination) with VK_ICD_FILENAMES set.
+    #[wasm_bindgen_test(async)]
+    async fn sp7_pruned_top_probe() {
+        console_error_panic_hook::set_once();
+        const PRELUDE: &str = include_str!("sp7_wgsl/witgen_prelude.wgsl");
+        const TYPES: &str = include_str!("sp7_wgsl/types.wgsl.inc");
+        const LAYOUT: &str = include_str!("sp7_wgsl/layout.wgsl.inc");
+        const STEPS_TOP: &str = include_str!("sp7_wgsl/steps_step_Top.pruned.wgsl");
+
+        let module =
+            format!("{PRELUDE}\n{TYPES}\n{LAYOUT}\n{STEPS_TOP}\n{SP7_NOP_ENTRY}\n{SP7_TOP_ENTRY}");
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "sp7_top pruned module assembled: {} bytes",
+            module.len()
+        ));
+        // nop control first: confirms the ~1.99 MB module clears the
+        // whole-module ceiling. Short-circuit — if a probe loses the device,
+        // the next sp7_probe just hangs on requestAdapter() (runner SIGKILL).
+        let nop_ok = sp7_probe("sp7_top", &module, "witgen_nop").await;
+        let top_ok = if nop_ok {
+            sp7_probe("sp7_top", &module, "witgen_top").await
+        } else {
+            false
+        };
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "sp7_top verdict: nop_ok={nop_ok} witgen_top_ok={top_ok} -- {}",
+            if top_ok {
+                "step_Top dispatches as a pruned module; per-entry-pruned design CONFIRMED, \
+                 no body-split needed for step_Top"
+            } else if nop_ok {
+                "1.99 MB module clears the whole-module ceiling but step_Top's ~1.68 MB \
+                 closure exceeds the reachable ceiling -- step_Top also needs a body-split"
+            } else {
+                "even nop failed on the 1.99 MB module -- whole-module ceiling is BELOW \
+                 1.99 MB for the real-module shape (or VK_ICD override missing); re-check"
+            }
+        ));
+    }
+
+    /// SP7 iter 5c — does step_TopAccum dispatch as a PRUNED per-entry module?
+    ///
+    /// step_TopAccum's reachable closure is ~2.68 MB of fns -> a ~3.27 MB
+    /// module: UNDER the whole-module ceiling (3.73 MB) but OVER the safe
+    /// reachable ceiling (~1.9 MB; inside the 1.9-2.8 uncertainty band). The
+    /// nop control probes the whole-module ceiling at 3.27 MB (a real-module
+    /// data point between typed 0.79 MB-OK and full 4.69 MB-FAIL).
+    /// witgen_top_accum is expected to FAIL the reachable ceiling -> confirming
+    /// step_TopAccum needs a body-split (likely 2 chunks). Run as its OWN
+    /// wasm-bindgen-test-runner invocation (fresh Chrome) with VK_ICD_FILENAMES
+    /// set.
+    #[wasm_bindgen_test(async)]
+    async fn sp7_pruned_accum_probe() {
+        console_error_panic_hook::set_once();
+        const PRELUDE: &str = include_str!("sp7_wgsl/witgen_prelude.wgsl");
+        const TYPES: &str = include_str!("sp7_wgsl/types.wgsl.inc");
+        const LAYOUT: &str = include_str!("sp7_wgsl/layout.wgsl.inc");
+        const STEPS_ACCUM: &str = include_str!("sp7_wgsl/steps_step_TopAccum.pruned.wgsl");
+
+        let module = format!(
+            "{PRELUDE}\n{TYPES}\n{LAYOUT}\n{STEPS_ACCUM}\n{SP7_NOP_ENTRY}\n{SP7_ACCUM_ENTRY}"
+        );
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "sp7_accum pruned module assembled: {} bytes",
+            module.len()
+        ));
+        let nop_ok = sp7_probe("sp7_accum", &module, "witgen_nop").await;
+        let accum_ok = if nop_ok {
+            sp7_probe("sp7_accum", &module, "witgen_top_accum").await
+        } else {
+            false
+        };
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "sp7_accum verdict: nop_ok={nop_ok} witgen_top_accum_ok={accum_ok} -- {}",
+            if accum_ok {
+                "step_TopAccum dispatches as a pruned module; no body-split needed \
+                 (the reachable ceiling is >= 2.68 MB)"
+            } else if nop_ok {
+                "3.27 MB module clears the whole-module ceiling but step_TopAccum's \
+                 ~2.68 MB closure exceeds the reachable ceiling -- needs a body-split"
+            } else {
+                "even nop failed on the 3.27 MB module -- whole-module ceiling is BELOW \
+                 3.27 MB; narrows it to (1.99, 3.27] for the real-module shape"
+            }
+        ));
+    }
+
+    /// SP7 iter 5d — `@compute` entries for the arm-split chunk probes.
+    /// split_exectop.py emits each arm-split chunk as a step_Top-SHAPED VOID
+    /// function `step_chunk_n*_c*(data0, global1)` (builds the TopLayout
+    /// internally, `return;`), so these `@compute` entries are byte-for-byte
+    /// identical to `witgen_top_full` except the void fn they call -- the arm
+    /// subset is the ONLY variable. (iter-5d found the earlier
+    /// `_ = exec_Top_n*(..)` form was Tint-pathological: ~60-95 s compile
+    /// then device-loss; the original `step_Top` path fast-fails cleanly.)
+    /// witgen_top_full calls the unsplit step_Top (1.68 MB closure --
+    /// the iter-5c known-failure control).
+    const SP7_SWEEP_ENTRIES: &str = "
+@compute @workgroup_size(64)
+fn witgen_n4_c0(@builtin(global_invocation_id) gid: vec3<u32>) {
+  cycle = gid.x;
+  step_chunk_n4_c0(buf_data, buf_global);
+}
+@compute @workgroup_size(64)
+fn witgen_n2_c0(@builtin(global_invocation_id) gid: vec3<u32>) {
+  cycle = gid.x;
+  step_chunk_n2_c0(buf_data, buf_global);
+}
+@compute @workgroup_size(64)
+fn witgen_arm3(@builtin(global_invocation_id) gid: vec3<u32>) {
+  cycle = gid.x;
+  step_chunk_arm3(buf_data, buf_global);
+}
+@compute @workgroup_size(64)
+fn witgen_arm11(@builtin(global_invocation_id) gid: vec3<u32>) {
+  cycle = gid.x;
+  step_chunk_arm11(buf_data, buf_global);
+}
+@compute @workgroup_size(64)
+fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
+  cycle = gid.x;
+  step_Top(buf_data, buf_global);
+}
+";
+
+    /// Assemble the iter-5d chunked probe module: prelude + all types + all
+    /// layout + the arm-split chunked step_Top closure + the nop control +
+    /// the sweep entries.
+    fn sp7_chunked_module() -> String {
+        const PRELUDE: &str = include_str!("sp7_wgsl/witgen_prelude.wgsl");
+        const TYPES: &str = include_str!("sp7_wgsl/types.wgsl.inc");
+        const LAYOUT: &str = include_str!("sp7_wgsl/layout.wgsl.inc");
+        const STEPS_CHUNKED: &str = include_str!("sp7_wgsl/steps_step_Top_chunked.wgsl");
+        format!(
+            "{PRELUDE}\n{TYPES}\n{LAYOUT}\n{STEPS_CHUNKED}\n{SP7_NOP_ENTRY}\n{SP7_SWEEP_ENTRIES}"
+        )
+    }
+
+    /// SP7 iter 5d — does the N=2 arm-split chunk of exec_Top dispatch?
+    ///
+    /// iter 5c proved step_Top's full 1.68 MB closure device-loses even
+    /// isolated in a sub-whole-module-ceiling module. split_exectop.py
+    /// arm-splits exec_Top's flat 13-arm mux; the N=2 partition gives
+    /// `exec_Top_n2_c0` a ~0.9 MB reachable closure. This mirrors the
+    /// iter-5c probe structure exactly (nop control + one target, short-
+    /// circuit) -- 2 probes, ~10 s. If witgen_n2_c0 dispatches, the
+    /// arm-split mechanism is confirmed and 2 chunks suffice for step_Top.
+    /// Run as its OWN wasm-bindgen-test-runner invocation, --nocapture,
+    /// with VK_ICD_FILENAMES set.
+    #[wasm_bindgen_test(async)]
+    async fn sp7_chunk_n2c0_probe() {
+        console_error_panic_hook::set_once();
+        let module = sp7_chunked_module();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "sp7_n2c0 chunked module assembled: {} bytes",
+            module.len()
+        ));
+        let nop_ok = sp7_probe("sp7_n2c0", &module, "witgen_nop").await;
+        let chunk_ok = if nop_ok {
+            sp7_probe("sp7_n2c0", &module, "witgen_n2_c0").await
+        } else {
+            false
+        };
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "sp7_n2c0 verdict: nop_ok={nop_ok} witgen_n2_c0_ok={chunk_ok} -- {}",
+            if chunk_ok {
+                "N=2 arm-split chunk (~0.9 MB closure) dispatches -- arm-split \
+                 CONFIRMED, 2 chunks suffice for step_Top"
+            } else if nop_ok {
+                "N=2 chunk failed -- ~0.9 MB closure over the reachable ceiling; \
+                 N=4 (~0.5 MB) is the fallback"
+            } else {
+                "nop failed on the 2.12 MB chunked module -- whole-module ceiling \
+                 issue, re-check"
+            }
+        ));
+    }
+
+    /// SP7 iter 5d — does the smaller N=4 arm-split chunk dispatch?
+    /// `exec_Top_n4_c0` has a ~0.5 MB reachable closure. Same 2-probe
+    /// structure as sp7_chunk_n2c0_probe; the fallback granularity if N=2
+    /// is over the reachable ceiling.
+    #[wasm_bindgen_test(async)]
+    async fn sp7_chunk_n4c0_probe() {
+        console_error_panic_hook::set_once();
+        let module = sp7_chunked_module();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "sp7_n4c0 chunked module assembled: {} bytes",
+            module.len()
+        ));
+        let nop_ok = sp7_probe("sp7_n4c0", &module, "witgen_nop").await;
+        let chunk_ok = if nop_ok {
+            sp7_probe("sp7_n4c0", &module, "witgen_n4_c0").await
+        } else {
+            false
+        };
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "sp7_n4c0 verdict: nop_ok={nop_ok} witgen_n4_c0_ok={chunk_ok} -- {}",
+            if chunk_ok {
+                "N=4 arm-split chunk (~0.5 MB closure) dispatches -- arm-split \
+                 CONFIRMED at N=4 granularity (4 chunks for step_Top)"
+            } else if nop_ok {
+                "N=4 chunk failed -- even a ~0.5 MB closure is over the reachable \
+                 ceiling; chunking needs a finer lever"
+            } else {
+                "nop failed on the 2.12 MB chunked module -- whole-module ceiling \
+                 issue, re-check"
+            }
+        ));
+    }
+
+    /// SP7 iter 5d — control: does the UNSPLIT step_Top still device-loss on
+    /// the chunked module, exactly as it did on iter-5c's pruned module?
+    /// Confirms the chunked module behaves like iter-5c (so any chunk
+    /// dispatch result is trustworthy, not a chunked-module artifact).
+    #[wasm_bindgen_test(async)]
+    async fn sp7_chunk_full_probe() {
+        console_error_panic_hook::set_once();
+        let module = sp7_chunked_module();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "sp7_full chunked module assembled: {} bytes",
+            module.len()
+        ));
+        let nop_ok = sp7_probe("sp7_full", &module, "witgen_nop").await;
+        let full_ok = if nop_ok {
+            sp7_probe("sp7_full", &module, "witgen_top_full").await
+        } else {
+            false
+        };
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "sp7_full verdict: nop_ok={nop_ok} witgen_top_full_ok={full_ok} -- {}",
+            if full_ok {
+                "UNEXPECTED: full step_Top closure dispatched -- contradicts iter-5c"
+            } else if nop_ok {
+                "expected: full step_Top closure (1.68 MB) device-loses, same as \
+                 iter-5c -- chunked module behaves normally"
+            } else {
+                "nop failed on the 2.12 MB chunked module -- whole-module ceiling \
+                 issue, re-check"
+            }
+        ));
+    }
+
+    /// SP7 iter 5d de-risk — does a SINGLE-arm spliced chunk dispatch?
+    ///
+    /// Every multi-arm spliced chunk (n4/n2, ~0.5-0.9 MB closures) device-loses
+    /// after ~60-95 s, even the void-shim form byte-identical to the working
+    /// witgen_top_full. step_chunk_arm3 is the minimal split unit: exec_Top's
+    /// prologue + ONLY arm 3 (exec_Mul0) + epilogue, a ~0.11 MB closure. If
+    /// even this grinds + device-loses, the Python text-SPLICE is structurally
+    /// broken (-> the zirgen MLIR pass, which emits idiomatically via
+    /// WgslLanguageSyntax, is the fix and will be fine). If it dispatches, the
+    /// splice is OK and the real reachable ceiling is brutally low (~0.1 MB).
+    #[wasm_bindgen_test(async)]
+    async fn sp7_chunk_arm3_probe() {
+        console_error_panic_hook::set_once();
+        let module = sp7_chunked_module();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "sp7_arm3 chunked module assembled: {} bytes",
+            module.len()
+        ));
+        let nop_ok = sp7_probe("sp7_arm3", &module, "witgen_nop").await;
+        let arm_ok = if nop_ok {
+            sp7_probe("sp7_arm3", &module, "witgen_arm3").await
+        } else {
+            false
+        };
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "sp7_arm3 verdict: nop_ok={nop_ok} witgen_arm3_ok={arm_ok} -- {}",
+            if arm_ok {
+                "single-arm splice (~0.11 MB) dispatches -- the SPLICE is OK; \
+                 multi-arm chunks fail on real ceiling/size, ceiling is ~0.1 MB"
+            } else if nop_ok {
+                "single-arm splice (~0.11 MB) device-loses -- the text-SPLICE is \
+                 structurally broken; the MLIR pass (idiomatic emit) is the fix"
+            } else {
+                "nop failed -- whole-module ceiling issue, re-check"
+            }
+        ));
+    }
+
+    /// SP7 iter 5d de-risk — does the single Sha arm (exec_Sha0, ~0.39 MB)
+    /// dispatch as a spliced chunk? Pairs with sp7_chunk_arm3_probe: if arm3
+    /// (tiny) works but arm11 (Sha) does not, exec_Sha0's real-code subtree is
+    /// the pathology; if both behave the same, it is the splice or the size.
+    #[wasm_bindgen_test(async)]
+    async fn sp7_chunk_arm11_probe() {
+        console_error_panic_hook::set_once();
+        let module = sp7_chunked_module();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "sp7_arm11 chunked module assembled: {} bytes",
+            module.len()
+        ));
+        let nop_ok = sp7_probe("sp7_arm11", &module, "witgen_nop").await;
+        let arm_ok = if nop_ok {
+            sp7_probe("sp7_arm11", &module, "witgen_arm11").await
+        } else {
+            false
+        };
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "sp7_arm11 verdict: nop_ok={nop_ok} witgen_arm11_ok={arm_ok} -- {}",
+            if arm_ok {
+                "single Sha arm (~0.39 MB) dispatches"
+            } else if nop_ok {
+                "single Sha arm (~0.39 MB) device-loses"
+            } else {
+                "nop failed -- whole-module ceiling issue, re-check"
+            }
+        ));
+    }
+
     /// SP6d iter 8 — end-to-end pool prove that exercises segment
     /// distribution + composite_to_succinct on a multi-segment fixture.
     /// BusyLoop{500_000} at default po2_18 produces ≥ 2 segments; the
