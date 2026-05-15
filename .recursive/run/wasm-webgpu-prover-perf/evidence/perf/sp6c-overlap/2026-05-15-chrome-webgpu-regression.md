@@ -1,10 +1,24 @@
 Run: `/.recursive/run/wasm-webgpu-prover-perf/`
-Phase: `Environmental — Chrome WebGPU smoke baseline regression`
+Phase: `Environmental — false alarm, was operator error (wrong cwd)`
 Date: 2026-05-15
-Status: BLOCKING. R1 smoke fails with `GPUAdapter is not available`
-even with `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json`,
-fresh wasm builds, and webgpu.rs at HEAD (no diffs from main). Goal-hook
-verification cannot proceed until resolved.
+Status: **RESOLVED.** The "GPUAdapter is not available" was caused by
+running `wasm-bindgen-test-runner` from the worktree ROOT instead of
+`examples/browser-prove/`. The runner searches for `webdriver.json`
+relative to its current working directory; from the worktree root it
+fell back to default Chrome capabilities (no WebGPU flags), so Chrome
+launched in a config that doesn't expose a WebGPU adapter on this
+hardware. From `examples/browser-prove/` the runner correctly emits
+`Try find webdriver.json... Ok`, Chrome launches with
+`enable-unsafe-webgpu enable-features=Vulkan use-angle=vulkan
+enable-dawn-features=allow_unsafe_apis,disable_robustness`, and
+adapter acquisition succeeds. Chrome 148.0.7778.167 is NOT broken --
+the cd-into-the-crate-dir step is just load-bearing.
+
+**Lesson for the next session:** the canonical smoke command in
+`evidence/perf/r1-baselines/README.md` includes `cd
+.../examples/browser-prove` -- never run the runner from elsewhere.
+
+Original (incorrect) hypothesis follows for reference.
 
 ## Symptom
 
