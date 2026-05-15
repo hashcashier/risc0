@@ -287,6 +287,7 @@ fn shadow_init_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   // Column-major: data_buf[col * rows + row]
   let rows = params.data_rows;
+  data_buf[ 0u * rows + cycle] = encode(cycle);           // cycle reg (col 0)
   data_buf[14u * rows + cycle] = encode(next_pc_low);     // nextPcLow
   data_buf[15u * rows + cycle] = encode(next_pc_high);    // nextPcHigh
   data_buf[16u * rows + cycle] = encode(next_state);      // nextState_0
