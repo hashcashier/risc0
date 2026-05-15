@@ -118,6 +118,60 @@ fn build_preflight_meta(preflight: &PreflightTrace) -> Vec<u32> {
     out
 }
 
+/// SP7 iter 6d-g step 6.2.1b (2026-05-16): synthesize the Misc0
+/// per-arm @compute wrapper that replicates exec_TopChunk0's logic
+/// to construct InstInputStruct from preflight + shadow-init'd cells
+/// and then calls exec_Misc0Chunk0 directly. Replaces the no-op
+/// `data_buf[cycle] = data_buf[cycle]` placeholder with the real
+/// witgen call path.
+///
+/// Mirrors exec_TopChunk0 lines 16934-16979 but bypasses externs by
+/// reading major/minor from preflight_meta. The 4 inter-cycle reads
+/// (nextPcLow/High, nextState_0, nextMachineMode) hit cells that were
+/// shadow-init'd in `dispatch_shadow_init`.
+fn misc0_synth_wrapper(label: &str, sub_fn: &str) -> String {
+    format!(
+        "@group(0) @binding(5) var<storage, read> cycle_list: array<u32>;\n\
+         @group(0) @binding(6) var<storage, read> preflight_meta: array<u32>;\n\
+         \n\
+         @compute @workgroup_size(64)\n\
+         fn iter6d_g_{label}_main(@builtin(global_invocation_id) gid: vec3<u32>) {{\n\
+           let lane = gid.x;\n\
+           if (lane >= arrayLength(&cycle_list)) {{ return; }}\n\
+           cycle = cycle_list[lane];\n\
+           if (cycle >= params.data_rows) {{ return; }}\n\
+           let bound_top = BoundLayout_TopLayout(kLayout_Top, buf_data);\n\
+           // Pull major/minor from preflight_meta (packed: hi=major, lo=minor).\n\
+           let base = cycle * 4u;\n\
+           let packed = preflight_meta[base + 3u];\n\
+           let major_v = encode(packed >> 16u);\n\
+           let minor_v = encode(packed & 0xFFFFu);\n\
+           // Recompute isFirstCycle for this cycle: 1 at cycle 0, 0 else.\n\
+           let is_first_v = select(0u, encode(1u), cycle == 0u);\n\
+           let x3 = exec_NondetBitReg(is_first_v, lookup_TopLayout_isFirstCycle(bound_top));\n\
+           let x4 = sub(MONT_ONE, x3._super);\n\
+           // back_Reg(1, ...) on shadow-init'd cells.\n\
+           let x9 = back_Reg(1, lookup_TopLayout_nextPcLow(bound_top));\n\
+           let x10 = back_Reg(1, lookup_TopLayout_nextPcHigh(bound_top));\n\
+           let x11 = back_Reg(1, lookup_TopLayout_nextState_0(bound_top));\n\
+           let x12 = back_Reg(1, lookup_TopLayout_nextMachineMode(bound_top));\n\
+           let x15 = exec_NondetReg(major_v, lookup_TopLayout_major(bound_top));\n\
+           let x16 = exec_NondetReg(minor_v, lookup_TopLayout_minor(bound_top));\n\
+           let x17 = exec_InstInput(\n\
+             x15._super, x16._super,\n\
+             ValU32Struct(mul(x4, x9._super), mul(x4, x10._super)),\n\
+             mul(x4, x11._super),\n\
+             add(mul(x4, x12._super), x3._super),\n\
+             lookup_TopLayout_instInput(bound_top)\n\
+           );\n\
+           let x20 = back_Reg(0, lookup_TopCycleLayout__super(lookup_TopLayout_cycleRedef(bound_top)));\n\
+           let _result = {sub_fn}(x20, x17, lookup_TopInstResultLayout_arm0(lookup_TopLayout_instResult(bound_top)));\n\
+         }}\n",
+        label = label,
+        sub_fn = sub_fn,
+    )
+}
+
 #[allow(dead_code)]
 pub(crate) struct WebGpuCircuitHal {
     hal: Rc<WebGpuHal>,
@@ -302,23 +356,33 @@ impl WebGpuCircuitHal {
             let arm_layouts = [arm_layout.clone()];
             let mut arm_modules: Vec<(String, String, &str)> =
                 Vec::with_capacity(TOP_CHUNK0_ARM_DELTAS.len());
-            for (label, delta, _sub_fn) in TOP_CHUNK0_ARM_DELTAS {
-                let wrapper = format!(
-                    "@group(0) @binding(5) var<storage, read> cycle_list: array<u32>;\n\
-                     @group(0) @binding(6) var<storage, read> preflight_meta: array<u32>;\n\
-                     \n\
-                     @compute @workgroup_size(64)\n\
-                     fn iter6d_g_{}_main(@builtin(global_invocation_id) gid: vec3<u32>) {{\n\
-                       let lane = gid.x;\n\
-                       if (lane >= arrayLength(&cycle_list)) {{ return; }}\n\
-                       cycle = cycle_list[lane];\n\
-                       if (cycle >= params.data_rows) {{ return; }}\n\
-                       // Touch preflight_meta to keep binding 6 referenced.\n\
-                       let _meta = preflight_meta[cycle * 4u + 3u];\n\
-                       data_buf[cycle] = data_buf[cycle];\n\
-                     }}\n",
-                    label,
-                );
+            for (arm_idx, (label, delta, sub_fn)) in TOP_CHUNK0_ARM_DELTAS.iter().enumerate() {
+                // SP7 iter 6d-g step 6.2.1b: pilot real InstInputStruct
+                // synthesis for Misc0 only (arm_idx 0). Other arms keep
+                // the no-op body to isolate the Misc0 change. If Misc0
+                // Tint-compiles + dispatches successfully, replicate to
+                // the other 7 zero-back_Reg arms (MISC1/2, MUL0, DIV0,
+                // MEM0/1, ECALL0).
+                let wrapper = if arm_idx == 0 {
+                    misc0_synth_wrapper(label, sub_fn)
+                } else {
+                    format!(
+                        "@group(0) @binding(5) var<storage, read> cycle_list: array<u32>;\n\
+                         @group(0) @binding(6) var<storage, read> preflight_meta: array<u32>;\n\
+                         \n\
+                         @compute @workgroup_size(64)\n\
+                         fn iter6d_g_{}_main(@builtin(global_invocation_id) gid: vec3<u32>) {{\n\
+                           let lane = gid.x;\n\
+                           if (lane >= arrayLength(&cycle_list)) {{ return; }}\n\
+                           cycle = cycle_list[lane];\n\
+                           if (cycle >= params.data_rows) {{ return; }}\n\
+                           let _meta = preflight_meta[cycle * 4u + 3u];\n\
+                           data_buf[cycle] = data_buf[cycle];\n\
+                         }}\n",
+                        label,
+                    )
+                };
+                let _ = arm_idx;
                 let module = assemble_arm_kernel(delta, &wrapper);
                 let entry = format!("iter6d_g_{}_main", label);
                 arm_modules.push((module, entry, *label));
