@@ -4701,6 +4701,40 @@ impl WebGpuBindingLayout {
     }
 }
 
+/// SP9 corrected (2026-05-15): hash a (label_ptr, entries-shape) tuple
+/// for the bind-group-layout cache. label is a `&'static str` so its
+/// pointer is a stable identity. Entry fields hash to a layout-shape
+/// fingerprint; identical fingerprints share a layout instance.
+fn compute_bind_group_layout_cache_key(
+    label: &'static str,
+    entries: &[WebGpuBindingLayout],
+) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::Hasher;
+    let mut h = DefaultHasher::new();
+    h.write_usize(label.as_ptr() as usize);
+    h.write_usize(label.len());
+    h.write_usize(entries.len());
+    for entry in entries {
+        h.write_u32(entry.binding);
+        // GpuBufferBindingType has 3 variants on this target; encode
+        // explicitly so the hash is stable across rebuilds.
+        let ty_byte: u8 = if entry.ty == web_sys::GpuBufferBindingType::Storage {
+            0
+        } else if entry.ty == web_sys::GpuBufferBindingType::ReadOnlyStorage {
+            1
+        } else if entry.ty == web_sys::GpuBufferBindingType::Uniform {
+            2
+        } else {
+            255
+        };
+        h.write_u8(ty_byte);
+        h.write_u64(entry.min_binding_size);
+        h.write_u8(entry.has_dynamic_offset as u8);
+    }
+    h.finish()
+}
+
 /// A concrete buffer binding used to create a WebGPU bind group.
 pub struct WebGpuBufferBinding<'a> {
     /// The WGSL binding number.
@@ -5005,6 +5039,14 @@ pub struct WebGpuHal {
     // measurable share of the per-dispatch buffer churn.
     ntt_roots_fwd: Option<WebGpuBuffer<BabyBearElem>>,
     ntt_roots_rev: Option<WebGpuBuffer<BabyBearElem>>,
+    // SP9 corrected (2026-05-15): cache `GpuBindGroupLayout` instances by
+    // (label.as_ptr(), entries-shape-hash). 31 `create_bind_group_layout`
+    // sites in this file. Layouts are immutable shape descriptors;
+    // identical shapes can safely share one instance. This is the
+    // foundation for a later pipeline cache (pipelines must reference
+    // the SAME layout INSTANCE as the bind groups dispatched against
+    // them -- see 61d3163c9 failed-experiment ledger).
+    bind_group_layout_cache: RefCell<BTreeMap<u64, web_sys::GpuBindGroupLayout>>,
 }
 
 /// Restores the previous GPU-authoritative mode when dropped.
@@ -5088,6 +5130,7 @@ impl WebGpuHal {
             staged_eval_check_pipelines: RefCell::new(BTreeMap::new()),
             ntt_roots_fwd: None,
             ntt_roots_rev: None,
+            bind_group_layout_cache: RefCell::new(BTreeMap::new()),
         };
         // SP-CR D15 (2026-05-12): allocate the NTT roots-of-unity tables once
         // at HAL init instead of per-dispatch. See struct field comment.
@@ -7848,6 +7891,16 @@ impl WebGpuHal {
         label: &'static str,
         entries: &[WebGpuBindingLayout],
     ) -> Result<web_sys::GpuBindGroupLayout> {
+        // SP9 corrected (2026-05-15): cache layouts by (label_ptr,
+        // entries-shape) so callers that ask for the same layout get
+        // the same JS instance. WebGPU pipelines bind specifically to
+        // the layout INSTANCE they were created with -- a later
+        // pipeline cache requires this invariant to be sound.
+        let cache_key = compute_bind_group_layout_cache_key(label, entries);
+        if let Some(cached) = self.bind_group_layout_cache.borrow().get(&cache_key).cloned() {
+            return Ok(cached);
+        }
+
         let layout_entries = js_sys::Array::new();
         for entry in entries {
             let buffer = web_sys::GpuBufferBindingLayout::new();
@@ -7867,9 +7920,14 @@ impl WebGpuHal {
 
         let desc = web_sys::GpuBindGroupLayoutDescriptor::new(layout_entries.as_ref());
         desc.set_label(label);
-        self.device
+        let layout = self
+            .device
             .create_bind_group_layout(&desc)
-            .map_err(js_error)
+            .map_err(js_error)?;
+        self.bind_group_layout_cache
+            .borrow_mut()
+            .insert(cache_key, layout.clone());
+        Ok(layout)
     }
 
     /// Create a bind group from concrete WebGPU buffers.
