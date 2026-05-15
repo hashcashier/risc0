@@ -160,6 +160,20 @@ fn callees_in<'a>(body: &str, valid: &BTreeSet<&'a str>) -> BTreeSet<&'a str> {
 /// Replace every `<base>(` callsite in `body` (where `<base>` is in
 /// `chunked_bases`) with `<base>Chunk0(`.
 fn rewrite_chunk0(body: &str, chunked_bases: &BTreeSet<&str>) -> String {
+    rewrite_to_chunk(body, &chunked_bases.iter().map(|&b| (b, 0u32)).collect(), 0)
+}
+
+/// SP7 iter 6d-e (2026-05-15): generalized chunk rewrite. For each
+/// callsite to a base in `chunked_max_idx`, append `ChunkK` where
+/// `K = min(target_chunk, max_idx)`. The `max_idx` cap lets bases
+/// with fewer chunks than `target_chunk` clamp to their last
+/// available chunk (e.g., `exec_Sha0` only has Chunk0; rewriting at
+/// `target_chunk=1` still produces `exec_Sha0Chunk0`).
+fn rewrite_to_chunk(
+    body: &str,
+    chunked_max_idx: &BTreeMap<&str, u32>,
+    target_chunk: u32,
+) -> String {
     let bytes = body.as_bytes();
     let mut out = String::with_capacity(body.len());
     let mut i = 0;
@@ -174,9 +188,15 @@ fn rewrite_chunk0(body: &str, chunked_bases: &BTreeSet<&str>) -> String {
             j += 1;
         }
         let ident = &body[i..j];
-        if j < bytes.len() && bytes[j] == b'(' && chunked_bases.contains(ident) {
-            out.push_str(ident);
-            out.push_str("Chunk0");
+        if j < bytes.len() && bytes[j] == b'(' {
+            if let Some(&max_idx) = chunked_max_idx.get(ident) {
+                let k = target_chunk.min(max_idx);
+                out.push_str(ident);
+                out.push_str("Chunk");
+                out.push_str(&k.to_string());
+            } else {
+                out.push_str(ident);
+            }
         } else {
             out.push_str(ident);
         }
@@ -189,13 +209,30 @@ fn rewrite_chunk0(body: &str, chunked_bases: &BTreeSet<&str>) -> String {
 ///
 /// Inputs are the raw artifact strings emitted by gen_zirgen. The
 /// returned module is `prelude + types + layout + (rewritten steps fns
-/// in closure of `entry`)`.
+/// in closure of `entry`)`. Defaults to chunk-0-everywhere rewrite;
+/// use `pruned_module_at_chunk` to select a different chunk index.
 pub fn pruned_module(
     prelude: &str,
     types_inc: &str,
     layout_inc: &str,
     steps: &str,
     entry: &str,
+) -> Result<String, PrunerError> {
+    pruned_module_at_chunk(prelude, types_inc, layout_inc, steps, entry, 0)
+}
+
+/// SP7 iter 6d-e (2026-05-15): like [`pruned_module`] but rewrites
+/// chunked-base callsites to `<base>Chunk{target_chunk}` (clamped to
+/// the highest available chunk index for each base). Used to emit a
+/// per-chunk pruned module so a multi-kernel dispatch can cover all
+/// major-opcode arms.
+pub fn pruned_module_at_chunk(
+    prelude: &str,
+    types_inc: &str,
+    layout_inc: &str,
+    steps: &str,
+    entry: &str,
+    target_chunk: u32,
 ) -> Result<String, PrunerError> {
     let steps_fns = parse_fns(steps);
     let types_fns = parse_fns(types_inc);
@@ -214,8 +251,10 @@ pub fn pruned_module(
         return Err(PrunerError::EntryNotFound(entry.to_string()));
     }
 
-    // A symbol is "chunked" if there's at least one Chunk<N> sibling.
-    let mut chunked_bases: BTreeSet<&str> = BTreeSet::new();
+    // For each chunked base, track the highest chunk index available
+    // so `rewrite_to_chunk` can clamp target_chunk when the base has
+    // fewer chunks than requested.
+    let mut chunked_max_idx: BTreeMap<&str, u32> = BTreeMap::new();
     for &n in &steps_names {
         if let Some(idx) = n.rfind("Chunk") {
             let base = &n[..idx];
@@ -224,19 +263,28 @@ pub fn pruned_module(
                 && suffix.chars().all(|c| c.is_ascii_digit())
                 && steps_names.contains(base)
             {
-                chunked_bases.insert(base);
+                if let Ok(k) = suffix.parse::<u32>() {
+                    chunked_max_idx
+                        .entry(base)
+                        .and_modify(|cur| {
+                            if k > *cur {
+                                *cur = k;
+                            }
+                        })
+                        .or_insert(k);
+                }
             }
         }
     }
 
-    // Rewrite every fn body's callsites to chunked-bases -> chunk0.
+    // Rewrite every fn body's callsites to chunked-bases -> chunk{target_chunk}.
     let rewritten_steps: BTreeMap<&str, String> = steps_fns
         .iter()
-        .map(|f| (f.name, rewrite_chunk0(f.body, &chunked_bases)))
+        .map(|f| (f.name, rewrite_to_chunk(f.body, &chunked_max_idx, target_chunk)))
         .collect();
     let rewritten_types: BTreeMap<&str, String> = types_fns
         .iter()
-        .map(|f| (f.name, rewrite_chunk0(f.body, &chunked_bases)))
+        .map(|f| (f.name, rewrite_to_chunk(f.body, &chunked_max_idx, target_chunk)))
         .collect();
 
     // Build call graph from the rewritten bodies.
