@@ -76,7 +76,10 @@ pub fn set_witgen_gpu_probe_enabled(enabled: bool) {
 #[allow(dead_code)]
 pub(crate) struct WebGpuCircuitHal {
     hal: Rc<WebGpuHal>,
-    witgen_top_chunk0_kernel: RefCell<Option<WebGpuKernel>>,
+    // Wrapped in `Rc<RefCell<...>>` so the spawn_local async prewarm
+    // task can store the compiled kernel here while the
+    // WebGpuCircuitHal instance lives elsewhere as `Rc<WebGpuCircuitHal>`.
+    witgen_top_chunk0_kernel: Rc<RefCell<Option<WebGpuKernel>>>,
 }
 
 /// Concatenation of the vendored exec_TopChunk0 pruned module and the thin
@@ -102,19 +105,89 @@ impl WebGpuCircuitHal {
     pub(crate) fn new(hal: Rc<WebGpuHal>) -> Self {
         Self {
             hal,
-            witgen_top_chunk0_kernel: RefCell::new(None),
+            witgen_top_chunk0_kernel: Rc::new(RefCell::new(None)),
         }
     }
 
-    fn ensure_witgen_top_chunk0_kernel(&self) -> Result<WebGpuKernel> {
-        if let Some(kernel) = self.witgen_top_chunk0_kernel.borrow().as_ref() {
-            return Ok(kernel.clone());
+    /// SP7 iter 6d-d (2026-05-15): kick off the witgen kernel Tint
+    /// compile asynchronously. The browser GPU process compiles in
+    /// parallel with the wasm thread's guest execution + session
+    /// setup; by the time `WebGpuCircuitHal::generate_witness` runs,
+    /// the kernel may already be ready in the shared cache cell.
+    ///
+    /// Called from `segment_prover()` after `WebGpuCircuitHal::new()`.
+    /// Best-effort: failures log via `log_webgpu_metric` and leave the
+    /// cache empty, so `dispatch_witgen_top_chunk0_probe` skips the
+    /// GPU dispatch when the kernel isn't ready and rust_steps remains
+    /// the authority either way.
+    pub fn prewarm_witgen_kernel(&self) {
+        if !WITGEN_GPU_PROBE_ENABLED.load(Ordering::SeqCst) {
+            // Don't spend Tint compile time when no test will use it.
+            return;
         }
-        let _t = WebGpuStageTimer::new("iter6d_c_witgen_compile");
-        // Re-fetched via the HAL's layout cache (SP9 phase 1) so the
-        // pipeline references the same JS instance every dispatch's bind
-        // group is built against. The fixed shape + static label make
-        // every call after the first a cache hit.
+        if self.witgen_top_chunk0_kernel.borrow().is_some() {
+            return; // already compiled (e.g., re-construction)
+        }
+        let hal = self.hal.clone();
+        let cache = self.witgen_top_chunk0_kernel.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let _t = WebGpuStageTimer::new("iter6d_d_witgen_prewarm_async");
+            let layout = match hal.create_bind_group_layout(
+                "iter6d_c_witgen_layout",
+                &[
+                    WebGpuBindingLayout::storage(0, 0),
+                    WebGpuBindingLayout::storage(1, 0),
+                    WebGpuBindingLayout::storage(2, 0),
+                    WebGpuBindingLayout::storage(3, 0),
+                    WebGpuBindingLayout::uniform(4, 32),
+                ],
+            ) {
+                Ok(layout) => layout,
+                Err(err) => {
+                    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                        "iter6d_d_witgen_prewarm_async layout_FAILED err={err:?}"
+                    ));
+                    return;
+                }
+            };
+            match hal
+                .create_compute_kernel_async(
+                    "iter6d_c_witgen_kernel",
+                    WITGEN_TOP_CHUNK0_WGSL,
+                    "exec_top_chunk0_main",
+                    &[layout],
+                )
+                .await
+            {
+                Ok(kernel) => {
+                    *cache.borrow_mut() = Some(kernel);
+                    risc0_zkp::hal::webgpu::log_webgpu_metric(
+                        "iter6d_d_witgen_prewarm_async DONE",
+                    );
+                }
+                Err(err) => {
+                    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                        "iter6d_d_witgen_prewarm_async compile_FAILED err={err:?}"
+                    ));
+                }
+            }
+        });
+    }
+
+    /// Returns the witgen kernel if it has been compiled by the
+    /// iter-6d-d async prewarm task. Returns None if the prewarm task
+    /// hasn't finished yet -- the caller should then skip the GPU
+    /// dispatch and rely on rust_steps. Falls back to a synchronous
+    /// compile only if the kernel cell is still empty at dispatch time
+    /// AND `force_sync` is set (used by direct measurement tests).
+    fn lookup_witgen_top_chunk0_kernel(&self, force_sync: bool) -> Result<Option<WebGpuKernel>> {
+        if let Some(kernel) = self.witgen_top_chunk0_kernel.borrow().as_ref() {
+            return Ok(Some(kernel.clone()));
+        }
+        if !force_sync {
+            return Ok(None);
+        }
+        let _t = WebGpuStageTimer::new("iter6d_c_witgen_compile_sync_fallback");
         let layout = self.hal.create_bind_group_layout(
             "iter6d_c_witgen_layout",
             &[
@@ -132,7 +205,7 @@ impl WebGpuCircuitHal {
             &[layout],
         )?;
         *self.witgen_top_chunk0_kernel.borrow_mut() = Some(kernel.clone());
-        Ok(kernel)
+        Ok(Some(kernel))
     }
 
     fn dispatch_witgen_top_chunk0_probe(
@@ -145,7 +218,15 @@ impl WebGpuCircuitHal {
             "iter6d_c_witgen_probe cycles={}",
             total_cycles
         ));
-        let kernel = self.ensure_witgen_top_chunk0_kernel()?;
+        // iter-6d-d: if the async prewarm has finished, use the cached
+        // kernel; otherwise skip the GPU dispatch this segment (the
+        // probe is measurement-only -- rust_steps is the authority).
+        let Some(kernel) = self.lookup_witgen_top_chunk0_kernel(false)? else {
+            risc0_zkp::hal::webgpu::log_webgpu_metric(
+                "iter6d_c_witgen_probe SKIP kernel_not_ready",
+            );
+            return Ok(());
+        };
         let layout = self.hal.create_bind_group_layout(
             "iter6d_c_witgen_layout",
             &[
@@ -449,6 +530,9 @@ impl SegmentProver for WebGpuSegmentProver {
 
 pub fn segment_prover(hal: Rc<WebGpuHal>) -> Result<Box<dyn SegmentProver>> {
     let circuit_hal = Rc::new(WebGpuCircuitHal::new(hal.clone()));
+    // SP7 iter 6d-d: kick off the witgen kernel Tint compile in the
+    // background. No-op when WITGEN_GPU_PROBE_ENABLED is false.
+    circuit_hal.prewarm_witgen_kernel();
     Ok(Box::new(WebGpuSegmentProver { hal, circuit_hal }))
 }
 

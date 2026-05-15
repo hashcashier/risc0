@@ -109,7 +109,7 @@ zero CPU-only HAL operations.
 | `ecdsa/p256` | 2 segments, 232373 user cycles, 327680 total cycles, 978.112464ms | Passed, same cycles |
 | `groth16-verifier` | 914 segments, 180291710 user cycles, 239370240 total cycles, 462.439128141s | Browser run deferred until remaining eval_check/readback and oversized-buffer bottlenecks are addressed |
 | `xgboost` | 11 segments, 2294908 user cycles, 2883584 total cycles, 5.702544275s | **SP10 refreshed 2026-05-15: 102.7 s wall ≈ 18.0× ratio** (down from 117.92 s/21× at 2026-05-12). Per-segment breakdown: rv32im_witgen ~520 ms (CPU), rv32im_accumulate ~2030 ms (CPU), commit_group+FRI+merkle ~2.5 s (GPU). The CPU witgen+accum buckets (~28 s of the 103 s wall) are the remaining iter-6d-c+iter-6d-deeper levers; recursion lift+join is 46 s. Original SP-CR fix `D14+D15+D16` (Drop + RoU cache) holds. See `evidence/perf/r9-deferred/xgboost.chrome.txt` and `project_sp7_witgen_savings_ceiling`. |
-| `bn254` | 189 segments, 37989643 user cycles, 49348608 total cycles, 100.237964323s | Browser run deferred until remaining eval_check/readback and oversized-buffer bottlenecks are addressed |
+| `bn254` | 189 segments, 37989643 user cycles, 49348608 total cycles, 100.237964323s | **SP10 measured 2026-05-15: 1877.65 s ≈ 18.7× ratio** (gpu_active_ms=1017722, gpu_idle_ratio=0.458). 189-segment fixture; per-segment ~9.9 s wall (vs xgboost ~9.4 s at 11 segments). Evidence: `evidence/perf/r9-deferred/bn254.chrome.txt`. |
 
 ## Internal Parity Matrix
 

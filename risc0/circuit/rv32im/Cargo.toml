@@ -37,6 +37,13 @@ tracing = { version = "0.1", default-features = false, features = [
 bit-vec = "0.8"
 byteorder = { version = "1.5", optional = true }
 cfg-if = { version = "1.0", optional = true }
+
+# SP7 iter-6d-d (2026-05-15): spawn_local lets WebGpuCircuitHal::new
+# kick off the witgen Tint compile in the background via
+# `WebGpuHal::create_compute_kernel_async` so it overlaps with guest
+# execution instead of blocking the first segment's witgen.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wasm-bindgen-futures = { version = "0.4", optional = true }
 enum-map = { version = "2.7.3", optional = true }
 malachite = { version = "0.4.22", optional = true, default-features = false, features = [
   "naturals_and_integers",
@@ -101,5 +108,5 @@ std = [
   "risc0-zkp/std",
   "serde/std",
 ]
-webgpu = ["prove", "risc0-zkp/webgpu"]
+webgpu = ["prove", "risc0-zkp/webgpu", "dep:wasm-bindgen-futures"]
 witgen_debug = []

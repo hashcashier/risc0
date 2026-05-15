@@ -7965,6 +7965,46 @@ impl WebGpuHal {
         entry_point: &str,
         bind_group_layouts: &[web_sys::GpuBindGroupLayout],
     ) -> Result<WebGpuKernel> {
+        let pipeline_desc = self.build_compute_pipeline_desc(label, wgsl, entry_point, bind_group_layouts);
+        Ok(WebGpuKernel {
+            pipeline: self.device.create_compute_pipeline(&pipeline_desc),
+        })
+    }
+
+    /// SP7 iter 6d-d (2026-05-15): async-compile the same kernel via
+    /// `device.createComputePipelineAsync()`. The Tint compile runs in
+    /// the browser GPU process while the wasm thread does other work
+    /// (guest execution, session setup); when the returned Future
+    /// resolves, the kernel is ready to dispatch. Useful for the
+    /// iter-6d-c probe so the ~60 s exec_TopChunk0 compile overlaps with
+    /// xgboost's segment-level prover work instead of blocking the
+    /// first witgen call.
+    pub async fn create_compute_kernel_async(
+        &self,
+        label: &'static str,
+        wgsl: &str,
+        entry_point: &str,
+        bind_group_layouts: &[web_sys::GpuBindGroupLayout],
+    ) -> Result<WebGpuKernel> {
+        let pipeline_desc = self.build_compute_pipeline_desc(label, wgsl, entry_point, bind_group_layouts);
+        let promise = self.device.create_compute_pipeline_async(&pipeline_desc);
+        let future = wasm_bindgen_futures::JsFuture::from(promise);
+        let pipeline_value = future
+            .await
+            .map_err(|err| anyhow::anyhow!("createComputePipelineAsync rejected: {err:?}"))?;
+        let pipeline: web_sys::GpuComputePipeline = pipeline_value
+            .dyn_into()
+            .map_err(|_| anyhow::anyhow!("createComputePipelineAsync resolved to non-pipeline value"))?;
+        Ok(WebGpuKernel { pipeline })
+    }
+
+    fn build_compute_pipeline_desc(
+        &self,
+        label: &'static str,
+        wgsl: &str,
+        entry_point: &str,
+        bind_group_layouts: &[web_sys::GpuBindGroupLayout],
+    ) -> web_sys::GpuComputePipelineDescriptor {
         let shader_desc = web_sys::GpuShaderModuleDescriptor::new(wgsl);
         shader_desc.set_label(label);
         let shader = self.device.create_shader_module(&shader_desc);
@@ -7982,10 +8022,7 @@ impl WebGpuHal {
 
         let pipeline_desc = web_sys::GpuComputePipelineDescriptor::new(&pipeline_layout, &stage);
         pipeline_desc.set_label(label);
-
-        Ok(WebGpuKernel {
-            pipeline: self.device.create_compute_pipeline(&pipeline_desc),
-        })
+        pipeline_desc
     }
 
     /// Dispatch a compute kernel once and submit the command buffer.
