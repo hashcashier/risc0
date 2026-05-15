@@ -2859,6 +2859,46 @@ fn witgen_top_accum(@builtin(global_invocation_id) gid: vec3<u32>) {
         ));
     }
 
+    /// SP7 iter 6d-c/d -- end-to-end check: the probe-mode GPU witgen
+    /// path runs alongside rust_steps on xgboost, with the iter-6d-d
+    /// async Tint prewarm overlapping guest execution. Measures the
+    /// `iter6d_d_witgen_prewarm_async` and `iter6d_c_witgen_probe`
+    /// stage timers so future sessions can reason about when the
+    /// kernel becomes ready vs. when each segment dispatches.
+    ///
+    /// Uses xgboost (multi-segment) so by segment N the prewarm has
+    /// had time to finish; the probe then dispatches on segments
+    /// N..=11. If the kernel isn't ready by segment N, the probe logs
+    /// `SKIP kernel_not_ready` for that segment.
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_c_probe_xgboost() {
+        use forust_ml::GradientBooster;
+        use risc0_circuit_rv32im::prove::set_witgen_gpu_probe_enabled;
+        use xgboost_methods::{XGBOOST_ELF, XGBOOST_ID};
+
+        console_error_panic_hook::set_once();
+        risc0_zkp::hal::webgpu::log_webgpu_metric("iter6d_c probe=on fixture=xgboost");
+        set_witgen_gpu_probe_enabled(true);
+
+        let prover = init_prover().await;
+        let model: GradientBooster =
+            serde_json::from_str(include_str!("../../xgboost/res/trained_model.json"))
+                .unwrap();
+        let model_bytes = rmp_serde::to_vec(&model).unwrap();
+        let data: Vec<f64> = vec![18511304.0, 117.0];
+        let env = ExecutorEnv::builder()
+            .write(&data)
+            .unwrap()
+            .write(&model_bytes)
+            .unwrap()
+            .build()
+            .unwrap();
+        let receipt =
+            prove_succinct_async(prover.as_ref(), "xgboost", env, XGBOOST_ELF, XGBOOST_ID).await;
+        assert_eq!(receipt.journal.decode::<f64>().unwrap(), 30.528042544062632);
+        set_witgen_gpu_probe_enabled(false);
+    }
+
     /// SP7 iter 6d-a -- end-to-end Tint compile check for the vendored
     /// `exec_TopChunk0` pruned module + @compute wrapper.
     ///
