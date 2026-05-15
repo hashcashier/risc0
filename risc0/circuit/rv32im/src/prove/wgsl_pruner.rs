@@ -104,12 +104,58 @@ fn exec_top_chunk1_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 pub const WITGEN_BASELINE_WGSL: &str =
     include_str!("../zirgen/witgen_baseline.wgsl");
 
-/// SP7 iter 6d-g: sample per-arm delta (exec_Sha0Chunk0 closure
-/// only, no prelude/types/layout). ~47 KB. Demonstrates the
-/// delta-vendoring pattern; full iter-6d-g lands ~26 such deltas
-/// covering all major opcode arms of TopChunk0+1.
+/// SP7 iter 6d-g: per-major-arm deltas. Each contains ONLY the
+/// steps fns reachable from one major opcode arm's sub-fn (Chunk0
+/// variant). Total ~38 KB average × 13 arms = ~488 KB vendored.
+/// All deltas paired with [`WITGEN_BASELINE_WGSL`] at runtime via
+/// [`assemble_arm_kernel`].
 pub const EXEC_SHA0_CHUNK0_DELTA_WGSL: &str =
     include_str!("../zirgen/exec_sha0_chunk0_delta.wgsl");
+pub const EXEC_CONTROL0_CHUNK0_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_control0_chunk0_delta.wgsl");
+pub const EXEC_MEM0_CHUNK0_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_mem0_chunk0_delta.wgsl");
+pub const EXEC_MEM1_CHUNK0_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_mem1_chunk0_delta.wgsl");
+pub const EXEC_MISC0_CHUNK0_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_misc0_chunk0_delta.wgsl");
+pub const EXEC_MISC1_CHUNK0_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_misc1_chunk0_delta.wgsl");
+pub const EXEC_MISC2_CHUNK0_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_misc2_chunk0_delta.wgsl");
+pub const EXEC_MUL0_CHUNK0_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_mul0_chunk0_delta.wgsl");
+pub const EXEC_DIV0_CHUNK0_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_div0_chunk0_delta.wgsl");
+pub const EXEC_BIGINT0_CHUNK0_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_bigint0_chunk0_delta.wgsl");
+pub const EXEC_ECALL0_CHUNK0_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_ecall0_chunk0_delta.wgsl");
+pub const EXEC_POSEIDON0_CHUNK0_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_poseidon0_chunk0_delta.wgsl");
+pub const EXEC_POSEIDON1_CHUNK0_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_poseidon1_chunk0_delta.wgsl");
+
+/// SP7 iter 6d-g: table of (label, delta WGSL, sub-fn name) tuples
+/// for all 13 TopChunk0 major opcode arms. Used by the HAL prewarm
+/// to fire `N` async create_compute_pipeline_async calls in
+/// parallel and by the dispatch path to look up the right kernel
+/// per cycle's major opcode.
+pub const TOP_CHUNK0_ARM_DELTAS: &[(&str, &str, &str)] = &[
+    ("control0_chunk0", EXEC_CONTROL0_CHUNK0_DELTA_WGSL, "exec_Control0Chunk0"),
+    ("mem0_chunk0", EXEC_MEM0_CHUNK0_DELTA_WGSL, "exec_Mem0Chunk0"),
+    ("mem1_chunk0", EXEC_MEM1_CHUNK0_DELTA_WGSL, "exec_Mem1Chunk0"),
+    ("misc0_chunk0", EXEC_MISC0_CHUNK0_DELTA_WGSL, "exec_Misc0Chunk0"),
+    ("misc1_chunk0", EXEC_MISC1_CHUNK0_DELTA_WGSL, "exec_Misc1Chunk0"),
+    ("misc2_chunk0", EXEC_MISC2_CHUNK0_DELTA_WGSL, "exec_Misc2Chunk0"),
+    ("mul0_chunk0", EXEC_MUL0_CHUNK0_DELTA_WGSL, "exec_Mul0Chunk0"),
+    ("div0_chunk0", EXEC_DIV0_CHUNK0_DELTA_WGSL, "exec_Div0Chunk0"),
+    ("sha0_chunk0", EXEC_SHA0_CHUNK0_DELTA_WGSL, "exec_Sha0Chunk0"),
+    ("bigint0_chunk0", EXEC_BIGINT0_CHUNK0_DELTA_WGSL, "exec_BigInt0Chunk0"),
+    ("ecall0_chunk0", EXEC_ECALL0_CHUNK0_DELTA_WGSL, "exec_ECall0Chunk0"),
+    ("poseidon0_chunk0", EXEC_POSEIDON0_CHUNK0_DELTA_WGSL, "exec_Poseidon0Chunk0"),
+    ("poseidon1_chunk0", EXEC_POSEIDON1_CHUNK0_DELTA_WGSL, "exec_Poseidon1Chunk0"),
+];
 
 /// SP7 iter 6d-g: assemble a per-arm full kernel by concatenating
 /// baseline + delta + the supplied @compute wrapper. The result is
