@@ -118,18 +118,25 @@ fn build_preflight_meta(preflight: &PreflightTrace) -> Vec<u32> {
     out
 }
 
-/// SP7 iter 6d-g step 6.2.1b (2026-05-16): synthesize the Misc0
-/// per-arm @compute wrapper that replicates exec_TopChunk0's logic
-/// to construct InstInputStruct from preflight + shadow-init'd cells
-/// and then calls exec_Misc0Chunk0 directly. Replaces the no-op
+/// SP7 iter 6d-g step 6.2.1c (2026-05-16): synthesize per-arm
+/// @compute wrapper that replicates `exec_TopChunk0`'s logic to
+/// construct `InstInputStruct` from preflight + shadow-init'd cells
+/// and then calls the arm sub-fn directly. Replaces the no-op
 /// `data_buf[cycle] = data_buf[cycle]` placeholder with the real
 /// witgen call path.
 ///
-/// Mirrors exec_TopChunk0 lines 16934-16979 but bypasses externs by
-/// reading major/minor from preflight_meta. The 4 inter-cycle reads
-/// (nextPcLow/High, nextState_0, nextMachineMode) hit cells that were
-/// shadow-init'd in `dispatch_shadow_init`.
-fn misc0_synth_wrapper(label: &str, sub_fn: &str) -> String {
+/// Generalized over (arm_idx, sub_fn). For ECall0 (arm_idx 8), the
+/// sub-fn signature has an extra `global: u32` arg. All other arms
+/// use the standard 3-arg signature.
+///
+/// Only safe for the 8 zero-back_Reg arms identified in the
+/// 2026-05-16 audit (MISC0/1/2, MUL0, DIV0, MEM0/1, ECALL0). Arms
+/// with internal back_Reg deps (CONTROL0, POSEIDON0/1, SHA0, BIGINT0)
+/// would read uninitialized cells and produce garbage; keep them
+/// no-op until a deeper materialization scheme lands.
+fn synth_arm_wrapper(label: &str, sub_fn: &str, arm_idx: usize) -> String {
+    // ECall0 (index 8) takes an extra `global: u32` arg.
+    let extra_arg = if arm_idx == 8 { ", buf_global" } else { "" };
     format!(
         "@group(0) @binding(5) var<storage, read> cycle_list: array<u32>;\n\
          @group(0) @binding(6) var<storage, read> preflight_meta: array<u32>;\n\
@@ -141,16 +148,13 @@ fn misc0_synth_wrapper(label: &str, sub_fn: &str) -> String {
            cycle = cycle_list[lane];\n\
            if (cycle >= params.data_rows) {{ return; }}\n\
            let bound_top = BoundLayout_TopLayout(kLayout_Top, buf_data);\n\
-           // Pull major/minor from preflight_meta (packed: hi=major, lo=minor).\n\
            let base = cycle * 4u;\n\
            let packed = preflight_meta[base + 3u];\n\
            let major_v = encode(packed >> 16u);\n\
            let minor_v = encode(packed & 0xFFFFu);\n\
-           // Recompute isFirstCycle for this cycle: 1 at cycle 0, 0 else.\n\
            let is_first_v = select(0u, encode(1u), cycle == 0u);\n\
            let x3 = exec_NondetBitReg(is_first_v, lookup_TopLayout_isFirstCycle(bound_top));\n\
            let x4 = sub(MONT_ONE, x3._super);\n\
-           // back_Reg(1, ...) on shadow-init'd cells.\n\
            let x9 = back_Reg(1, lookup_TopLayout_nextPcLow(bound_top));\n\
            let x10 = back_Reg(1, lookup_TopLayout_nextPcHigh(bound_top));\n\
            let x11 = back_Reg(1, lookup_TopLayout_nextState_0(bound_top));\n\
@@ -165,11 +169,22 @@ fn misc0_synth_wrapper(label: &str, sub_fn: &str) -> String {
              lookup_TopLayout_instInput(bound_top)\n\
            );\n\
            let x20 = back_Reg(0, lookup_TopCycleLayout__super(lookup_TopLayout_cycleRedef(bound_top)));\n\
-           let _result = {sub_fn}(x20, x17, lookup_TopInstResultLayout_arm0(lookup_TopLayout_instResult(bound_top)));\n\
+           let _result = {sub_fn}(x20, x17, lookup_TopInstResultLayout_arm{arm_idx}(lookup_TopLayout_instResult(bound_top)){extra_arg});\n\
          }}\n",
         label = label,
         sub_fn = sub_fn,
+        arm_idx = arm_idx,
+        extra_arg = extra_arg,
     )
+}
+
+/// SP7 iter 6d-g step 6.2.1c: arms with zero internal back_Reg calls
+/// per the 2026-05-16 audit. Safe to GPU-witgen-replace given outer
+/// shadow-init. Indexed by major opcode.
+const ZERO_BACK_REG_ARMS: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 8];
+
+fn is_zero_back_reg_arm(arm_idx: usize) -> bool {
+    ZERO_BACK_REG_ARMS.contains(&arm_idx)
 }
 
 #[allow(dead_code)]
@@ -357,14 +372,13 @@ impl WebGpuCircuitHal {
             let mut arm_modules: Vec<(String, String, &str)> =
                 Vec::with_capacity(TOP_CHUNK0_ARM_DELTAS.len());
             for (arm_idx, (label, delta, sub_fn)) in TOP_CHUNK0_ARM_DELTAS.iter().enumerate() {
-                // SP7 iter 6d-g step 6.2.1b: pilot real InstInputStruct
-                // synthesis for Misc0 only (arm_idx 0). Other arms keep
-                // the no-op body to isolate the Misc0 change. If Misc0
-                // Tint-compiles + dispatches successfully, replicate to
-                // the other 7 zero-back_Reg arms (MISC1/2, MUL0, DIV0,
-                // MEM0/1, ECALL0).
-                let wrapper = if arm_idx == 0 {
-                    misc0_synth_wrapper(label, sub_fn)
+                // SP7 iter 6d-g step 6.2.1c: synthesize real per-arm
+                // wrapper for the 8 zero-back_Reg arms; keep no-op for
+                // the 5 inter-cycle-heavy arms (CONTROL0, BIGINT0,
+                // POSEIDON0/1, SHA0) until a deeper materialization
+                // scheme lands.
+                let wrapper = if is_zero_back_reg_arm(arm_idx) {
+                    synth_arm_wrapper(label, sub_fn, arm_idx)
                 } else {
                     format!(
                         "@group(0) @binding(5) var<storage, read> cycle_list: array<u32>;\n\
@@ -382,7 +396,6 @@ impl WebGpuCircuitHal {
                         label,
                     )
                 };
-                let _ = arm_idx;
                 let module = assemble_arm_kernel(delta, &wrapper);
                 let entry = format!("iter6d_g_{}_main", label);
                 arm_modules.push((module, entry, *label));
