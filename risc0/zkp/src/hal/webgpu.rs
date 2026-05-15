@@ -8368,9 +8368,12 @@ impl WebGpuHal {
         elems.sync_cpu_to_gpu(self)?;
 
         let byte_len = byte_len_for::<BabyBearElem>(elems.size());
+        // SP9 phase 2 take 3 (2026-05-15): min_binding_size=0 to keep the
+        // layout shape stable across byte_len-variant calls; the runtime
+        // bind-validation still uses the actual buffer size at dispatch.
         let layout = self.create_bind_group_layout(
             "webgpu_zeroize_elem_layout",
-            &[WebGpuBindingLayout::storage(0, byte_len)],
+            &[WebGpuBindingLayout::storage(0, 0)],
         )?;
         let kernel = self.create_compute_kernel(
             "webgpu_zeroize_elem",
@@ -8427,12 +8430,13 @@ impl WebGpuHal {
         input2.sync_cpu_to_gpu(self)?;
 
         let byte_len = byte_len_for::<BabyBearElem>(output.size());
+        // SP9 phase 2 take 3: stable layout shape via min_binding_size=0.
         let layout = self.create_bind_group_layout(
             "webgpu_eltwise_add_elem_layout",
             &[
-                WebGpuBindingLayout::storage(0, byte_len),
-                WebGpuBindingLayout::read_only_storage(1, byte_len),
-                WebGpuBindingLayout::read_only_storage(2, byte_len),
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::read_only_storage(1, 0),
+                WebGpuBindingLayout::read_only_storage(2, 0),
             ],
         )?;
         let kernel = self.create_compute_kernel(
@@ -8514,11 +8518,12 @@ impl WebGpuHal {
 
         let output_byte_len = byte_len_for::<BabyBearElem>(output.size());
         let input_byte_len = byte_len_for::<BabyBearExtElem>(input.size());
+        // SP9 phase 2 take 3: stable layout shape via min_binding_size=0.
         let layout = self.create_bind_group_layout(
             "webgpu_eltwise_sum_extelem_layout",
             &[
-                WebGpuBindingLayout::storage(0, output_byte_len),
-                WebGpuBindingLayout::read_only_storage(1, input_byte_len),
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::read_only_storage(1, 0),
                 WebGpuBindingLayout::uniform(2, 16),
             ],
         )?;
@@ -8614,11 +8619,12 @@ impl WebGpuHal {
 
         let into_byte_len = byte_len_for::<BabyBearElem>(into.size());
         let from_byte_len = byte_len_for::<BabyBearElem>(from.len());
+        // SP9 phase 2 take 3: stable layout shape via min_binding_size=0.
         let layout = self.create_bind_group_layout(
             "webgpu_eltwise_copy_elem_slice_layout",
             &[
-                WebGpuBindingLayout::storage(0, into_byte_len),
-                WebGpuBindingLayout::read_only_storage(1, from_byte_len),
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::read_only_storage(1, 0),
                 WebGpuBindingLayout::uniform(2, 32),
             ],
         )?;
@@ -8718,12 +8724,13 @@ impl WebGpuHal {
         let into_byte_len = byte_len_for::<BabyBearElem>(into.size());
         let offsets_byte_len = byte_len_for::<u32>(offsets.size());
         let values_byte_len = byte_len_for::<BabyBearElem>(values.size());
+        // SP9 phase 2 take 3: stable layout shape via min_binding_size=0.
         let layout = self.create_bind_group_layout(
             "webgpu_scatter_layout",
             &[
-                WebGpuBindingLayout::storage(0, into_byte_len),
-                WebGpuBindingLayout::read_only_storage(1, offsets_byte_len),
-                WebGpuBindingLayout::read_only_storage(2, values_byte_len),
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::read_only_storage(1, 0),
+                WebGpuBindingLayout::read_only_storage(2, 0),
                 WebGpuBindingLayout::uniform(3, 16),
             ],
         )?;
@@ -9086,9 +9093,10 @@ impl WebGpuHal {
         io.sync_cpu_to_gpu(self)?;
 
         let byte_len = byte_len_for::<BabyBearExtElem>(io.size());
+        // SP9 phase 2 take 3: stable layout shape via min_binding_size=0.
         let layout = self.create_bind_group_layout(
             "webgpu_prefix_products_extelem_layout",
-            &[WebGpuBindingLayout::storage(0, byte_len)],
+            &[WebGpuBindingLayout::storage(0, 0)],
         )?;
         let kernel = self.create_compute_kernel(
             "webgpu_prefix_products_extelem",
