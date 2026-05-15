@@ -9951,6 +9951,24 @@ impl WebGpuHal {
         let workgroups = u32::try_from(total_pairs)
             .expect("WebGPU NTT total pairs exceeds u32")
             .div_ceil(256);
+        // SP-submission iter 1 (2026-05-15): batch all NTT step
+        // dispatches into ONE command encoder + submit instead of
+        // per-step submit. Each NTT level reads its predecessor's
+        // output; within a single compute pass, dispatches execute
+        // serially on the queue so write-after-write ordering is
+        // preserved without inserting barriers. For xgboost po2_18
+        // this collapses 16 GPU-process IPC round-trips per NTT call
+        // into 1. NTT runs many times per segment, so the cumulative
+        // submission-overhead savings stack.
+        //
+        // Param + bind-group buffers are allocated up-front and held
+        // for the duration of the pass; the pass borrows them via the
+        // bind groups, and the JS GC keeps them alive while the pass
+        // is encoded.
+        let mut params_bufs: Vec<web_sys::GpuBuffer> =
+            Vec::with_capacity((n_bits - expand_bits) as usize);
+        let mut bind_groups: Vec<web_sys::GpuBindGroup> =
+            Vec::with_capacity((n_bits - expand_bits) as usize);
         for s_bits in 1 + expand_bits..=n_bits {
             let params = [
                 u32::try_from(n_bits).expect("WebGPU NTT n_bits exceeds u32"),
@@ -9962,8 +9980,11 @@ impl WebGpuHal {
                 0,
                 0,
             ];
-            let params = self
+            let params_buf = self
                 .create_uniform_buffer("webgpu_ntt_step_params", bytemuck::cast_slice(&params))?;
+            params_bufs.push(params_buf);
+        }
+        for params_buf in &params_bufs {
             let bind_group = self.create_bind_group(
                 "webgpu_ntt_step_bind_group",
                 &ntt_layout,
@@ -9972,14 +9993,37 @@ impl WebGpuHal {
                     WebGpuBufferBinding::new(1, roots_gpu),
                     WebGpuBufferBinding {
                         binding: 2,
-                        buffer: &params,
+                        buffer: params_buf,
                         offset: 0,
                         size: Some(32),
                     },
                 ],
             )?;
-            self.dispatch_compute_1d(&ntt_kernel, &bind_group, workgroups);
+            bind_groups.push(bind_group);
         }
+        let (workgroups_x, workgroups_y) = if workgroups <= WEBGPU_MAX_WORKGROUPS_PER_DIMENSION {
+            (workgroups, 1)
+        } else {
+            let workgroups_y = workgroups.div_ceil(WEBGPU_MAX_WORKGROUPS_PER_DIMENSION);
+            assert!(
+                workgroups_y <= WEBGPU_MAX_WORKGROUPS_PER_DIMENSION,
+                "WebGPU NTT 1D dispatch exceeds portable 2D workgroup capacity"
+            );
+            (WEBGPU_MAX_WORKGROUPS_PER_DIMENSION, workgroups_y)
+        };
+        let encoder = self.device.create_command_encoder();
+        let pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&ntt_kernel.pipeline);
+        for bind_group in &bind_groups {
+            pass.set_bind_group(0, Some(bind_group));
+            pass.dispatch_workgroups_with_workgroup_count_y_and_workgroup_count_z(
+                workgroups_x,
+                workgroups_y,
+                1,
+            );
+        }
+        pass.end();
+        self.submit(encoder.finish());
         Ok(true)
     }
 
