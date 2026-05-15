@@ -343,6 +343,103 @@ impl WebGpuCircuitHal {
         WITGEN_TOP_CHUNK1_KERNEL.with(|cell| cell.borrow().clone())
     }
 
+    /// SP7 iter 6d-g step 6 (partial -- dispatch infrastructure only):
+    /// build 13 per-arm cycle-list buffers from preflight and dispatch
+    /// each prewarmed per-arm kernel over its cycle subset. Kernels
+    /// are still no-ops (data_buf[cycle] = data_buf[cycle]) per
+    /// iter-6d-g step 4, so this contributes no perf yet -- but
+    /// validates that the multi-kernel dispatch path runs cleanly in
+    /// the prove pipeline.
+    ///
+    /// Future iter-6d-g step 6 work: replace no-op wrappers with
+    /// arm-specific InstInputStruct + BoundLayout construction +
+    /// sub-fn call. Then rust_steps::step_exec can be short-circuited
+    /// for cycles covered by GPU dispatch.
+    fn dispatch_witgen_per_arm_probe(
+        &self,
+        data: &MetaBuffer<WebGpuHal>,
+        preflight: &PreflightTrace,
+    ) -> Result<()> {
+        use crate::prove::wgsl_pruner::TOP_CHUNK0_ARM_DELTAS;
+        // Build per-arm cycle lists from preflight (CPU-side, fast).
+        let mut per_arm_cycles: Vec<Vec<u32>> =
+            vec![Vec::new(); TOP_CHUNK0_ARM_DELTAS.len()];
+        for (cycle_idx, cycle) in preflight.cycles.iter().enumerate() {
+            let arm = cycle.major as usize;
+            if arm < per_arm_cycles.len() {
+                per_arm_cycles[arm].push(cycle_idx as u32);
+            }
+        }
+        let _t = WebGpuStageTimer::new(format!(
+            "iter6d_g_per_arm_dispatch arms={} total_cycles={}",
+            TOP_CHUNK0_ARM_DELTAS.len(),
+            preflight.cycles.len(),
+        ));
+        let layout = self.hal.create_bind_group_layout(
+            "iter6d_g_arm_layout",
+            &[
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::storage(1, 0),
+                WebGpuBindingLayout::storage(2, 0),
+                WebGpuBindingLayout::storage(3, 0),
+                WebGpuBindingLayout::uniform(4, 32),
+            ],
+        )?;
+        let total_cycles = data.rows as u32;
+        let placeholder_bytes: u64 = 256;
+        let accum_buf = self
+            .hal
+            .create_storage_buffer("iter6d_g_arm_accum_ph", placeholder_bytes)?;
+        let mix_buf = self
+            .hal
+            .create_storage_buffer("iter6d_g_arm_mix_ph", placeholder_bytes)?;
+        let params: [u32; 8] = [total_cycles, 1, total_cycles, 1, 0, 0, 0, 0];
+        let params_buf = self.hal.create_uniform_buffer(
+            "iter6d_g_arm_params_ph",
+            bytemuck::cast_slice(&params),
+        )?;
+        let data_gpu = data
+            .buf
+            .raw_buffer()
+            .ok_or_else(|| anyhow::anyhow!("iter-6d-g: data missing GPU storage"))?;
+        let global_gpu = data
+            .buf
+            .raw_buffer()
+            .ok_or_else(|| anyhow::anyhow!("iter-6d-g: global missing GPU storage"))?;
+        let bind_group = self.hal.create_bind_group(
+            "iter6d_g_arm_bg",
+            &layout,
+            &[
+                WebGpuBufferBinding::new(0, data_gpu),
+                WebGpuBufferBinding::new(1, global_gpu),
+                WebGpuBufferBinding::new(2, &accum_buf),
+                WebGpuBufferBinding::new(3, &mix_buf),
+                WebGpuBufferBinding::new(4, &params_buf),
+            ],
+        )?;
+        let mut dispatched = 0usize;
+        let mut skipped = 0usize;
+        for (arm_idx, (label, _, _)) in TOP_CHUNK0_ARM_DELTAS.iter().enumerate() {
+            let cycle_count = per_arm_cycles[arm_idx].len();
+            if cycle_count == 0 {
+                continue;
+            }
+            let kernel = WITGEN_ARM_KERNELS.with(|cell| cell.borrow().get(*label).cloned());
+            let Some(kernel) = kernel else {
+                skipped += 1;
+                continue;
+            };
+            let workgroups = (cycle_count as u32).div_ceil(64);
+            self.hal.dispatch_compute_1d(&kernel, &bind_group, workgroups);
+            dispatched += 1;
+        }
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "iter6d_g_per_arm_dispatch dispatched={} skipped={}",
+            dispatched, skipped,
+        ));
+        Ok(())
+    }
+
     fn dispatch_witgen_top_chunk0_probe(
         &self,
         data: &MetaBuffer<WebGpuHal>,
@@ -475,6 +572,14 @@ impl CircuitWitnessGenerator<WebGpuHal> for WebGpuCircuitHal {
             if let Err(err) = self.dispatch_witgen_top_chunk0_probe(data, global, total_cycles) {
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
                     "iter6d_c_witgen_probe FAILED err={err:?}"
+                ));
+            }
+            // iter-6d-g step 6 (partial): per-arm dispatch validates
+            // the multi-kernel dispatch path works in the prove
+            // pipeline. Kernels are no-ops so no perf yet.
+            if let Err(err) = self.dispatch_witgen_per_arm_probe(data, preflight) {
+                risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                    "iter6d_g_per_arm_dispatch FAILED err={err:?}"
                 ));
             }
         }
