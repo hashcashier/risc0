@@ -250,6 +250,14 @@ impl WebGpuCircuitHal {
             use crate::prove::wgsl_pruner::{
                 assemble_arm_kernel, TOP_CHUNK0_ARM_DELTAS,
             };
+            // SP7 iter 6d-g step 6.1: per-arm layout adds binding 5
+            // `cycle_list: array<u32>`. The wrapper reads its assigned
+            // cycle index from this list rather than `gid.x` directly,
+            // so dispatching `N` workgroups iterates only over the
+            // cycles whose major opcode matches this arm. Future steps
+            // wire real witgen output through synthesized InstInputStruct;
+            // for now the kernel body remains a no-op so rust_steps
+            // remains authoritative.
             let arm_layout = match hal.create_bind_group_layout(
                 "iter6d_g_arm_layout",
                 &[
@@ -258,6 +266,7 @@ impl WebGpuCircuitHal {
                     WebGpuBindingLayout::storage(2, 0),
                     WebGpuBindingLayout::storage(3, 0),
                     WebGpuBindingLayout::uniform(4, 32),
+                    WebGpuBindingLayout::storage(5, 0),
                 ],
             ) {
                 Ok(l) => l,
@@ -273,9 +282,13 @@ impl WebGpuCircuitHal {
                 Vec::with_capacity(TOP_CHUNK0_ARM_DELTAS.len());
             for (label, delta, _sub_fn) in TOP_CHUNK0_ARM_DELTAS {
                 let wrapper = format!(
-                    "@compute @workgroup_size(64)\n\
+                    "@group(0) @binding(5) var<storage, read> cycle_list: array<u32>;\n\
+                     \n\
+                     @compute @workgroup_size(64)\n\
                      fn iter6d_g_{}_main(@builtin(global_invocation_id) gid: vec3<u32>) {{\n\
-                       cycle = gid.x;\n\
+                       let lane = gid.x;\n\
+                       if (lane >= arrayLength(&cycle_list)) {{ return; }}\n\
+                       cycle = cycle_list[lane];\n\
                        if (cycle >= params.data_rows) {{ return; }}\n\
                        data_buf[cycle] = data_buf[cycle];\n\
                      }}\n",
@@ -375,6 +388,10 @@ impl WebGpuCircuitHal {
             TOP_CHUNK0_ARM_DELTAS.len(),
             preflight.cycles.len(),
         ));
+        // iter-6d-g step 6.1: layout now has binding 5 (cycle_list) so
+        // each per-arm dispatch reads its assigned cycle indices from
+        // a per-arm GPU buffer rather than using gid.x as the cycle
+        // directly.
         let layout = self.hal.create_bind_group_layout(
             "iter6d_g_arm_layout",
             &[
@@ -383,6 +400,7 @@ impl WebGpuCircuitHal {
                 WebGpuBindingLayout::storage(2, 0),
                 WebGpuBindingLayout::storage(3, 0),
                 WebGpuBindingLayout::uniform(4, 32),
+                WebGpuBindingLayout::storage(5, 0),
             ],
         )?;
         let total_cycles = data.rows as u32;
@@ -406,19 +424,13 @@ impl WebGpuCircuitHal {
             .buf
             .raw_buffer()
             .ok_or_else(|| anyhow::anyhow!("iter-6d-g: global missing GPU storage"))?;
-        let bind_group = self.hal.create_bind_group(
-            "iter6d_g_arm_bg",
-            &layout,
-            &[
-                WebGpuBufferBinding::new(0, data_gpu),
-                WebGpuBufferBinding::new(1, global_gpu),
-                WebGpuBufferBinding::new(2, &accum_buf),
-                WebGpuBufferBinding::new(3, &mix_buf),
-                WebGpuBufferBinding::new(4, &params_buf),
-            ],
-        )?;
         let mut dispatched = 0usize;
         let mut skipped = 0usize;
+        // Keep per-arm cycle_list buffers alive across the dispatch
+        // loop so the GPU encoder can reference them when the queue
+        // flushes at end-of-scope.
+        let mut cycle_list_buffers: Vec<_> = Vec::with_capacity(TOP_CHUNK0_ARM_DELTAS.len());
+        let mut bind_groups: Vec<_> = Vec::with_capacity(TOP_CHUNK0_ARM_DELTAS.len());
         for (arm_idx, (label, _, _)) in TOP_CHUNK0_ARM_DELTAS.iter().enumerate() {
             let cycle_count = per_arm_cycles[arm_idx].len();
             if cycle_count == 0 {
@@ -429,14 +441,43 @@ impl WebGpuCircuitHal {
                 skipped += 1;
                 continue;
             };
+            // Per-arm cycle list upload (storage buffer + queue write).
+            let cycle_bytes: &[u8] = bytemuck::cast_slice(per_arm_cycles[arm_idx].as_slice());
+            let cycle_buf = self.hal.create_storage_buffer(
+                "iter6d_g_arm_cycle_list",
+                cycle_bytes.len() as u64,
+            )?;
+            self.hal.write_buffer_named(
+                &cycle_buf,
+                "iter6d_g_arm_cycle_list",
+                0,
+                cycle_bytes,
+            )?;
+            let bind_group = self.hal.create_bind_group(
+                "iter6d_g_arm_bg",
+                &layout,
+                &[
+                    WebGpuBufferBinding::new(0, data_gpu),
+                    WebGpuBufferBinding::new(1, global_gpu),
+                    WebGpuBufferBinding::new(2, &accum_buf),
+                    WebGpuBufferBinding::new(3, &mix_buf),
+                    WebGpuBufferBinding::new(4, &params_buf),
+                    WebGpuBufferBinding::new(5, &cycle_buf),
+                ],
+            )?;
             let workgroups = (cycle_count as u32).div_ceil(64);
             self.hal.dispatch_compute_1d(&kernel, &bind_group, workgroups);
+            cycle_list_buffers.push(cycle_buf);
+            bind_groups.push(bind_group);
             dispatched += 1;
         }
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
             "iter6d_g_per_arm_dispatch dispatched={} skipped={}",
             dispatched, skipped,
         ));
+        // Keep buffers + bind groups alive until dispatch completes.
+        drop(bind_groups);
+        drop(cycle_list_buffers);
         Ok(())
     }
 
