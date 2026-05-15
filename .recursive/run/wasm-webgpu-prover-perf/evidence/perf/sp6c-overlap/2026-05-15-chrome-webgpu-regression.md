@@ -63,26 +63,44 @@ System state:
 - Kernel: `6.17.0-23-generic`
 - RTX 5090 (visible to nvidia-smi, 32607 MiB available)
 
-## Resolution paths (REQUIRE USER ACTION)
+## RESOLUTION (2026-05-15, commit 172ae5404)
 
-Most likely: NVIDIA 580.159.03 has a Vulkan instance-feature reporting
-regression that Chrome trips on. Apt has 580.159.04 ready.
+The fix is flag-only -- NO sudo, NO reboot. After web search
+(https://tigerabrodi.blog/how-to-get-webgpu-in-headless-chrome-on-cloud-gpus):
 
-1. **Try NVIDIA driver patch update (most likely fix):**
-   ```bash
-   sudo apt-get install --only-upgrade 'libnvidia-*' nvidia-driver-580-open
-   sudo reboot   # reload kernel module
-   ```
-2. **Or pin a different driver branch:**
-   ```bash
-   sudo apt-get install nvidia-driver-565-open  # if available
-   ```
-3. **Or wait for the next libvulkan1 SRU** (current 1.3.275 from 2024 is very stale).
+Chrome's Dawn (WebGPU engine) ships its OWN GPU blocklist, separate
+from Chromium's gpu blocklist, that rejects NVIDIA drivers 570+ by
+default. The remedy is three flags added to `webdriver.json`:
 
-Until one of these lands, all smoke runs will fall back to SwiftShader
-CPU and complete in tens of minutes instead of seconds. SP7 iter-6a/6c
-landed work is verified by **naga + cargo test on host** but not by
-end-to-end smoke A/B. xgboost perf cannot be re-measured.
+```json
+"enable-dawn-features=allow_unsafe_apis,disable_robustness,disable_adapter_blocklist",
+"disable-vulkan-surface",
+"ignore-gpu-blocklist"
+```
+
+With those flags:
+- `vkCreateInstance` still emits `-7` in the chrome_debug.log, BUT
+  Dawn's WebGPU adapter request now succeeds.
+- hello_world smoke: **wall=4694ms, gpu_active_ms=3565ms,
+  gpu_idle_ratio=0.241**, receipt verifies.
+- Within ~20% of the iter-5a Vulkan baseline (3.93s).
+
+Earlier hypotheses were wrong:
+- "Chrome version regression" -- false (Chrome 148.0.7778.96 also
+  fails without the flags).
+- "NVIDIA driver patch required" -- false (driver 580.159.03 works
+  with the right flags).
+- "libvulkan1 upgrade required" -- false on this machine (would also
+  work per the blog post, but the flag fix is sufficient).
+
+The vkCreateInstance error in the log is non-fatal once
+disable_adapter_blocklist is on -- Dawn falls through to a different
+adapter path (likely direct ICD enumeration that bypasses the
+loader-version checks).
+
+Lesson: when a system-level diagnosis is hard, search the public
+literature first -- 30s of search would have skipped 90 min of
+flag-permutation experiments.
 
 ## Symptom
 
