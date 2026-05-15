@@ -1,24 +1,88 @@
 Run: `/.recursive/run/wasm-webgpu-prover-perf/`
-Phase: `Environmental — false alarm, was operator error (wrong cwd)`
+Phase: `Environmental — TWO layered issues; second one requires user action`
 Date: 2026-05-15
-Status: **RESOLVED.** The "GPUAdapter is not available" was caused by
-running `wasm-bindgen-test-runner` from the worktree ROOT instead of
+Status: **PARTIALLY RESOLVED -- second-layer BLOCKED on system action.**
+
+## Layer 1: cwd / webdriver.json discovery — RESOLVED
+
+The initial "GPUAdapter is not available" was operator error: running
+`wasm-bindgen-test-runner` from the worktree ROOT instead of from
 `examples/browser-prove/`. The runner searches for `webdriver.json`
-relative to its current working directory; from the worktree root it
-fell back to default Chrome capabilities (no WebGPU flags), so Chrome
-launched in a config that doesn't expose a WebGPU adapter on this
-hardware. From `examples/browser-prove/` the runner correctly emits
-`Try find webdriver.json... Ok`, Chrome launches with
-`enable-unsafe-webgpu enable-features=Vulkan use-angle=vulkan
-enable-dawn-features=allow_unsafe_apis,disable_robustness`, and
-adapter acquisition succeeds. Chrome 148.0.7778.167 is NOT broken --
-the cd-into-the-crate-dir step is just load-bearing.
+relative to its cwd; from the wrong dir it falls back to default Chrome
+capabilities (no WebGPU flags), so Chrome launches without
+`enable-unsafe-webgpu`, `enable-features=Vulkan`, `use-angle=vulkan`,
+`enable-dawn-features=allow_unsafe_apis,disable_robustness`, and no
+WebGPU adapter is exposed. From `examples/browser-prove/` the runner
+correctly emits `Try find webdriver.json... Ok` and Chrome launches
+with all flags. **Canonical command at
+`evidence/perf/r1-baselines/README.md` already includes the cd-step --
+never run the runner from elsewhere.**
 
-**Lesson for the next session:** the canonical smoke command in
-`evidence/perf/r1-baselines/README.md` includes `cd
-.../examples/browser-prove` -- never run the runner from elsewhere.
+## Layer 2: Chrome `vkCreateInstance` fails -7 on the GPU — BLOCKING
 
-Original (incorrect) hypothesis follows for reference.
+Even with the correct flags applied, Chrome's GPU subprocess fails
+Vulkan instance creation:
+
+```
+[ERROR:gpu/vulkan/vulkan_instance.cc:200] vkCreateInstance() failed: -7
+[ERROR:gpu/ipc/service/gpu_init.cc:1408] Failed to create and initialize Vulkan implementation.
+```
+
+`-7` = `VK_ERROR_FEATURE_NOT_PRESENT`. Chrome falls back to SwiftShader
+(CPU rasterizer), making smokes ~140× slower than the iter-5a
+baseline (3.93s hello_world hit the 10-min WASM_BINDGEN_TEST_TIMEOUT).
+
+**Confirmed NOT a Chrome version regression.** Both Chrome
+148.0.7778.167 (current stable) and 148.0.7778.96 (the iter-5a
+known-working chrome-for-testing build) fail IDENTICALLY:
+
+| Chrome | Source | vkCreateInstance |
+|---|---|---|
+| 148.0.7778.167 | /opt/google/chrome (apt) | failed -7 |
+| 148.0.7778.167 | chrome-for-testing /tmp/chrome-linux64 | failed -7 |
+| 148.0.7778.96 | chrome-for-testing /tmp/chrome96/chrome-linux64 | failed -7 |
+
+What was tried (none of which fix the chromedriver-spawned Chrome GPU
+subprocess):
+- `VK_LOADER_LAYERS_DISABLE='*'` (disable implicit MESA_device_select layer)
+- `VK_LOADER_DRIVERS_DISABLE='*virtio*,*lvp*,*nouveau*,...'` (force NVIDIA ICD)
+- `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json` (already set)
+- `--vulkan-api-version=1.3` arg (flag accepted on parent but NOT forwarded to gpu-process)
+- `--enable-features=Vulkan,VulkanFromANGLE` (crashes the GPU process with SIGSEGV)
+- LD_PRELOAD of system libvulkan.so.1.3.275 in place of Chrome's bundled 1.4.348
+- Wrapper script setting env before exec'ing Chrome (Chrome's GPU subprocess strips env)
+- Both stable Chrome and chrome-for-testing binaries
+
+System state:
+- NVIDIA driver: `580.159.03` (loaded), `Apr 24 13:22` install date
+- Vulkan loader (system): `libvulkan1 1.3.275.0-1build1` (very old)
+- Chrome bundled Vulkan loader: 1.4.348
+- NVIDIA ICD api_version: 1.4.312 (`/usr/share/vulkan/icd.d/nvidia_icd.json`)
+- Implicit layers: NVIDIA layers + VkLayer_MESA_device_select
+- `apt list --installed` shows `libnvidia-cfg1-580 580.159.03 [upgradable to 580.159.04]`
+- Kernel: `6.17.0-23-generic`
+- RTX 5090 (visible to nvidia-smi, 32607 MiB available)
+
+## Resolution paths (REQUIRE USER ACTION)
+
+Most likely: NVIDIA 580.159.03 has a Vulkan instance-feature reporting
+regression that Chrome trips on. Apt has 580.159.04 ready.
+
+1. **Try NVIDIA driver patch update (most likely fix):**
+   ```bash
+   sudo apt-get install --only-upgrade 'libnvidia-*' nvidia-driver-580-open
+   sudo reboot   # reload kernel module
+   ```
+2. **Or pin a different driver branch:**
+   ```bash
+   sudo apt-get install nvidia-driver-565-open  # if available
+   ```
+3. **Or wait for the next libvulkan1 SRU** (current 1.3.275 from 2024 is very stale).
+
+Until one of these lands, all smoke runs will fall back to SwiftShader
+CPU and complete in tens of minutes instead of seconds. SP7 iter-6a/6c
+landed work is verified by **naga + cargo test on host** but not by
+end-to-end smoke A/B. xgboost perf cannot be re-measured.
 
 ## Symptom
 
