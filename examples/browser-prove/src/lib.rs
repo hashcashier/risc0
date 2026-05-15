@@ -2859,6 +2859,30 @@ fn witgen_top_accum(@builtin(global_invocation_id) gid: vec3<u32>) {
         ));
     }
 
+    /// SP7 iter 6d-a -- end-to-end Tint compile check for the vendored
+    /// `exec_TopChunk0` pruned module + @compute wrapper.
+    ///
+    /// naga validates the concatenated module at the cargo-test level
+    /// (`iter6d_a_compute_entry_concat_validates_with_naga`); this
+    /// test runs the equivalent path through Chrome's Tint compiler,
+    /// which is the stricter validator for our actual shipping target.
+    /// Catches any tint-vs-naga divergence introduced by the
+    /// vendored module before iter-6d-b wires the kernel into the
+    /// witness-generator dispatch path.
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_a_exec_top_chunk0_compiles_on_chrome() {
+        use risc0_circuit_rv32im::prove::wgsl_pruner::{
+            EXEC_TOP_CHUNK0_COMPUTE_ENTRY, EXEC_TOP_CHUNK0_WGSL,
+        };
+        console_error_panic_hook::set_once();
+        let module = format!("{EXEC_TOP_CHUNK0_WGSL}{EXEC_TOP_CHUNK0_COMPUTE_ENTRY}");
+        let ok = sp7_probe("iter6d_a", &module, "exec_top_chunk0_main").await;
+        assert!(
+            ok,
+            "exec_TopChunk0 + @compute wrapper must compile on Chrome Tint"
+        );
+    }
+
     /// SP7 iter 5d — `@compute` entries for the arm-split chunk probes.
     /// split_exectop.py emits each arm-split chunk as a step_Top-SHAPED VOID
     /// function `step_chunk_n*_c*(data0, global1)` (builds the TopLayout

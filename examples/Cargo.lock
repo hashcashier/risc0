@@ -860,6 +860,7 @@ dependencies = [
  "risc0-binfmt",
  "risc0-circuit-keccak",
  "risc0-circuit-recursion",
+ "risc0-circuit-rv32im",
  "risc0-groth16",
  "risc0-zkos-v1compat",
  "risc0-zkp",

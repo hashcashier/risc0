@@ -16,7 +16,7 @@ mod hal;
 #[cfg(test)]
 mod tests;
 mod witgen;
-mod wgsl_pruner;
+pub mod wgsl_pruner;
 
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 use std::{

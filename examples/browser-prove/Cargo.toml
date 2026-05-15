@@ -56,6 +56,13 @@ risc0-circuit-recursion = { path = "../../risc0/circuit/recursion", features = [
   "test",
   "webgpu",
 ] }
+# iter-6d-a/b: direct access to the vendored exec_TopChunk0 WGSL string
+# and @compute wrapper for Tint-compile smoke tests. Pulled in via
+# risc0-zkvm transitively but reachable only behind the rv32im `prove`
+# feature, so name the dep explicitly.
+risc0-circuit-rv32im = { path = "../../risc0/circuit/rv32im", features = [
+  "prove",
+] }
 risc0-groth16 = { path = "../../risc0/groth16" }
 risc0-zkp = { path = "../../risc0/zkp", features = ["webgpu"] }
 risc0-zkvm = { path = "../../risc0/zkvm", default-features = false, features = [
