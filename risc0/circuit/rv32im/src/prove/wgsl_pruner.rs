@@ -141,20 +141,39 @@ pub const EXEC_POSEIDON1_CHUNK0_DELTA_WGSL: &str =
 /// to fire `N` async create_compute_pipeline_async calls in
 /// parallel and by the dispatch path to look up the right kernel
 /// per cycle's major opcode.
+///
+/// **Index in this array = `crate::execute::platform::major` value**
+/// (MISC0=0, MISC1=1, MISC2=2, MUL0=3, DIV0=4, MEM0=5, MEM1=6,
+/// CONTROL0=7, ECALL0=8, POSEIDON0=9, POSEIDON1=10, SHA0=11,
+/// BIGINT0=12). So `TOP_CHUNK0_ARM_DELTAS[cycle.major as usize]`
+/// gives the kernel data for that cycle.
 pub const TOP_CHUNK0_ARM_DELTAS: &[(&str, &str, &str)] = &[
-    ("control0_chunk0", EXEC_CONTROL0_CHUNK0_DELTA_WGSL, "exec_Control0Chunk0"),
-    ("mem0_chunk0", EXEC_MEM0_CHUNK0_DELTA_WGSL, "exec_Mem0Chunk0"),
-    ("mem1_chunk0", EXEC_MEM1_CHUNK0_DELTA_WGSL, "exec_Mem1Chunk0"),
+    // 0: MISC0
     ("misc0_chunk0", EXEC_MISC0_CHUNK0_DELTA_WGSL, "exec_Misc0Chunk0"),
+    // 1: MISC1
     ("misc1_chunk0", EXEC_MISC1_CHUNK0_DELTA_WGSL, "exec_Misc1Chunk0"),
+    // 2: MISC2
     ("misc2_chunk0", EXEC_MISC2_CHUNK0_DELTA_WGSL, "exec_Misc2Chunk0"),
+    // 3: MUL0
     ("mul0_chunk0", EXEC_MUL0_CHUNK0_DELTA_WGSL, "exec_Mul0Chunk0"),
+    // 4: DIV0
     ("div0_chunk0", EXEC_DIV0_CHUNK0_DELTA_WGSL, "exec_Div0Chunk0"),
-    ("sha0_chunk0", EXEC_SHA0_CHUNK0_DELTA_WGSL, "exec_Sha0Chunk0"),
-    ("bigint0_chunk0", EXEC_BIGINT0_CHUNK0_DELTA_WGSL, "exec_BigInt0Chunk0"),
+    // 5: MEM0
+    ("mem0_chunk0", EXEC_MEM0_CHUNK0_DELTA_WGSL, "exec_Mem0Chunk0"),
+    // 6: MEM1
+    ("mem1_chunk0", EXEC_MEM1_CHUNK0_DELTA_WGSL, "exec_Mem1Chunk0"),
+    // 7: CONTROL0
+    ("control0_chunk0", EXEC_CONTROL0_CHUNK0_DELTA_WGSL, "exec_Control0Chunk0"),
+    // 8: ECALL0
     ("ecall0_chunk0", EXEC_ECALL0_CHUNK0_DELTA_WGSL, "exec_ECall0Chunk0"),
+    // 9: POSEIDON0
     ("poseidon0_chunk0", EXEC_POSEIDON0_CHUNK0_DELTA_WGSL, "exec_Poseidon0Chunk0"),
+    // 10: POSEIDON1
     ("poseidon1_chunk0", EXEC_POSEIDON1_CHUNK0_DELTA_WGSL, "exec_Poseidon1Chunk0"),
+    // 11: SHA0
+    ("sha0_chunk0", EXEC_SHA0_CHUNK0_DELTA_WGSL, "exec_Sha0Chunk0"),
+    // 12: BIGINT0
+    ("bigint0_chunk0", EXEC_BIGINT0_CHUNK0_DELTA_WGSL, "exec_BigInt0Chunk0"),
 ];
 
 /// SP7 iter 6d-g: assemble a per-arm full kernel by concatenating
