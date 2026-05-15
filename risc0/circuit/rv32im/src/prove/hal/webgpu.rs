@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use risc0_core::scope;
@@ -61,10 +62,20 @@ use crate::{
 //
 // The first dispatch lazily fills `witgen_top_chunk0_kernel`; subsequent
 // segments reuse the cached pipeline + layout for free.
+/// SP7 iter 6d-c: process-global flag that turns on the probe-mode GPU
+/// witgen dispatch. Tests flip this before `webgpu_prover()` is
+/// constructed; production runs leave it off. Atomic so it can be read
+/// from sync paths without RefCell borrow churn.
+pub static WITGEN_GPU_PROBE_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Public setter for the iter-6d-c probe flag.
+pub fn set_witgen_gpu_probe_enabled(enabled: bool) {
+    WITGEN_GPU_PROBE_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
 #[allow(dead_code)]
 pub(crate) struct WebGpuCircuitHal {
     hal: Rc<WebGpuHal>,
-    witgen_gpu_probe_enabled: Cell<bool>,
     witgen_top_chunk0_kernel: RefCell<Option<WebGpuKernel>>,
 }
 
@@ -91,15 +102,8 @@ impl WebGpuCircuitHal {
     pub(crate) fn new(hal: Rc<WebGpuHal>) -> Self {
         Self {
             hal,
-            witgen_gpu_probe_enabled: Cell::new(false),
             witgen_top_chunk0_kernel: RefCell::new(None),
         }
-    }
-
-    /// Enable/disable the iter-6d-c probe-mode GPU witgen dispatch. Default
-    /// off -- the first dispatch triggers a ~60 s Tint compile.
-    pub fn set_witgen_gpu_probe_enabled(&self, enabled: bool) {
-        self.witgen_gpu_probe_enabled.set(enabled);
     }
 
     fn ensure_witgen_top_chunk0_kernel(&self) -> Result<WebGpuKernel> {
@@ -236,10 +240,11 @@ impl CircuitWitnessGenerator<WebGpuHal> for WebGpuCircuitHal {
             data.cols
         ));
         // SP7 iter 6d-c (2026-05-15): probe-mode GPU dispatch alongside
-        // rust_steps. Default off. When enabled, measures the per-segment
-        // GPU dispatch wall and the one-time Tint compile to inform iter
-        // 6d-d/e pre-warm + replace work.
-        if self.witgen_gpu_probe_enabled.get() {
+        // rust_steps. Default off. Tests flip the process-global flag
+        // via `set_witgen_gpu_probe_enabled(true)` to measure the
+        // per-segment GPU dispatch wall and the one-time Tint compile;
+        // probe output is discarded so rust_steps remains the witness.
+        if WITGEN_GPU_PROBE_ENABLED.load(Ordering::SeqCst) {
             let total_cycles = data.rows as u32;
             if let Err(err) = self.dispatch_witgen_top_chunk0_probe(data, global, total_cycles) {
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
