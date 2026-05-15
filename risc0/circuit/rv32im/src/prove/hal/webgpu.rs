@@ -270,14 +270,15 @@ impl WebGpuCircuitHal {
             use crate::prove::wgsl_pruner::{
                 assemble_arm_kernel, TOP_CHUNK0_ARM_DELTAS,
             };
-            // SP7 iter 6d-g step 6.1: per-arm layout adds binding 5
-            // `cycle_list: array<u32>`. The wrapper reads its assigned
-            // cycle index from this list rather than `gid.x` directly,
-            // so dispatching `N` workgroups iterates only over the
-            // cycles whose major opcode matches this arm. Future steps
-            // wire real witgen output through synthesized InstInputStruct;
-            // for now the kernel body remains a no-op so rust_steps
-            // remains authoritative.
+            // SP7 iter 6d-g step 6.2.1a: per-arm layout adds binding 6
+            // `preflight_meta: array<u32>` so per-arm wrappers can
+            // extract major/minor per cycle (4 u32 per cycle, packed
+            // major<<16|minor at index 3). Bindings 0-4 are the
+            // standard witgen bindings (data, global, accum, mix,
+            // params); 5 is cycle_list; 6 is preflight_meta. The
+            // wrapper body remains a no-op for now -- step 6.2.1b
+            // wires real InstInputStruct synthesis for the 8
+            // zero-back_Reg arms.
             let arm_layout = match hal.create_bind_group_layout(
                 "iter6d_g_arm_layout",
                 &[
@@ -287,6 +288,7 @@ impl WebGpuCircuitHal {
                     WebGpuBindingLayout::storage(3, 0),
                     WebGpuBindingLayout::uniform(4, 32),
                     WebGpuBindingLayout::storage(5, 0),
+                    WebGpuBindingLayout::storage(6, 0),
                 ],
             ) {
                 Ok(l) => l,
@@ -303,6 +305,7 @@ impl WebGpuCircuitHal {
             for (label, delta, _sub_fn) in TOP_CHUNK0_ARM_DELTAS {
                 let wrapper = format!(
                     "@group(0) @binding(5) var<storage, read> cycle_list: array<u32>;\n\
+                     @group(0) @binding(6) var<storage, read> preflight_meta: array<u32>;\n\
                      \n\
                      @compute @workgroup_size(64)\n\
                      fn iter6d_g_{}_main(@builtin(global_invocation_id) gid: vec3<u32>) {{\n\
@@ -310,6 +313,8 @@ impl WebGpuCircuitHal {
                        if (lane >= arrayLength(&cycle_list)) {{ return; }}\n\
                        cycle = cycle_list[lane];\n\
                        if (cycle >= params.data_rows) {{ return; }}\n\
+                       // Touch preflight_meta to keep binding 6 referenced.\n\
+                       let _meta = preflight_meta[cycle * 4u + 3u];\n\
                        data_buf[cycle] = data_buf[cycle];\n\
                      }}\n",
                     label,
@@ -503,10 +508,9 @@ impl WebGpuCircuitHal {
             TOP_CHUNK0_ARM_DELTAS.len(),
             preflight.cycles.len(),
         ));
-        // iter-6d-g step 6.1: layout now has binding 5 (cycle_list) so
-        // each per-arm dispatch reads its assigned cycle indices from
-        // a per-arm GPU buffer rather than using gid.x as the cycle
-        // directly.
+        // iter-6d-g step 6.2.1a: layout now has binding 5 (cycle_list)
+        // and binding 6 (preflight_meta). Per-arm wrappers read major/
+        // minor from preflight_meta via packed_minor_major at index 3.
         let layout = self.hal.create_bind_group_layout(
             "iter6d_g_arm_layout",
             &[
@@ -516,6 +520,7 @@ impl WebGpuCircuitHal {
                 WebGpuBindingLayout::storage(3, 0),
                 WebGpuBindingLayout::uniform(4, 32),
                 WebGpuBindingLayout::storage(5, 0),
+                WebGpuBindingLayout::storage(6, 0),
             ],
         )?;
         let total_cycles = data.rows as u32;
@@ -530,6 +535,21 @@ impl WebGpuCircuitHal {
         let params_buf = self.hal.create_uniform_buffer(
             "iter6d_g_arm_params_ph",
             bytemuck::cast_slice(&params),
+        )?;
+        // Upload preflight_meta for per-arm wrappers (separate buffer
+        // from the shadow_init kernel's upload; could be shared in a
+        // future tightening, but keeping separate avoids cross-pass
+        // ownership coupling).
+        let meta = build_preflight_meta(preflight);
+        let meta_bytes: &[u8] = bytemuck::cast_slice(meta.as_slice());
+        let preflight_buf = self
+            .hal
+            .create_storage_buffer("iter6d_g_arm_preflight", meta_bytes.len() as u64)?;
+        self.hal.write_buffer_named(
+            &preflight_buf,
+            "iter6d_g_arm_preflight",
+            0,
+            meta_bytes,
         )?;
         let data_gpu = data
             .buf
@@ -578,6 +598,7 @@ impl WebGpuCircuitHal {
                     WebGpuBufferBinding::new(3, &mix_buf),
                     WebGpuBufferBinding::new(4, &params_buf),
                     WebGpuBufferBinding::new(5, &cycle_buf),
+                    WebGpuBufferBinding::new(6, &preflight_buf),
                 ],
             )?;
             let workgroups = (cycle_count as u32).div_ceil(64);
@@ -593,6 +614,7 @@ impl WebGpuCircuitHal {
         // Keep buffers + bind groups alive until dispatch completes.
         drop(bind_groups);
         drop(cycle_list_buffers);
+        drop(preflight_buf);
         Ok(())
     }
 
