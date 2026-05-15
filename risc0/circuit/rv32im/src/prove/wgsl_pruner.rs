@@ -196,6 +196,107 @@ pub fn assemble_arm_kernel(delta: &str, compute_entry: &str) -> String {
     out
 }
 
+/// SP7 iter 6d-g step 6.2.0 (2026-05-16): self-contained shadow-init
+/// kernel that pre-populates the 5 outer Top layout cells in
+/// `data_buf` from a per-cycle preflight metadata buffer. Used as
+/// pre-pass to the per-arm dispatch so that `back_Reg(1, ...)` reads
+/// inside the arm sub-fns return correct values WITHOUT requiring
+/// `rust_steps` to have run first.
+///
+/// Layout column offsets (from `kLayout_Top` const in
+/// `witgen_baseline.wgsl:13529`):
+/// - cycle (cycle_redef.this_cycle): col 0
+/// - nextPcLow: col 14
+/// - nextPcHigh: col 15
+/// - nextState_0: col 16
+/// - nextMachineMode: col 17
+/// - isFirstCycle: col 18
+///
+/// preflight_meta layout: 4 u32 per cycle: [pc, state, machine_mode, packed_minor_major].
+/// Built CPU-side from `preflight.cycles[i]` -- see
+/// `prove::hal::webgpu::build_preflight_meta`.
+///
+/// Self-contained (does NOT use witgen_baseline.wgsl) so the bind
+/// group only needs (data_buf, params, preflight_meta) -- 3 entries
+/// instead of 6.
+pub const SHADOW_INIT_WGSL: &str = r#"
+const P: u32 = 2013265921u;
+const M: u32 = 2281701377u;
+const R2: u32 = 1172168163u;
+
+struct ShadowParams {
+  data_rows: u32,
+  data_cols: u32,
+  _pad0: u32,
+  _pad1: u32,
+}
+
+@group(0) @binding(0) var<storage, read_write> data_buf: array<u32>;
+@group(0) @binding(1) var<uniform> params: ShadowParams;
+@group(0) @binding(2) var<storage, read> preflight_meta: array<u32>;
+
+fn mul_wide(a: u32, b: u32) -> vec2<u32> {
+  let a_lo = a & 0xffffu;
+  let a_hi = a >> 16u;
+  let b_lo = b & 0xffffu;
+  let b_hi = b >> 16u;
+  let lo_lo = a_lo * b_lo;
+  let lo_hi = a_lo * b_hi;
+  let hi_lo = a_hi * b_lo;
+  let hi_hi = a_hi * b_hi;
+  let mid = (lo_lo >> 16u) + (lo_hi & 0xffffu) + (hi_lo & 0xffffu);
+  let lo = (lo_lo & 0xffffu) | (mid << 16u);
+  let hi = hi_hi + (lo_hi >> 16u) + (hi_lo >> 16u) + (mid >> 16u);
+  return vec2<u32>(lo, hi);
+}
+
+fn mul(a: u32, b: u32) -> u32 {
+  let product = mul_wide(a, b);
+  let low = 0u - product.x;
+  let red = M * low;
+  let red_product = mul_wide(red, P);
+  var ret = product.y + red_product.y;
+  if (product.x + red_product.x < product.x) {
+    ret = ret + 1u;
+  }
+  if (ret >= P) {
+    return ret - P;
+  }
+  return ret;
+}
+
+fn encode(a: u32) -> u32 {
+  return mul(R2, a);
+}
+
+@compute @workgroup_size(64)
+fn shadow_init_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let cycle = gid.x;
+  if (cycle >= params.data_rows) {
+    return;
+  }
+  // Wrap to cycle 0 for the last cycle: back_Reg(1, ...) at cycle 0
+  // reads cycle (last)'s stored values via (cycle - 1 + rows) % rows.
+  let next_cycle = (cycle + 1u) % params.data_rows;
+  let next_base = next_cycle * 4u;
+  let next_pc = preflight_meta[next_base + 0u];
+  let next_state = preflight_meta[next_base + 1u];
+  let next_mode = preflight_meta[next_base + 2u];
+  let next_pc_low = next_pc & 0xFFFFu;
+  let next_pc_high = (next_pc >> 16u) & 0xFFFFu;
+
+  // Column-major: data_buf[col * rows + row]
+  let rows = params.data_rows;
+  data_buf[14u * rows + cycle] = encode(next_pc_low);     // nextPcLow
+  data_buf[15u * rows + cycle] = encode(next_pc_high);    // nextPcHigh
+  data_buf[16u * rows + cycle] = encode(next_state);      // nextState_0
+  data_buf[17u * rows + cycle] = encode(next_mode);       // nextMachineMode
+  // isFirstCycle: 1 at cycle 0, 0 elsewhere
+  let is_first = select(0u, 1u, cycle == 0u);
+  data_buf[18u * rows + cycle] = encode(is_first);
+}
+"#;
+
 /// SP7 iter 6d-f-take-2 (2026-05-15): per-major-arm pruned module.
 /// Each major opcode arm of exec_TopChunk0 gets its own kernel whose
 /// closure is restricted to the sub-fn path for that arm only.

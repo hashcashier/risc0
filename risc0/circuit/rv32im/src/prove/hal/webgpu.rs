@@ -96,6 +96,26 @@ thread_local! {
     /// session, so multiple `prewarm_witgen_kernel()` calls (one per
     /// segment_prover) only fire the compile once.
     static WITGEN_PREWARM_SPAWNED: Cell<bool> = const { Cell::new(false) };
+    /// SP7 iter 6d-g step 6.2.0: cached shadow_init pipeline.
+    /// Compiled once per session and reused across all segments.
+    static SHADOW_INIT_KERNEL: RefCell<Option<WebGpuKernel>> =
+        const { RefCell::new(None) };
+}
+
+/// SP7 iter 6d-g step 6.2.0 (2026-05-16): build the per-cycle preflight
+/// metadata buffer consumed by `SHADOW_INIT_WGSL`. Layout: 4 u32 per
+/// cycle = `[pc, state, machine_mode, packed_minor_major]`. The packed
+/// field is `(major as u32) << 16 | (minor as u32)` so per-arm wrappers
+/// can extract both with one buffer read.
+fn build_preflight_meta(preflight: &PreflightTrace) -> Vec<u32> {
+    let mut out = Vec::with_capacity(preflight.cycles.len() * 4);
+    for cycle in &preflight.cycles {
+        out.push(cycle.pc);
+        out.push(cycle.state);
+        out.push(cycle.machine_mode as u32);
+        out.push(((cycle.major as u32) << 16) | (cycle.minor as u32));
+    }
+    out
 }
 
 #[allow(dead_code)]
@@ -368,6 +388,101 @@ impl WebGpuCircuitHal {
     /// arm-specific InstInputStruct + BoundLayout construction +
     /// sub-fn call. Then rust_steps::step_exec can be short-circuited
     /// for cycles covered by GPU dispatch.
+    /// SP7 iter 6d-g step 6.2.0: dispatch the shadow_init kernel before
+    /// any per-arm dispatch. Pre-populates the 5 outer Top layout cells
+    /// (nextPcLow/High, nextState_0, nextMachineMode, isFirstCycle) in
+    /// `data_buf` from a per-cycle preflight metadata buffer. After this
+    /// runs, per-arm wrappers' `back_Reg(1, ...)` reads return correct
+    /// values without rust_steps having executed.
+    ///
+    /// Self-contained kernel uses 3 bindings (data_buf, params,
+    /// preflight_meta) -- doesn't need the witgen baseline.
+    fn dispatch_shadow_init(
+        &self,
+        data: &MetaBuffer<WebGpuHal>,
+        preflight: &PreflightTrace,
+    ) -> Result<()> {
+        use crate::prove::wgsl_pruner::SHADOW_INIT_WGSL;
+        let _t = WebGpuStageTimer::new(format!(
+            "iter6d_g_shadow_init cycles={}",
+            preflight.cycles.len()
+        ));
+        let kernel =
+            SHADOW_INIT_KERNEL.with(|cell| cell.borrow().clone());
+        let kernel = match kernel {
+            Some(k) => k,
+            None => {
+                let layout = self.hal.create_bind_group_layout(
+                    "iter6d_g_shadow_init_layout",
+                    &[
+                        WebGpuBindingLayout::storage(0, 0),
+                        WebGpuBindingLayout::uniform(1, 16),
+                        WebGpuBindingLayout::storage(2, 0),
+                    ],
+                )?;
+                let k = self.hal.create_compute_kernel(
+                    "iter6d_g_shadow_init",
+                    SHADOW_INIT_WGSL,
+                    "shadow_init_main",
+                    &[layout],
+                )?;
+                SHADOW_INIT_KERNEL.with(|cell| *cell.borrow_mut() = Some(k.clone()));
+                k
+            }
+        };
+        // Build + upload preflight metadata.
+        let meta = build_preflight_meta(preflight);
+        let meta_bytes: &[u8] = bytemuck::cast_slice(meta.as_slice());
+        let meta_buf = self.hal.create_storage_buffer(
+            "iter6d_g_shadow_meta",
+            meta_bytes.len() as u64,
+        )?;
+        self.hal.write_buffer_named(
+            &meta_buf,
+            "iter6d_g_shadow_meta",
+            0,
+            meta_bytes,
+        )?;
+        let total_cycles = data.rows as u32;
+        let params: [u32; 4] = [total_cycles, data.cols as u32, 0, 0];
+        let params_buf = self.hal.create_uniform_buffer(
+            "iter6d_g_shadow_params",
+            bytemuck::cast_slice(&params),
+        )?;
+        let layout = self.hal.create_bind_group_layout(
+            "iter6d_g_shadow_init_layout",
+            &[
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::uniform(1, 16),
+                WebGpuBindingLayout::storage(2, 0),
+            ],
+        )?;
+        let data_gpu = data
+            .buf
+            .raw_buffer()
+            .ok_or_else(|| anyhow::anyhow!("iter-6d-g shadow_init: data missing GPU storage"))?;
+        let bind_group = self.hal.create_bind_group(
+            "iter6d_g_shadow_bg",
+            &layout,
+            &[
+                WebGpuBufferBinding::new(0, data_gpu),
+                WebGpuBufferBinding::new(1, &params_buf),
+                WebGpuBufferBinding::new(2, &meta_buf),
+            ],
+        )?;
+        let workgroups = total_cycles.div_ceil(64);
+        self.hal.dispatch_compute_1d(&kernel, &bind_group, workgroups);
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "iter6d_g_shadow_init cycles={} meta_bytes={}",
+            total_cycles, meta_bytes.len(),
+        ));
+        // Keep buffers alive until queue flushes.
+        drop(bind_group);
+        drop(meta_buf);
+        drop(params_buf);
+        Ok(())
+    }
+
     fn dispatch_witgen_per_arm_probe(
         &self,
         data: &MetaBuffer<WebGpuHal>,
@@ -613,6 +728,16 @@ impl CircuitWitnessGenerator<WebGpuHal> for WebGpuCircuitHal {
             if let Err(err) = self.dispatch_witgen_top_chunk0_probe(data, global, total_cycles) {
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
                     "iter6d_c_witgen_probe FAILED err={err:?}"
+                ));
+            }
+            // iter-6d-g step 6.2.0: shadow-init the 5 outer Top layout
+            // cells (nextPcLow/High, nextState_0, nextMachineMode,
+            // isFirstCycle) from preflight before any per-arm dispatch
+            // so back_Reg(1, ...) reads return correct values without
+            // needing rust_steps to have run first.
+            if let Err(err) = self.dispatch_shadow_init(data, preflight) {
+                risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                    "iter6d_g_shadow_init FAILED err={err:?}"
                 ));
             }
             // iter-6d-g step 6 (partial): per-arm dispatch validates
