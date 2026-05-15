@@ -241,6 +241,93 @@ fn rewrite_chunk0(body: &str, chunked_bases: &BTreeSet<&str>) -> String {
     rewrite_to_chunk(body, &chunked_bases.iter().map(|&b| (b, 0u32)).collect(), 0)
 }
 
+/// SP7 iter 6d-g (2026-05-15): same as [`pruned_module_at_chunk`]
+/// but emits ONLY the rewritten steps fns reachable from `entry`,
+/// without the prelude / types / layout prefix. The caller is
+/// expected to concatenate a shared `prelude + types + layout`
+/// baseline at runtime so vendoring 26+ per-arm kernels costs
+/// `~baseline + N × delta_size` instead of `N × full_module_size`.
+///
+/// Empirically (2026-05-15): full module ~830 KB, delta ~50-100 KB.
+/// Vendoring 26 deltas + one baseline = ~3 MB vs naive 22-26 MB.
+pub fn pruned_delta_at_chunk(
+    types_inc: &str,
+    steps: &str,
+    entry: &str,
+    target_chunk: u32,
+) -> Result<String, PrunerError> {
+    let steps_fns = parse_fns(steps);
+    let types_fns = parse_fns(types_inc);
+    let mut all_names: BTreeSet<&str> = BTreeSet::new();
+    let mut steps_names: BTreeSet<&str> = BTreeSet::new();
+    for f in &steps_fns {
+        all_names.insert(f.name);
+        steps_names.insert(f.name);
+    }
+    for f in &types_fns {
+        all_names.insert(f.name);
+    }
+    if !steps_names.contains(entry) {
+        return Err(PrunerError::EntryNotFound(entry.to_string()));
+    }
+    let mut chunked_max_idx: BTreeMap<&str, u32> = BTreeMap::new();
+    for &n in &steps_names {
+        if let Some(idx) = n.rfind("Chunk") {
+            let base = &n[..idx];
+            let suffix = &n[idx + "Chunk".len()..];
+            if !suffix.is_empty()
+                && suffix.chars().all(|c| c.is_ascii_digit())
+                && steps_names.contains(base)
+            {
+                if let Ok(k) = suffix.parse::<u32>() {
+                    chunked_max_idx
+                        .entry(base)
+                        .and_modify(|cur| {
+                            if k > *cur {
+                                *cur = k;
+                            }
+                        })
+                        .or_insert(k);
+                }
+            }
+        }
+    }
+    let rewritten_steps: BTreeMap<&str, String> = steps_fns
+        .iter()
+        .map(|f| (f.name, rewrite_to_chunk(f.body, &chunked_max_idx, target_chunk)))
+        .collect();
+    let mut calls: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for f in &steps_fns {
+        let body = rewritten_steps.get(f.name).unwrap();
+        calls.insert(f.name, callees_in(body, &all_names));
+    }
+    // Note: types_fns aren't rewritten here -- delta emits ONLY
+    // steps fns. Types stay in the shared baseline.
+    let mut closure: BTreeSet<&str> = BTreeSet::new();
+    let mut stack: Vec<&str> = vec![entry];
+    while let Some(n) = stack.pop() {
+        if !closure.insert(n) {
+            continue;
+        }
+        if let Some(cs) = calls.get(n) {
+            for &c in cs {
+                stack.push(c);
+            }
+        }
+    }
+    let mut out = String::with_capacity(steps.len() / 16);
+    for f in &steps_fns {
+        if closure.contains(f.name) {
+            let body = rewritten_steps.get(f.name).unwrap();
+            out.push_str(body);
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// SP7 iter 6d-e (2026-05-15): generalized chunk rewrite. For each
 /// callsite to a base in `chunked_max_idx`, append `ChunkK` where
 /// `K = min(target_chunk, max_idx)`. The `max_idx` cap lets bases
