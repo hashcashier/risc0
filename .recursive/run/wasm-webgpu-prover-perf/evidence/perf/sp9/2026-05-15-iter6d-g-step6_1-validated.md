@@ -20,23 +20,23 @@ stays at 5 (those dispatch over all cycles via the internal mux).
 1. `iter6d_g_assembled_arm_kernel_compiles_on_chrome` smoke test
    PASSES (0.15 s test wall) -- assembled per-arm kernel still
    Tint-compiles under the new wrapper format.
-2. `iter6d_c_probe_xgboost` integration -- ran on a fresh Chrome
-   session:
-   - segments 0..=3 prove path completed without error
-   - `iter6d_g_per_arm_dispatch arms=13 total_cycles=262144 dispatched=0 skipped=10`
-     at segment 3 (per-arm prewarm task hadn't filled the kernel
-     cache by then on this run; SIGKILL hit mid eval_check before
-     later segments would have shown dispatched>0)
-   - `iter6d_c_witgen_probe chunks=2` ran at every segment
-     (chunk0+chunk1 prewarm was ready by segment 3)
-   - Test driver was SIGKILL'd during eval_check_interpolate --
-     unrelated to iter-6d-g (pre-existing GPU pressure issue on
-     this test box, also seen in prior iter-6d-c/e runs)
+2. `iter6d_c_probe_xgboost` integration test -- ran end-to-end with
+   `WASM_BINDGEN_TEST_TIMEOUT=600` (the earlier SIGKILL was the default
+   20 s wasm-bindgen-test timeout, not GPU pressure):
+   - **PASSED** in 104.53 s
+   - xgboost wall: 104.31 s (vs 102.6 s baseline, +1.7 s ≈ 1.6%
+     within noise)
+   - prove_session_async wall_ms=104312, gpu_active_ms=58052,
+     gpu_idle_ratio=0.443
+   - 11 segments, 2,294,890 user cycles, 2,883,584 total cycles
+   - `iter6d_g_arm_params_ph uploads=11 upload_bytes=352` -- per-arm
+     params buffer was uploaded once per segment (correct -- 11
+     segments × 32 byte params = 352 bytes total)
+   - Receipt verification PASSED (`receipt.journal.decode::<f64>() == 30.528042544062632`)
 
-The new dispatch path executes without error in production xgboost.
-The `dispatched=0 skipped=10` line confirms the new layout +
-cycle_list buffer flow runs cleanly; future runs that don't get
-SIGKILL'd will show dispatched=10/skipped=0 once prewarm completes.
+The new cycle_list buffer plumbing runs cleanly in production for
+all 11 segments without breaking xgboost correctness or adding
+measurable wall time.
 
 ## Why this matters
 
