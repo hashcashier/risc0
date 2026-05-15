@@ -119,3 +119,54 @@ practical floor of 5-8x CUDA is **even further out of reach** than
 that memory anticipated, because the witgen-replacement path
 itself has architectural blockers that need to be unblocked before
 the 5 s rv32im_witgen savings materialize.
+
+## CORRECTION 2026-05-16: per-arm back_Reg count finding
+
+The pessimistic conclusion above was **overly broad**. Per-arm
+`back_Reg(N, ...)` call counts measured on each delta:
+
+| Arm | back_Reg calls |
+|-----|---------------:|
+| MISC0 | 0 |
+| MISC1 | 0 |
+| MISC2 | 0 |
+| MUL0 | 0 |
+| DIV0 | 0 |
+| MEM0 | 0 |
+| MEM1 | 0 |
+| ECALL0 | 0 |
+| CONTROL0 | 19 |
+| BIGINT0 | 24 |
+| POSEIDON0 | 40 |
+| POSEIDON1 | 40 |
+| SHA0 | 106 |
+
+**8 of 13 arms have ZERO internal `back_Reg` calls.** They are
+pure per-cycle: they depend only on the `InstInputStruct` passed
+in, not on cycle-N-1 data.
+
+For xgboost (mostly ALU/MEM ops -- minimal SHA/Poseidon),
+**these 8 arms cover the vast majority of cycles**. So GPU witgen
+replacement on those 8 arms IS tractable, requiring only:
+
+1. Shadow-init 5 outer cells per cycle (`nextPcLow`, `nextPcHigh`,
+   `nextState_0`, `nextMachineMode`, `isFirstCycle`) -- 5 × 4 ×
+   N_cycles ≈ 20 MB upload (column offsets 14-18 in
+   `kLayout_Top`). Pre-computed from `preflight.cycles[N+1].pc`,
+   `state`, `machine_mode`.
+2. Synthesize `InstInputStruct` from preflight (5 fields:
+   minor, pcU32 lo/hi, state, mode, plus minorOnehot derived).
+3. Call each of the 8 zero-back_Reg arm sub-fns via the per-arm
+   cycle_list dispatch (already plumbed in step 6.1).
+4. Short-circuit `rust_steps::step_exec` only for cycles whose
+   major opcode is in {MISC0, MISC1, MISC2, MUL0, DIV0, MEM0,
+   MEM1, ECALL0}.
+
+The 5 inter-cycle-heavy arms (CONTROL0, BIGINT0, POSEIDON0/1,
+SHA0) remain blocked on a deeper materialization scheme. But for
+the typical workload mix on xgboost, leaving those 5 to rust_steps
+should still yield most of the 5 s rv32im_witgen savings.
+
+Lesson: don't generalize from one arm's complexity to all 13.
+Per-arm analysis was the missing diagnostic step in the original
+block claim above.
