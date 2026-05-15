@@ -309,7 +309,7 @@ impl WebGpuCircuitHal {
                 .iter()
                 .enumerate()
                 .map(|(i, (module, entry, _))| {
-                    let label: &'static str = label_strs[i];
+                    let _label: &'static str = label_strs[i];
                     let entry: &str = entry;
                     hal.create_compute_kernel_async(
                         "iter6d_g_arm_kernel",
