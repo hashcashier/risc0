@@ -96,6 +96,41 @@ fn exec_top_chunk1_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// SP7 iter 6d-g (2026-05-15): shared witgen baseline (prelude +
+/// types.wgsl.inc + layout.wgsl.inc) used by every per-arm kernel.
+/// ~791 KB. Concatenated with a per-arm delta + @compute wrapper at
+/// HAL init to produce the final module passed to
+/// `create_compute_kernel_async`.
+pub const WITGEN_BASELINE_WGSL: &str =
+    include_str!("../zirgen/witgen_baseline.wgsl");
+
+/// SP7 iter 6d-g: sample per-arm delta (exec_Sha0Chunk0 closure
+/// only, no prelude/types/layout). ~47 KB. Demonstrates the
+/// delta-vendoring pattern; full iter-6d-g lands ~26 such deltas
+/// covering all major opcode arms of TopChunk0+1.
+pub const EXEC_SHA0_CHUNK0_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_sha0_chunk0_delta.wgsl");
+
+/// SP7 iter 6d-g: assemble a per-arm full kernel by concatenating
+/// baseline + delta + the supplied @compute wrapper. The result is
+/// passed to `WebGpuHal::create_compute_kernel_async` for Tint
+/// compilation. Total module size = baseline + delta + wrapper ~=
+/// 838 KB (matches the iter-6d-f-take-2 measured kernel size).
+pub fn assemble_arm_kernel(delta: &str, compute_entry: &str) -> String {
+    let mut out =
+        String::with_capacity(WITGEN_BASELINE_WGSL.len() + delta.len() + compute_entry.len() + 2);
+    out.push_str(WITGEN_BASELINE_WGSL);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(delta);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(compute_entry);
+    out
+}
+
 /// SP7 iter 6d-f-take-2 (2026-05-15): per-major-arm pruned module.
 /// Each major opcode arm of exec_TopChunk0 gets its own kernel whose
 /// closure is restricted to the sub-fn path for that arm only.

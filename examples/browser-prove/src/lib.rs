@@ -2899,6 +2899,37 @@ fn witgen_top_accum(@builtin(global_invocation_id) gid: vec3<u32>) {
         set_witgen_gpu_probe_enabled(false);
     }
 
+    /// SP7 iter 6d-g step 1 -- runtime assembly: confirm
+    /// `assemble_arm_kernel(WITGEN_BASELINE_WGSL, EXEC_SHA0_CHUNK0_DELTA_WGSL,
+    /// wrapper)` produces a Tint-compilable kernel byte-equivalent to
+    /// the iter-6d-f-take-2 pre-assembled vendored file. Once this
+    /// passes, the path is clear for vendoring ~26 small deltas (~3 MB
+    /// total) instead of ~26 full modules (~22 MB).
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_assembled_arm_kernel_compiles_on_chrome() {
+        use risc0_circuit_rv32im::prove::wgsl_pruner::{
+            assemble_arm_kernel, EXEC_SHA0_CHUNK0_DELTA_WGSL,
+            EXEC_SHA0_CHUNK0_ONLY_COMPUTE_ENTRY,
+        };
+        console_error_panic_hook::set_once();
+        let module = assemble_arm_kernel(
+            EXEC_SHA0_CHUNK0_DELTA_WGSL,
+            EXEC_SHA0_CHUNK0_ONLY_COMPUTE_ENTRY,
+        );
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "iter6d_g assembled module_bytes={}", module.len()
+        ));
+        let ok = sp7_probe("iter6d_g", &module, "exec_sha0_chunk0_only_main").await;
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "iter6d_g assembled tint_compile_ok={}", ok
+        ));
+        assert!(
+            ok,
+            "iter6d_g assembled kernel must Tint-compile -- otherwise \
+             the runtime-assemble path is broken"
+        );
+    }
+
     /// SP7 iter 6d-f-take-2 -- Tint compile check for a per-major-arm
     /// kernel (the Sha0 path). 838 KB module, well under the 2 MB
     /// cliff that took down the all-chunks fat-module attempt. If
