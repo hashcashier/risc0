@@ -259,11 +259,14 @@ impl MerkleTreeProver<crate::hal::webgpu::WebGpuHal> {
         hal.hash_rows_async(&nodes.slice(rows, rows), matrix)
             .await?;
         scope!("hash_fold", {
-            for i in (0..params.layers).rev() {
-                let layer_size = 1 << i;
-                hal.hash_fold_async(&nodes, layer_size * 2, layer_size)
-                    .await?;
-            }
+            // SP-submission iter 2 (2026-05-15): batch the merkle
+            // tree-build hash_fold chain into one submit via
+            // hash_fold_chain_async. Each layer writes to a distinct
+            // slice of `nodes`; within a compute pass dispatches
+            // execute serially so the layer-N read of layer-(N+1)'s
+            // output is ordered correctly without a barrier.
+            let output_sizes: Vec<usize> = (0..params.layers).rev().map(|i| 1 << i).collect();
+            hal.hash_fold_chain_async(&nodes, &output_sizes).await?;
             Ok::<(), anyhow::Error>(())
         })?;
         let root = if nodes.cpu_is_current() {

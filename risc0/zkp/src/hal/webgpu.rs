@@ -7623,6 +7623,36 @@ impl WebGpuHal {
         Ok(())
     }
 
+    /// SP-submission iter 2: batch a chain of `hash_fold_async` calls
+    /// (the merkle build loop) into a single submit. Saves
+    /// ~`output_sizes.len() - 1` GPU-process IPC round-trips. Falls
+    /// through to per-call hash_fold_async when GPU dispatch is
+    /// unavailable so the diagnostic counters stay accurate.
+    pub async fn hash_fold_chain_async(
+        &self,
+        io: &WebGpuBuffer<Digest>,
+        output_sizes: &[usize],
+    ) -> Result<()> {
+        let can_chain = self.gpu_authoritative()
+            && output_sizes
+                .iter()
+                .all(|&out| self.can_dispatch_hash_fold(io, out));
+        if can_chain {
+            if self
+                .dispatch_poseidon2_hash_fold_chain(io, output_sizes)?
+            {
+                return Ok(());
+            }
+        }
+        // Fallback: serial per-call path (CPU mirror branches still
+        // need the per-call sync_gpu_to_cpu).
+        for &output_size in output_sizes {
+            self.hash_fold_async(io, 2 * output_size, output_size)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Async-safe variant of [`Hal::hash_rows`].
     pub(crate) async fn hash_rows_async(
         &self,
@@ -10408,6 +10438,116 @@ impl WebGpuHal {
             .expect("WebGPU hash_fold output size exceeds u32")
             .div_ceil(256);
         self.dispatch_compute(&hash.fold_kernel, &bind_group, workgroups, 1, 1);
+        Ok(true)
+    }
+
+    /// SP-submission iter 2 (2026-05-15): batch a chain of hash_folds
+    /// (the merkle tree-build loop) into a single command encoder. Each
+    /// individual fold writes to a different slice of the same `nodes`
+    /// buffer; within a compute pass dispatches execute serially on the
+    /// queue so write-after-write ordering across layers is preserved.
+    ///
+    /// `output_sizes` lists the per-layer output_size; input_size is
+    /// always `2 * output_size` per the merkle tree-build invariant.
+    /// Returns true when the GPU path is used; falls back through
+    /// individual hash_fold dispatches on any short-circuit condition.
+    pub(crate) fn dispatch_poseidon2_hash_fold_chain(
+        &self,
+        io: &WebGpuBuffer<Digest>,
+        output_sizes: &[usize],
+    ) -> Result<bool> {
+        if !self.hash_fold_gpu_enabled.get() {
+            return Ok(false);
+        }
+        let Some(hash) = self.poseidon2.as_ref() else {
+            return Ok(false);
+        };
+        if output_sizes.is_empty() {
+            return Ok(true);
+        }
+        let Some(io_gpu) = io.raw_buffer() else {
+            return Ok(false);
+        };
+        if !self.storage_binding_fits(io) {
+            return Ok(false);
+        }
+        let (Some(round_constants_gpu), Some(m_int_diag_gpu)) = (
+            hash.round_constants.raw_buffer(),
+            hash.m_int_diag.raw_buffer(),
+        ) else {
+            return Ok(false);
+        };
+        io.sync_cpu_to_gpu(self)?;
+
+        // Pre-build params + bind groups for every layer so the
+        // compute pass below can reference each by index. The JS GC
+        // keeps them alive while the encoder/pass borrow them.
+        let mut params_bufs: Vec<web_sys::GpuBuffer> = Vec::with_capacity(output_sizes.len());
+        let mut bind_groups: Vec<web_sys::GpuBindGroup> = Vec::with_capacity(output_sizes.len());
+        let mut workgroups_per_layer: Vec<u32> = Vec::with_capacity(output_sizes.len());
+        for &output_size in output_sizes {
+            if output_size == 0 {
+                continue;
+            }
+            let input_size = 2 * output_size;
+            let output_base = digest_word_offset(io.elem_offset + output_size)?;
+            let input_base = digest_word_offset(io.elem_offset + input_size)?;
+            let params = [
+                u32::try_from(output_size).expect("WebGPU hash_fold output size exceeds u32"),
+                u32::try_from(input_size).expect("WebGPU hash_fold input size exceeds u32"),
+                0,
+                0,
+                output_base,
+                input_base,
+                0,
+                0,
+            ];
+            let params_buf = self.create_uniform_buffer(
+                "webgpu_poseidon2_fold_params",
+                bytemuck::cast_slice(&params),
+            )?;
+            let bind_group = self.create_bind_group(
+                "webgpu_poseidon2_fold_bind_group",
+                &hash.fold_layout,
+                &[
+                    WebGpuBufferBinding::new(0, round_constants_gpu),
+                    WebGpuBufferBinding::new(1, m_int_diag_gpu),
+                    WebGpuBufferBinding::new(2, io_gpu),
+                    WebGpuBufferBinding {
+                        binding: 4,
+                        buffer: &params_buf,
+                        offset: 0,
+                        size: Some(32),
+                    },
+                ],
+            )?;
+            params_bufs.push(params_buf);
+            bind_groups.push(bind_group);
+            workgroups_per_layer.push(
+                u32::try_from(output_size)
+                    .expect("WebGPU hash_fold output size exceeds u32")
+                    .div_ceil(256),
+            );
+        }
+        if bind_groups.is_empty() {
+            return Ok(true);
+        }
+        let encoder = self.device.create_command_encoder();
+        let pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&hash.fold_kernel.pipeline);
+        for (bind_group, workgroups) in bind_groups.iter().zip(workgroups_per_layer.iter()) {
+            pass.set_bind_group(0, Some(bind_group));
+            pass.dispatch_workgroups_with_workgroup_count_y_and_workgroup_count_z(
+                *workgroups, 1, 1,
+            );
+        }
+        pass.end();
+        self.submit(encoder.finish());
+        // Mirror finish_hal_op accounting for each layer.
+        for _ in 0..bind_groups.len() {
+            self.record_gpu_result_authoritative("hash_fold", true);
+        }
+        io.mark_gpu_dirty();
         Ok(true)
     }
 
