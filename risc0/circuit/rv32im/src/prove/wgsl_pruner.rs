@@ -56,6 +56,15 @@
 pub const EXEC_TOP_CHUNK0_WGSL: &str =
     include_str!("../zirgen/exec_top_chunk0.wgsl");
 
+/// SP7 iter 6d-e (2026-05-15): pruned `exec_TopChunk1` WGSL module
+/// (chunk1 of the top-level mux) -- 1.09 MB, sub-cliff. Generated via
+/// `pruned_module_at_chunk(..., "exec_TopChunk1", 1)`. Together with
+/// chunk0 these cover the full top-level mux; sub-chunk bases (e.g.,
+/// `exec_Sha0` with only Chunk0) clamp to their max chunk index in
+/// each module.
+pub const EXEC_TOP_CHUNK1_WGSL: &str =
+    include_str!("../zirgen/exec_top_chunk1.wgsl");
+
 /// Thin `@compute` wrapper to make [`EXEC_TOP_CHUNK0_WGSL`] runnable on
 /// a WebGPU compute pipeline. Concatenated at use sites; depends on the
 /// names declared in the vendored module (`cycle`, `params`, `kLayout_Top`,
@@ -69,6 +78,21 @@ fn exec_top_chunk0_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   let bound = BoundLayout_TopLayout(kLayout_Top, buf_data);
   let _result = exec_TopChunk0(bound, buf_global);
+}
+"#;
+
+/// SP7 iter 6d-e: `@compute` wrapper for [`EXEC_TOP_CHUNK1_WGSL`].
+/// Symmetric with the chunk0 wrapper -- only the dispatched function
+/// name changes (`exec_TopChunk1` vs `exec_TopChunk0`).
+pub const EXEC_TOP_CHUNK1_COMPUTE_ENTRY: &str = r#"
+@compute @workgroup_size(64)
+fn exec_top_chunk1_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  cycle = gid.x;
+  if (cycle >= params.data_rows) {
+    return;
+  }
+  let bound = BoundLayout_TopLayout(kLayout_Top, buf_data);
+  let _result = exec_TopChunk1(bound, buf_global);
 }
 "#;
 

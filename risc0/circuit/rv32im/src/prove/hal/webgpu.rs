@@ -82,6 +82,9 @@ thread_local! {
     /// segment, so a struct field would defeat the cache.)
     static WITGEN_TOP_CHUNK0_KERNEL: RefCell<Option<WebGpuKernel>> =
         const { RefCell::new(None) };
+    /// SP7 iter 6d-e: chunk1 sibling kernel cache.
+    static WITGEN_TOP_CHUNK1_KERNEL: RefCell<Option<WebGpuKernel>> =
+        const { RefCell::new(None) };
     /// Tracks whether the async prewarm task has been spawned this
     /// session, so multiple `prewarm_witgen_kernel()` calls (one per
     /// segment_prover) only fire the compile once.
@@ -109,6 +112,23 @@ const WITGEN_TOP_CHUNK0_WGSL: &str = concat!(
     "  }\n",
     "  let bound = BoundLayout_TopLayout(kLayout_Top, buf_data);\n",
     "  let _result = exec_TopChunk0(bound, buf_global);\n",
+    "}\n",
+);
+
+/// SP7 iter 6d-e: chunk1 sibling of [`WITGEN_TOP_CHUNK0_WGSL`]. Same
+/// shape but uses the chunk1-everywhere pruned module + an
+/// `exec_top_chunk1_main` entry.
+const WITGEN_TOP_CHUNK1_WGSL: &str = concat!(
+    include_str!("../../zirgen/exec_top_chunk1.wgsl"),
+    "\n",
+    "@compute @workgroup_size(64)\n",
+    "fn exec_top_chunk1_main(@builtin(global_invocation_id) gid: vec3<u32>) {\n",
+    "  cycle = gid.x;\n",
+    "  if (cycle >= params.data_rows) {\n",
+    "    return;\n",
+    "  }\n",
+    "  let bound = BoundLayout_TopLayout(kLayout_Top, buf_data);\n",
+    "  let _result = exec_TopChunk1(bound, buf_global);\n",
     "}\n",
 );
 
@@ -143,6 +163,11 @@ impl WebGpuCircuitHal {
         }
         let hal = self.hal.clone();
         wasm_bindgen_futures::spawn_local(async move {
+            // SP7 iter 6d-e: compile both top-mux chunks. Chrome
+            // pipelines createComputePipelineAsync internally so the
+            // two compiles can overlap with each other and with
+            // session execution. Measured wall on xgboost: chunk0
+            // compile ~2.65 s, chunk1 ~similar.
             let _t = WebGpuStageTimer::new("iter6d_d_witgen_prewarm_async");
             let layout = match hal.create_bind_group_layout(
                 "iter6d_c_witgen_layout",
@@ -162,25 +187,47 @@ impl WebGpuCircuitHal {
                     return;
                 }
             };
-            match hal
-                .create_compute_kernel_async(
-                    "iter6d_c_witgen_kernel",
-                    WITGEN_TOP_CHUNK0_WGSL,
-                    "exec_top_chunk0_main",
-                    &[layout],
-                )
-                .await
-            {
+            // Kick off both compiles before awaiting either; the
+            // browser-side promises run in parallel.
+            let layouts0 = [layout.clone()];
+            let layouts1 = [layout.clone()];
+            let chunk0_fut = hal.create_compute_kernel_async(
+                "iter6d_c_witgen_kernel_chunk0",
+                WITGEN_TOP_CHUNK0_WGSL,
+                "exec_top_chunk0_main",
+                &layouts0,
+            );
+            let chunk1_fut = hal.create_compute_kernel_async(
+                "iter6d_e_witgen_kernel_chunk1",
+                WITGEN_TOP_CHUNK1_WGSL,
+                "exec_top_chunk1_main",
+                &layouts1,
+            );
+            match chunk0_fut.await {
                 Ok(kernel) => {
                     WITGEN_TOP_CHUNK0_KERNEL
                         .with(|cell| *cell.borrow_mut() = Some(kernel));
                     risc0_zkp::hal::webgpu::log_webgpu_metric(
-                        "iter6d_d_witgen_prewarm_async DONE",
+                        "iter6d_d_witgen_prewarm_async chunk0 DONE",
                     );
                 }
                 Err(err) => {
                     risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "iter6d_d_witgen_prewarm_async compile_FAILED err={err:?}"
+                        "iter6d_d_witgen_prewarm_async chunk0_FAILED err={err:?}"
+                    ));
+                }
+            }
+            match chunk1_fut.await {
+                Ok(kernel) => {
+                    WITGEN_TOP_CHUNK1_KERNEL
+                        .with(|cell| *cell.borrow_mut() = Some(kernel));
+                    risc0_zkp::hal::webgpu::log_webgpu_metric(
+                        "iter6d_e_witgen_prewarm_async chunk1 DONE",
+                    );
+                }
+                Err(err) => {
+                    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                        "iter6d_e_witgen_prewarm_async chunk1_FAILED err={err:?}"
                     ));
                 }
             }
@@ -194,25 +241,37 @@ impl WebGpuCircuitHal {
         WITGEN_TOP_CHUNK0_KERNEL.with(|cell| cell.borrow().clone())
     }
 
+    fn lookup_witgen_top_chunk1_kernel(&self) -> Option<WebGpuKernel> {
+        WITGEN_TOP_CHUNK1_KERNEL.with(|cell| cell.borrow().clone())
+    }
+
     fn dispatch_witgen_top_chunk0_probe(
         &self,
         data: &MetaBuffer<WebGpuHal>,
         global: &MetaBuffer<WebGpuHal>,
         total_cycles: u32,
     ) -> Result<()> {
-        let _t = WebGpuStageTimer::new(format!(
-            "iter6d_c_witgen_probe cycles={}",
-            total_cycles
-        ));
-        // iter-6d-d: if the async prewarm has finished, use the cached
-        // kernel; otherwise skip the GPU dispatch this segment (the
-        // probe is measurement-only -- rust_steps is the authority).
-        let Some(kernel) = self.lookup_witgen_top_chunk0_kernel() else {
+        // iter-6d-e: dispatch chunk0 and chunk1 (if available). Each
+        // kernel internally filters by major opcode arm via its mux
+        // dispatch; cycles whose opcode is outside the kernel's arms
+        // execute the trailing `unreachable` branch (effectively a
+        // no-op since the kernel writes nothing in that case).
+        // rust_steps still runs after and overwrites all cells so
+        // output remains authoritative.
+        let chunk0 = self.lookup_witgen_top_chunk0_kernel();
+        let chunk1 = self.lookup_witgen_top_chunk1_kernel();
+        let kernels: Vec<WebGpuKernel> = [chunk0, chunk1].into_iter().flatten().collect();
+        if kernels.is_empty() {
             risc0_zkp::hal::webgpu::log_webgpu_metric(
-                "iter6d_c_witgen_probe SKIP kernel_not_ready",
+                "iter6d_c_witgen_probe SKIP kernels_not_ready",
             );
             return Ok(());
-        };
+        }
+        let _t = WebGpuStageTimer::new(format!(
+            "iter6d_c_witgen_probe cycles={} chunks={}",
+            total_cycles,
+            kernels.len(),
+        ));
         let layout = self.hal.create_bind_group_layout(
             "iter6d_c_witgen_layout",
             &[
@@ -260,7 +319,9 @@ impl WebGpuCircuitHal {
         )?;
 
         let workgroups = total_cycles.div_ceil(64);
-        self.hal.dispatch_compute_1d(&kernel, &bind_group, workgroups);
+        for kernel in &kernels {
+            self.hal.dispatch_compute_1d(kernel, &bind_group, workgroups);
+        }
         Ok(())
     }
 }
