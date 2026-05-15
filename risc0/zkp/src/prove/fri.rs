@@ -251,28 +251,36 @@ pub async fn fri_prove_async(
         round_positions.push(per_round);
     }
 
-    let mut inner_proofs = Vec::with_capacity(inner_merkles.len());
-    for merkle in inner_merkles {
-        inner_proofs.push(
-            merkle
-                .prove_batch_async(hal, query_positions.as_slice())
-                .await?,
-        );
-    }
-
-    let mut round_proofs = Vec::with_capacity(rounds.len());
-    for (round_idx, round) in rounds.iter().enumerate() {
-        let positions = round_positions
+    // SP8 iter 3 (2026-05-15): issue prove_batch_async calls
+    // concurrently across the inner merkles and the FRI rounds.
+    // prove_batch_async dispatches the underlying GPU reads and then
+    // awaits a Promise per readback; running the .await calls in
+    // parallel via try_join_all lets the browser pipeline mapAsync
+    // requests across trees instead of round-tripping each in turn.
+    // This is the same pattern as SP8 iter 1's PolyGroup batch
+    // evaluate, applied to the FRI query phase.
+    let inner_proofs: Vec<_> = futures::future::try_join_all(
+        inner_merkles
             .iter()
-            .map(|per_round| per_round[round_idx])
-            .collect::<Vec<_>>();
-        round_proofs.push(
-            round
-                .merkle
-                .prove_batch_async(hal, positions.as_slice())
-                .await?,
-        );
-    }
+            .map(|merkle| merkle.prove_batch_async(hal, query_positions.as_slice())),
+    )
+    .await?;
+
+    let round_positions_per_round: Vec<Vec<usize>> = (0..rounds.len())
+        .map(|round_idx| {
+            round_positions
+                .iter()
+                .map(|per_round| per_round[round_idx])
+                .collect()
+        })
+        .collect();
+    let round_proofs: Vec<_> = futures::future::try_join_all(
+        rounds
+            .iter()
+            .zip(round_positions_per_round.iter())
+            .map(|(round, positions)| round.merkle.prove_batch_async(hal, positions.as_slice())),
+    )
+    .await?;
 
     for query_idx in 0..QUERIES {
         for proofs in &inner_proofs {
