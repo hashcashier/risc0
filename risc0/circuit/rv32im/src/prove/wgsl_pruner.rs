@@ -40,6 +40,37 @@
 //
 // The result is a self-contained WGSL module that naga validates and
 // (for `exec_Top` chunks at least) clears both Tint capacity ceilings.
+//
+// Iter 6d-a (2026-05-15): the pruned exec_TopChunk0 module is vendored at
+// `risc0/circuit/rv32im/src/zirgen/exec_top_chunk0.wgsl` (~1 MB) and
+// exposed via [`EXEC_TOP_CHUNK0_WGSL`]. To get a runnable compute
+// pipeline, append [`EXEC_TOP_CHUNK0_COMPUTE_ENTRY`] which adds a thin
+// `@compute @workgroup_size(64) fn main` that sets `cycle = gid.x` and
+// calls `exec_TopChunk0(kLayout_Top-bound, 0u)`. Real dispatch wiring
+// (iter 6d-b) selects the correct chunk per major opcode and feeds
+// preflight data through the bound buffers.
+
+/// Pruned `exec_TopChunk0` WGSL module (prelude + types + layout +
+/// reachable-closure of `exec_TopChunk0`). ~1 MB, sub-cliff for both
+/// Chrome's whole-module and reachable-closure capacity ceilings.
+pub const EXEC_TOP_CHUNK0_WGSL: &str =
+    include_str!("../zirgen/exec_top_chunk0.wgsl");
+
+/// Thin `@compute` wrapper to make [`EXEC_TOP_CHUNK0_WGSL`] runnable on
+/// a WebGPU compute pipeline. Concatenated at use sites; depends on the
+/// names declared in the vendored module (`cycle`, `params`, `kLayout_Top`,
+/// `BoundLayout_TopLayout`, `exec_TopChunk0`).
+pub const EXEC_TOP_CHUNK0_COMPUTE_ENTRY: &str = r#"
+@compute @workgroup_size(64)
+fn exec_top_chunk0_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  cycle = gid.x;
+  if (cycle >= params.data_rows) {
+    return;
+  }
+  let bound = BoundLayout_TopLayout(kLayout_Top, buf_data);
+  let _result = exec_TopChunk0(bound, buf_global);
+}
+"#;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -415,5 +446,39 @@ fn gamma() -> u32 { return beta(2u); }
              update test thresholds and ungate TopAccum from CPU fallback",
             bytes
         );
+    }
+
+    /// iter-6d-a (2026-05-15): the vendored exec_TopChunk0 module with the
+    /// thin `@compute` entry wrapper appended must remain naga-valid. This
+    /// pins the wrapper against the names declared in the vendored WGSL --
+    /// any future MuxChunk regeneration that renames `kLayout_Top`,
+    /// `BoundLayout_TopLayout`, `cycle`, or `params` will fail here.
+    #[test]
+    fn iter6d_a_compute_entry_concat_validates_with_naga() {
+        let module = format!(
+            "{}{}",
+            EXEC_TOP_CHUNK0_WGSL, EXEC_TOP_CHUNK0_COMPUTE_ENTRY,
+        );
+        let out_path = std::path::PathBuf::from("/tmp/iter6d_a_exec_top_chunk0_with_entry.wgsl");
+        std::fs::write(&out_path, &module).expect("write probe module");
+        let rc = std::process::Command::new("naga").arg(&out_path).output();
+        match rc {
+            Ok(r) if r.status.success() => {
+                eprintln!(
+                    "iter6d-a: naga validation successful for {} bytes module",
+                    module.len()
+                );
+            }
+            Ok(r) => {
+                let stderr = String::from_utf8_lossy(&r.stderr);
+                panic!(
+                    "iter6d-a: naga validation failed for compute-entry concat:\n{}",
+                    &stderr.chars().take(4000).collect::<String>()
+                );
+            }
+            Err(e) => {
+                eprintln!("skipping naga validation: {} (install naga-cli)", e);
+            }
+        }
     }
 }
