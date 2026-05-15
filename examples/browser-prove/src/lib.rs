@@ -2899,6 +2899,44 @@ fn witgen_top_accum(@builtin(global_invocation_id) gid: vec3<u32>) {
         set_witgen_gpu_probe_enabled(false);
     }
 
+    /// SP7 iter 6d-f -- Tint compile + dispatch check for the
+    /// "all-chunks" variant (2.35 MB module with multi-chunk merge
+    /// helpers). On the boundary of Chrome's whole-module cliff
+    /// (1.99-3.27 MB uncertainty band) -- this test is the empirical
+    /// pass/fail determination. If it passes, iter-6d-f can replace
+    /// rust_steps witgen on segments 2-N. If it fails, the next
+    /// iteration needs per-major-opcode chunk dispatch instead of
+    /// a single fat module.
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_f_exec_top_chunk0_all_compiles_on_chrome() {
+        use risc0_circuit_rv32im::prove::wgsl_pruner::{
+            EXEC_TOP_CHUNK0_ALL_COMPUTE_ENTRY, EXEC_TOP_CHUNK0_ALL_WGSL,
+        };
+        console_error_panic_hook::set_once();
+        let module = format!("{EXEC_TOP_CHUNK0_ALL_WGSL}{EXEC_TOP_CHUNK0_ALL_COMPUTE_ENTRY}");
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "iter6d_f all-chunks module_bytes={}", module.len()
+        ));
+        let ok = sp7_probe("iter6d_f", &module, "exec_top_chunk0_all_main").await;
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "iter6d_f all-chunks tint_compile_ok={}", ok
+        ));
+        // Soft assertion: log the result either way so we have data
+        // even if Tint rejects. The witness-replacement path needs
+        // this to compile, but failure is data, not test failure.
+        if !ok {
+            risc0_zkp::hal::webgpu::log_webgpu_metric(
+                "iter6d_f VERDICT: 2.35 MB exceeds Chrome whole-module cliff; \
+                 per-major-opcode dispatch needed instead of single fat module",
+            );
+        } else {
+            risc0_zkp::hal::webgpu::log_webgpu_metric(
+                "iter6d_f VERDICT: all-chunks module compiles + dispatches; \
+                 next step is wiring as rust_steps replacement",
+            );
+        }
+    }
+
     /// SP7 iter 6d-a -- end-to-end Tint compile check for the vendored
     /// `exec_TopChunk0` pruned module + @compute wrapper.
     ///

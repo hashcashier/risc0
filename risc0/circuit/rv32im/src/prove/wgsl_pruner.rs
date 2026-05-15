@@ -96,6 +96,32 @@ fn exec_top_chunk1_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// SP7 iter 6d-f (2026-05-15): "all chunks" pruned module --
+/// `exec_TopChunk0_all_chunks` reachable closure with each
+/// `exec_BASE(...)` callsite replaced by a synthesized
+/// `exec_BASE_combined(...)` helper that calls every ChunkN
+/// sequentially and OR-merges the returns (assumes Tint zero-inits
+/// the unreachable-arm return vars). 2.35 MB -- on the boundary of
+/// Chrome's whole-module ceiling (1.99-3.27 MB band per iter-5b).
+/// Generated via `.recursive/.../sp9/gen_all_chunks.py`.
+pub const EXEC_TOP_CHUNK0_ALL_WGSL: &str =
+    include_str!("../zirgen/exec_top_chunk0_all.wgsl");
+
+/// SP7 iter 6d-f `@compute` wrapper for [`EXEC_TOP_CHUNK0_ALL_WGSL`].
+/// Identical body to the chunk0 wrapper -- only differs in the entry
+/// point name to disambiguate the kernel cache key.
+pub const EXEC_TOP_CHUNK0_ALL_COMPUTE_ENTRY: &str = r#"
+@compute @workgroup_size(64)
+fn exec_top_chunk0_all_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  cycle = gid.x;
+  if (cycle >= params.data_rows) {
+    return;
+  }
+  let bound = BoundLayout_TopLayout(kLayout_Top, buf_data);
+  let _result = exec_TopChunk0(bound, buf_global);
+}
+"#;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 /// One parsed WGSL function block: `fn <name>(...) ... { ... }` followed
