@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -73,13 +73,24 @@ pub fn set_witgen_gpu_probe_enabled(enabled: bool) {
     WITGEN_GPU_PROBE_ENABLED.store(enabled, Ordering::SeqCst);
 }
 
+thread_local! {
+    /// SP7 iter 6d-d: session-local cache for the witgen kernel. Lives
+    /// across WebGpuCircuitHal constructions so the spawn_local'd
+    /// async prewarm task's result is reachable from every segment's
+    /// `dispatch_witgen_top_chunk0_probe` call. (ProverImpl's
+    /// segment_prover constructs a fresh WebGpuCircuitHal per
+    /// segment, so a struct field would defeat the cache.)
+    static WITGEN_TOP_CHUNK0_KERNEL: RefCell<Option<WebGpuKernel>> =
+        const { RefCell::new(None) };
+    /// Tracks whether the async prewarm task has been spawned this
+    /// session, so multiple `prewarm_witgen_kernel()` calls (one per
+    /// segment_prover) only fire the compile once.
+    static WITGEN_PREWARM_SPAWNED: Cell<bool> = const { Cell::new(false) };
+}
+
 #[allow(dead_code)]
 pub(crate) struct WebGpuCircuitHal {
     hal: Rc<WebGpuHal>,
-    // Wrapped in `Rc<RefCell<...>>` so the spawn_local async prewarm
-    // task can store the compiled kernel here while the
-    // WebGpuCircuitHal instance lives elsewhere as `Rc<WebGpuCircuitHal>`.
-    witgen_top_chunk0_kernel: Rc<RefCell<Option<WebGpuKernel>>>,
 }
 
 /// Concatenation of the vendored exec_TopChunk0 pruned module and the thin
@@ -103,33 +114,34 @@ const WITGEN_TOP_CHUNK0_WGSL: &str = concat!(
 
 impl WebGpuCircuitHal {
     pub(crate) fn new(hal: Rc<WebGpuHal>) -> Self {
-        Self {
-            hal,
-            witgen_top_chunk0_kernel: Rc::new(RefCell::new(None)),
-        }
+        Self { hal }
     }
 
     /// SP7 iter 6d-d (2026-05-15): kick off the witgen kernel Tint
     /// compile asynchronously. The browser GPU process compiles in
     /// parallel with the wasm thread's guest execution + session
     /// setup; by the time `WebGpuCircuitHal::generate_witness` runs,
-    /// the kernel may already be ready in the shared cache cell.
+    /// the kernel may already be ready in the thread-local cache.
     ///
     /// Called from `segment_prover()` after `WebGpuCircuitHal::new()`.
-    /// Best-effort: failures log via `log_webgpu_metric` and leave the
-    /// cache empty, so `dispatch_witgen_top_chunk0_probe` skips the
-    /// GPU dispatch when the kernel isn't ready and rust_steps remains
-    /// the authority either way.
+    /// Idempotent across multiple calls in one session: the
+    /// `WITGEN_PREWARM_SPAWNED` thread_local gate ensures the compile
+    /// runs at most once per session.
     pub fn prewarm_witgen_kernel(&self) {
         if !WITGEN_GPU_PROBE_ENABLED.load(Ordering::SeqCst) {
-            // Don't spend Tint compile time when no test will use it.
             return;
         }
-        if self.witgen_top_chunk0_kernel.borrow().is_some() {
-            return; // already compiled (e.g., re-construction)
+        if WITGEN_PREWARM_SPAWNED.with(|spawned| {
+            if spawned.get() {
+                true
+            } else {
+                spawned.set(true);
+                false
+            }
+        }) {
+            return; // already spawned this session
         }
         let hal = self.hal.clone();
-        let cache = self.witgen_top_chunk0_kernel.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let _t = WebGpuStageTimer::new("iter6d_d_witgen_prewarm_async");
             let layout = match hal.create_bind_group_layout(
@@ -160,7 +172,8 @@ impl WebGpuCircuitHal {
                 .await
             {
                 Ok(kernel) => {
-                    *cache.borrow_mut() = Some(kernel);
+                    WITGEN_TOP_CHUNK0_KERNEL
+                        .with(|cell| *cell.borrow_mut() = Some(kernel));
                     risc0_zkp::hal::webgpu::log_webgpu_metric(
                         "iter6d_d_witgen_prewarm_async DONE",
                     );
@@ -174,38 +187,11 @@ impl WebGpuCircuitHal {
         });
     }
 
-    /// Returns the witgen kernel if it has been compiled by the
-    /// iter-6d-d async prewarm task. Returns None if the prewarm task
-    /// hasn't finished yet -- the caller should then skip the GPU
-    /// dispatch and rely on rust_steps. Falls back to a synchronous
-    /// compile only if the kernel cell is still empty at dispatch time
-    /// AND `force_sync` is set (used by direct measurement tests).
-    fn lookup_witgen_top_chunk0_kernel(&self, force_sync: bool) -> Result<Option<WebGpuKernel>> {
-        if let Some(kernel) = self.witgen_top_chunk0_kernel.borrow().as_ref() {
-            return Ok(Some(kernel.clone()));
-        }
-        if !force_sync {
-            return Ok(None);
-        }
-        let _t = WebGpuStageTimer::new("iter6d_c_witgen_compile_sync_fallback");
-        let layout = self.hal.create_bind_group_layout(
-            "iter6d_c_witgen_layout",
-            &[
-                WebGpuBindingLayout::storage(0, 0),
-                WebGpuBindingLayout::storage(1, 0),
-                WebGpuBindingLayout::storage(2, 0),
-                WebGpuBindingLayout::storage(3, 0),
-                WebGpuBindingLayout::uniform(4, 32),
-            ],
-        )?;
-        let kernel = self.hal.create_compute_kernel(
-            "iter6d_c_witgen_kernel",
-            WITGEN_TOP_CHUNK0_WGSL,
-            "exec_top_chunk0_main",
-            &[layout],
-        )?;
-        *self.witgen_top_chunk0_kernel.borrow_mut() = Some(kernel.clone());
-        Ok(Some(kernel))
+    /// Returns the witgen kernel if the iter-6d-d async prewarm task
+    /// finished. None means "not ready yet" -- caller skips the GPU
+    /// dispatch and relies on rust_steps.
+    fn lookup_witgen_top_chunk0_kernel(&self) -> Option<WebGpuKernel> {
+        WITGEN_TOP_CHUNK0_KERNEL.with(|cell| cell.borrow().clone())
     }
 
     fn dispatch_witgen_top_chunk0_probe(
@@ -221,7 +207,7 @@ impl WebGpuCircuitHal {
         // iter-6d-d: if the async prewarm has finished, use the cached
         // kernel; otherwise skip the GPU dispatch this segment (the
         // probe is measurement-only -- rust_steps is the authority).
-        let Some(kernel) = self.lookup_witgen_top_chunk0_kernel(false)? else {
+        let Some(kernel) = self.lookup_witgen_top_chunk0_kernel() else {
             risc0_zkp::hal::webgpu::log_webgpu_metric(
                 "iter6d_c_witgen_probe SKIP kernel_not_ready",
             );
