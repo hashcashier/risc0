@@ -85,6 +85,13 @@ thread_local! {
     /// SP7 iter 6d-e: chunk1 sibling kernel cache.
     static WITGEN_TOP_CHUNK1_KERNEL: RefCell<Option<WebGpuKernel>> =
         const { RefCell::new(None) };
+    /// SP7 iter 6d-g step 4: per-arm kernel cache for TOP_CHUNK0_ARM_DELTAS.
+    /// Keyed by arm label (the first element of each tuple in
+    /// TOP_CHUNK0_ARM_DELTAS), one entry per major opcode arm.
+    /// Populated by the spawn_local prewarm task; consumed by
+    /// `dispatch_witgen_arms_probe`.
+    static WITGEN_ARM_KERNELS: RefCell<std::collections::BTreeMap<&'static str, WebGpuKernel>> =
+        RefCell::new(std::collections::BTreeMap::new());
     /// Tracks whether the async prewarm task has been spawned this
     /// session, so multiple `prewarm_witgen_kernel()` calls (one per
     /// segment_prover) only fire the compile once.
@@ -231,6 +238,97 @@ impl WebGpuCircuitHal {
                     ));
                 }
             }
+
+            // SP7 iter 6d-g step 4: compile all per-arm kernels in
+            // parallel. Each kernel is ~830 KB; Chrome pipelines the
+            // create_compute_pipeline_async promises through its GPU
+            // process queue. Total wall on the iter-6d-g step 3
+            // smoke (all 13 arms): 8.46 s for full compile + dispatch,
+            // ~650 ms average per kernel. With async pipelining + this
+            // overlapping with rv32im segment 1 prove, the per-arm
+            // kernels are ready by segments 2-11.
+            use crate::prove::wgsl_pruner::{
+                assemble_arm_kernel, TOP_CHUNK0_ARM_DELTAS,
+            };
+            let arm_layout = match hal.create_bind_group_layout(
+                "iter6d_g_arm_layout",
+                &[
+                    WebGpuBindingLayout::storage(0, 0),
+                    WebGpuBindingLayout::storage(1, 0),
+                    WebGpuBindingLayout::storage(2, 0),
+                    WebGpuBindingLayout::storage(3, 0),
+                    WebGpuBindingLayout::uniform(4, 32),
+                ],
+            ) {
+                Ok(l) => l,
+                Err(err) => {
+                    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                        "iter6d_g_prewarm arm_layout_FAILED err={err:?}"
+                    ));
+                    return;
+                }
+            };
+            let arm_layouts = [arm_layout.clone()];
+            let mut arm_modules: Vec<(String, String, &str)> =
+                Vec::with_capacity(TOP_CHUNK0_ARM_DELTAS.len());
+            for (label, delta, _sub_fn) in TOP_CHUNK0_ARM_DELTAS {
+                let wrapper = format!(
+                    "@compute @workgroup_size(64)\n\
+                     fn iter6d_g_{}_main(@builtin(global_invocation_id) gid: vec3<u32>) {{\n\
+                       cycle = gid.x;\n\
+                       if (cycle >= params.data_rows) {{ return; }}\n\
+                       data_buf[cycle] = data_buf[cycle];\n\
+                     }}\n",
+                    label,
+                );
+                let module = assemble_arm_kernel(delta, &wrapper);
+                let entry = format!("iter6d_g_{}_main", label);
+                arm_modules.push((module, entry, *label));
+            }
+            // Kick off all 13 compiles in parallel, then await each
+            // in sequence -- Chrome pipelines the GPU-process work
+            // even though Rust awaits serially.
+            let label_strs: Vec<&'static str> =
+                arm_modules.iter().map(|(_, _, l)| *l).collect();
+            let entry_strs: Vec<String> =
+                arm_modules.iter().map(|(_, e, _)| e.clone()).collect();
+            let futures: Vec<_> = arm_modules
+                .iter()
+                .enumerate()
+                .map(|(i, (module, entry, _))| {
+                    let label: &'static str = label_strs[i];
+                    let entry: &str = entry;
+                    hal.create_compute_kernel_async(
+                        "iter6d_g_arm_kernel",
+                        module,
+                        entry,
+                        &arm_layouts,
+                    )
+                })
+                .collect();
+            for (i, fut) in futures.into_iter().enumerate() {
+                match fut.await {
+                    Ok(kernel) => {
+                        let label = label_strs[i];
+                        WITGEN_ARM_KERNELS
+                            .with(|cell| cell.borrow_mut().insert(label, kernel));
+                        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                            "iter6d_g_prewarm arm={} DONE", label
+                        ));
+                    }
+                    Err(err) => {
+                        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                            "iter6d_g_prewarm arm={} FAILED err={err:?}",
+                            label_strs[i]
+                        ));
+                    }
+                }
+            }
+            let _ = entry_strs; // keep strings alive across the async run
+            risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                "iter6d_g_prewarm ALL arms requested={}",
+                TOP_CHUNK0_ARM_DELTAS.len(),
+            ));
         });
     }
 
