@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use anyhow::Result;
@@ -20,7 +21,10 @@ use risc0_zkp::{
     adapter::{CircuitInfo as _, PROOF_SYSTEM_INFO},
     field::Elem as _,
     hal::{
-        webgpu::{WebGpuBuffer, WebGpuCircuitEvalCheck, WebGpuHal, WebGpuStageTimer},
+        webgpu::{
+            WebGpuBindingLayout, WebGpuBuffer, WebGpuBufferBinding, WebGpuCircuitEvalCheck,
+            WebGpuHal, WebGpuKernel, WebGpuStageTimer,
+        },
         AccumPreflight, Buffer, CircuitHal, Hal,
     },
     prove::Prover,
@@ -43,9 +47,152 @@ use crate::{
     RV32IM_SEAL_VERSION,
 };
 
-#[derive(Default)]
+// SP7 iter 6d-c (2026-05-15): hold the HAL handle so generate_witness
+// can dispatch the GPU exec_TopChunk0 kernel alongside the CPU
+// rust_steps reference. Probe-mode for now: GPU output is timed and
+// dropped; rust_steps remains the authority.
+//
+// `witgen_gpu_probe_enabled` is opt-in (default off) since the first
+// dispatch triggers a ~60 s Tint compile of the 1.08 MB pruned WGSL
+// module -- enabling it on a baseline xgboost run would add ~60 s wall
+// for ~6 s savings ceiling (see project_sp7_witgen_savings_ceiling).
+// Tests set the flag explicitly; the probe is the measurement
+// infrastructure iter-6d-d/e need to design pre-warm + dispatch.
+//
+// The first dispatch lazily fills `witgen_top_chunk0_kernel`; subsequent
+// segments reuse the cached pipeline + layout for free.
 #[allow(dead_code)]
-pub(crate) struct WebGpuCircuitHal;
+pub(crate) struct WebGpuCircuitHal {
+    hal: Rc<WebGpuHal>,
+    witgen_gpu_probe_enabled: Cell<bool>,
+    witgen_top_chunk0_kernel: RefCell<Option<WebGpuKernel>>,
+}
+
+/// Concatenation of the vendored exec_TopChunk0 pruned module and the thin
+/// `@compute @workgroup_size(64) fn exec_top_chunk0_main` entry wrapper.
+/// naga-validated by `iter6d_a_compute_entry_concat_validates_with_naga`
+/// (cargo-test side) and Tint-validated by
+/// `iter6d_a_exec_top_chunk0_compiles_on_chrome` (wasm-bindgen side).
+const WITGEN_TOP_CHUNK0_WGSL: &str = concat!(
+    include_str!("../../zirgen/exec_top_chunk0.wgsl"),
+    "\n",
+    "@compute @workgroup_size(64)\n",
+    "fn exec_top_chunk0_main(@builtin(global_invocation_id) gid: vec3<u32>) {\n",
+    "  cycle = gid.x;\n",
+    "  if (cycle >= params.data_rows) {\n",
+    "    return;\n",
+    "  }\n",
+    "  let bound = BoundLayout_TopLayout(kLayout_Top, buf_data);\n",
+    "  let _result = exec_TopChunk0(bound, buf_global);\n",
+    "}\n",
+);
+
+impl WebGpuCircuitHal {
+    pub(crate) fn new(hal: Rc<WebGpuHal>) -> Self {
+        Self {
+            hal,
+            witgen_gpu_probe_enabled: Cell::new(false),
+            witgen_top_chunk0_kernel: RefCell::new(None),
+        }
+    }
+
+    /// Enable/disable the iter-6d-c probe-mode GPU witgen dispatch. Default
+    /// off -- the first dispatch triggers a ~60 s Tint compile.
+    pub fn set_witgen_gpu_probe_enabled(&self, enabled: bool) {
+        self.witgen_gpu_probe_enabled.set(enabled);
+    }
+
+    fn ensure_witgen_top_chunk0_kernel(&self) -> Result<WebGpuKernel> {
+        if let Some(kernel) = self.witgen_top_chunk0_kernel.borrow().as_ref() {
+            return Ok(kernel.clone());
+        }
+        let _t = WebGpuStageTimer::new("iter6d_c_witgen_compile");
+        // Re-fetched via the HAL's layout cache (SP9 phase 1) so the
+        // pipeline references the same JS instance every dispatch's bind
+        // group is built against. The fixed shape + static label make
+        // every call after the first a cache hit.
+        let layout = self.hal.create_bind_group_layout(
+            "iter6d_c_witgen_layout",
+            &[
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::storage(1, 0),
+                WebGpuBindingLayout::storage(2, 0),
+                WebGpuBindingLayout::storage(3, 0),
+                WebGpuBindingLayout::uniform(4, 32),
+            ],
+        )?;
+        let kernel = self.hal.create_compute_kernel(
+            "iter6d_c_witgen_kernel",
+            WITGEN_TOP_CHUNK0_WGSL,
+            "exec_top_chunk0_main",
+            &[layout],
+        )?;
+        *self.witgen_top_chunk0_kernel.borrow_mut() = Some(kernel.clone());
+        Ok(kernel)
+    }
+
+    fn dispatch_witgen_top_chunk0_probe(
+        &self,
+        data: &MetaBuffer<WebGpuHal>,
+        global: &MetaBuffer<WebGpuHal>,
+        total_cycles: u32,
+    ) -> Result<()> {
+        let _t = WebGpuStageTimer::new(format!(
+            "iter6d_c_witgen_probe cycles={}",
+            total_cycles
+        ));
+        let kernel = self.ensure_witgen_top_chunk0_kernel()?;
+        let layout = self.hal.create_bind_group_layout(
+            "iter6d_c_witgen_layout",
+            &[
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::storage(1, 0),
+                WebGpuBindingLayout::storage(2, 0),
+                WebGpuBindingLayout::storage(3, 0),
+                WebGpuBindingLayout::uniform(4, 32),
+            ],
+        )?;
+
+        // The kernel's WGSL declares accum/mix/params bindings but the
+        // witgen path only reads data + global; allocate small placeholders.
+        let placeholder_bytes: u64 = 256;
+        let accum_buf = self
+            .hal
+            .create_storage_buffer("iter6d_c_witgen_accum_placeholder", placeholder_bytes)?;
+        let mix_buf = self
+            .hal
+            .create_storage_buffer("iter6d_c_witgen_mix_placeholder", placeholder_bytes)?;
+        let params: [u32; 8] = [total_cycles, 1, total_cycles, 1, 0, 0, 0, 0];
+        let params_bytes: &[u8] = bytemuck::cast_slice(&params);
+        let params_buf = self
+            .hal
+            .create_uniform_buffer("iter6d_c_witgen_params_placeholder", params_bytes)?;
+
+        let data_gpu = data
+            .buf
+            .raw_buffer()
+            .ok_or_else(|| anyhow::anyhow!("iter-6d-c: data buffer missing GPU storage"))?;
+        let global_gpu = global
+            .buf
+            .raw_buffer()
+            .ok_or_else(|| anyhow::anyhow!("iter-6d-c: global buffer missing GPU storage"))?;
+        let bind_group = self.hal.create_bind_group(
+            "iter6d_c_witgen_bg",
+            &layout,
+            &[
+                WebGpuBufferBinding::new(0, data_gpu),
+                WebGpuBufferBinding::new(1, global_gpu),
+                WebGpuBufferBinding::new(2, &accum_buf),
+                WebGpuBufferBinding::new(3, &mix_buf),
+                WebGpuBufferBinding::new(4, &params_buf),
+            ],
+        )?;
+
+        let workgroups = total_cycles.div_ceil(64);
+        self.hal.dispatch_compute_1d(&kernel, &bind_group, workgroups);
+        Ok(())
+    }
+}
 
 impl WebGpuCircuitEvalCheck for WebGpuCircuitHal {
     fn eval_check_webgpu(
@@ -88,6 +235,18 @@ impl CircuitWitnessGenerator<WebGpuHal> for WebGpuCircuitHal {
             data.rows,
             data.cols
         ));
+        // SP7 iter 6d-c (2026-05-15): probe-mode GPU dispatch alongside
+        // rust_steps. Default off. When enabled, measures the per-segment
+        // GPU dispatch wall and the one-time Tint compile to inform iter
+        // 6d-d/e pre-warm + replace work.
+        if self.witgen_gpu_probe_enabled.get() {
+            let total_cycles = data.rows as u32;
+            if let Err(err) = self.dispatch_witgen_top_chunk0_probe(data, global, total_cycles) {
+                risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                    "iter6d_c_witgen_probe FAILED err={err:?}"
+                ));
+            }
+        }
         super::rust_steps::generate_witness(mode, preflight, global, data)
     }
 }
@@ -284,10 +443,8 @@ impl SegmentProver for WebGpuSegmentProver {
 }
 
 pub fn segment_prover(hal: Rc<WebGpuHal>) -> Result<Box<dyn SegmentProver>> {
-    Ok(Box::new(WebGpuSegmentProver {
-        hal,
-        circuit_hal: Rc::new(WebGpuCircuitHal),
-    }))
+    let circuit_hal = Rc::new(WebGpuCircuitHal::new(hal.clone()));
+    Ok(Box::new(WebGpuSegmentProver { hal, circuit_hal }))
 }
 
 fn step_mode_label(mode: StepMode) -> &'static str {
