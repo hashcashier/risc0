@@ -2899,7 +2899,39 @@ fn witgen_top_accum(@builtin(global_invocation_id) gid: vec3<u32>) {
         set_witgen_gpu_probe_enabled(false);
     }
 
-    /// SP7 iter 6d-f -- Tint compile + dispatch check for the
+    /// SP7 iter 6d-f-take-2 -- Tint compile check for a per-major-arm
+    /// kernel (the Sha0 path). 838 KB module, well under the 2 MB
+    /// cliff that took down the all-chunks fat-module attempt. If
+    /// this compiles + dispatches cleanly, per-major-arm dispatch
+    /// is the path forward: ~16-20 arms × ~800 KB-1 MB per kernel.
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_f_take2_sha0_per_arm_compiles_on_chrome() {
+        use risc0_circuit_rv32im::prove::wgsl_pruner::{
+            EXEC_SHA0_CHUNK0_ONLY_COMPUTE_ENTRY, EXEC_SHA0_CHUNK0_ONLY_WGSL,
+        };
+        console_error_panic_hook::set_once();
+        let module = format!("{EXEC_SHA0_CHUNK0_ONLY_WGSL}{EXEC_SHA0_CHUNK0_ONLY_COMPUTE_ENTRY}");
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "iter6d_f_take2 sha0_per_arm module_bytes={}", module.len()
+        ));
+        let ok = sp7_probe("iter6d_f_take2", &module, "exec_sha0_chunk0_only_main").await;
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "iter6d_f_take2 sha0_per_arm tint_compile_ok={}", ok
+        ));
+        if ok {
+            risc0_zkp::hal::webgpu::log_webgpu_metric(
+                "iter6d_f_take2 VERDICT: per-major-arm dispatch viable; \
+                 generate remaining 15-19 arms and wire multi-kernel dispatch",
+            );
+        } else {
+            risc0_zkp::hal::webgpu::log_webgpu_metric(
+                "iter6d_f_take2 VERDICT: even per-major-arm kernel fails Tint -- \
+                 layout binding mismatch or sub-fn closure exceeds reachable cliff",
+            );
+        }
+    }
+
+    /// SP7 iter 6d-f attempt 1 -- Tint compile + dispatch check for the
     /// "all-chunks" variant (2.35 MB module with multi-chunk merge
     /// helpers). On the boundary of Chrome's whole-module cliff
     /// (1.99-3.27 MB uncertainty band) -- this test is the empirical

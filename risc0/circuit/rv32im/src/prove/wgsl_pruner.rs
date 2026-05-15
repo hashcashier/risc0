@@ -96,7 +96,35 @@ fn exec_top_chunk1_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-/// SP7 iter 6d-f (2026-05-15): "all chunks" pruned module --
+/// SP7 iter 6d-f-take-2 (2026-05-15): per-major-arm pruned module.
+/// Each major opcode arm of exec_TopChunk0 gets its own kernel whose
+/// closure is restricted to the sub-fn path for that arm only.
+/// Module size: ~820 KB (well under Chrome's 2 MB whole-module
+/// cliff). Used in dispatch-per-arm where each kernel runs over the
+/// subset of cycles with that major opcode (per preflight major
+/// opcode lookup -- iter-6d-g work).
+pub const EXEC_SHA0_CHUNK0_ONLY_WGSL: &str =
+    include_str!("../zirgen/exec_sha0_chunk0_only.wgsl");
+
+/// SP7 iter 6d-f-take-2: `@compute` wrapper for the Sha0 per-arm
+/// kernel. Calls only exec_Sha0Chunk0 -- iter-6d-g will multi-call
+/// all Sha0ChunkN with OR-merge to cover all minor opcodes within
+/// the Sha major arm.
+pub const EXEC_SHA0_CHUNK0_ONLY_COMPUTE_ENTRY: &str = r#"
+@compute @workgroup_size(64)
+fn exec_sha0_chunk0_only_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  cycle = gid.x;
+  if (cycle >= params.data_rows) {
+    return;
+  }
+  let bound = BoundLayout_Sha0Layout(kLayout_Top.instResult.arm11._super, buf_data);
+  let nondet = NondetRegStruct(0u);
+  let inst_input = InstInputStruct(0u, 0u, ValU32Struct(0u, 0u), 0u, OneHot_5Struct(Val5Array(0u, 0u, 0u, 0u, 0u)), 0u);
+  let _result = exec_Sha0Chunk0(nondet, inst_input, bound);
+}
+"#;
+
+/// SP7 iter 6d-f attempt 1 (2026-05-15): "all chunks" pruned module --
 /// `exec_TopChunk0_all_chunks` reachable closure with each
 /// `exec_BASE(...)` callsite replaced by a synthesized
 /// `exec_BASE_combined(...)` helper that calls every ChunkN
