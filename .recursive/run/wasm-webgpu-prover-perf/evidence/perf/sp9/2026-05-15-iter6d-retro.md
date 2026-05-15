@@ -33,6 +33,10 @@ on the xgboost wall, dropping it from 103 s to ~97 s.
 
 ## Why iter-6d-c is *not* a wall-time win as a witness-replacement
 
+**SUPERSEDED 2026-05-15:** measurement found Tint compile is **2.65 s**,
+not 60 s. See `2026-05-15-iter6d-cd-measured.md`. Original analysis
+preserved below for historical context.
+
 Combining the per-segment savings with the one-time compile cost:
 
 - **Tint compile** (one-time, first segment): ~60 s
