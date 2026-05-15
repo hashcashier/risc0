@@ -1,19 +1,34 @@
 # Browser WebGPU vs Native CUDA Proving
 
-Status: 2026-05-13 push closed SP6c (metric) + SP6d iter 1-5 (multi-device pool). xgboost wall improved 117.9 s → 104.2 s (-12%); R1 smoke ratios held flat (no regression). Hardware-utilization measurement (`evidence/perf/sp6c-overlap/2026-05-13-cuda-vs-webgpu-utilization.md`) established that WebGPU is **submission-bound, not compute-bound** on the 5090: single-slot util 12.6% vs CUDA 25.6%, but 2-slot concurrent succinct proves drove the 5090 to 52.7% mean / 100% peak util. Multi-device pool (`WebGpuProverPool`) is now available; iter 5 orchestrator (`lift_and_join_async`) lands here.
+Status: **SP11 closeout 2026-05-15.** Cumulative phase work
+(SP3–SP9) brings xgboost wall to 102.7 s (18.0× CUDA). SP6 closed
+2026-05-15: KeccakUnion(3) eval_check fully on GPU
+(`gpu_dispatches=107 cpu_fallbacks=0`) and completes in 303 s vs
+prior 3600 s timeout. SP9 phase 1 (layout cache, `e129c9728`) +
+phase 2 take 3 (`min_binding_size=0` collapse, `b29e58d67`) landed.
+SP8 iter 3 (parallel FRI prove_batch_async via try_join_all,
+`e2540dcc5`) landed. SP7 iter 6d-a/b/c (`5d4a37d7c`, `332972022`,
+`9de42bdd1`, `3e154206e`) landed: vendored exec_TopChunk0 WGSL,
+Tint-validated kernel, probe-mode dispatch behind a process-global
+flag. iter-6d-c full deployment is gated on the ~60 s Tint compile
+cost (see `project_sp7_witgen_savings_ceiling`) and is iter-6d-d/e
+follow-on work.
 
-## Final per-fixture matrix (2026-05-13)
+## Final per-fixture matrix (2026-05-15)
 
 Hardware: RTX 5090 (32 GB, SM120/Blackwell, CUDA 13.0), Chrome 148.
 
 | Fixture | Native CUDA | WebGPU (single-slot) | Ratio | gpu_idle_ratio | Notes |
 |---|---:|---:|---:|---:|---|
-| poseidon2_basic succinct | 437 ms | 3220 ms | 7.4× | 0.34 | new baseline |
-| libm succinct | 437 ms | 3247 ms | 7.4× | 0.34 | new baseline |
-| keccak_union_small succinct (4 seg + 9 keccak) | n/a (deferred) | 107 s | n/a | 0.35 | unchanged structure |
-| **xgboost succinct (multi-segment)** | **5.7 s** | **104.2 s** | **18.3×** | **0.43** | **-12% vs prior 117.9 s** |
+| poseidon2_basic succinct | 437 ms | 3156 ms | 7.2× | 0.36 | refreshed 2026-05-15 (SP8 iter 3) |
+| libm succinct | 510 ms | 3178 ms | 6.2× | 0.35 | refreshed 2026-05-15 (SP10) |
+| keccak_union_small succinct (4 seg + 9 keccak) | 7.7 s | 106.1 s | 13.7× | 0.35 | SP6 closed: `op=eval_check cpu_fallbacks=0` |
+| keccak_union succinct (KeccakUnion(3), 11 seg + 25 keccak) | 20.7 s | 303.2 s | 14.7× | 0.37 | SP6 closed (was SIGKILL > 3600 s) |
+| **xgboost succinct (multi-segment)** | **5.7 s** | **102.7 s** | **18.0×** | **0.44** | refreshed 2026-05-15 |
 
-The xgboost ratio 18.3× is the closest current proxy for real-world workloads. R1 single-segment fixtures sit at 7.4× because their per-prove fixed costs dominate.
+The xgboost ratio 18.0× is the closest current proxy for real-world
+workloads. R1 single-segment fixtures sit at 6.2-7.2× because their
+per-prove fixed costs dominate.
 
 ## 2-slot multi-device measurement (SP6d iter 3)
 
@@ -38,24 +53,39 @@ Every measured fixture remains above 1.0× CUDA. Reasons:
 - **Single-device queue serialization (~3-4×)**: One `GpuDevice` has one `GpuQueue`. CUDA streams can pipeline; Chrome WebGPU on a single device cannot beyond what the queue absorbs.
 - **CPU-bound stages outside finalize (~15-25%)**: `recursion_witgen` (~200 ms), `recursion_accumulate` (~200 ms), `rv32im_witgen` (~250 ms), and IOP bookkeeping run on CPU. SP7 (GPU-resident witness) is the lever; not yet landed.
 
-## Closing roadmap (post 2026-05-13)
+## Closing roadmap (post 2026-05-15)
 
-| Phase | Target win | Effort estimate | Status |
-|---|---:|---|---|
-| SP6d iter 5 multi-segment validation | -30% on xgboost | 1 day | Single-segment validated; multi-segment chromedriver retry needed |
-| SP6d iter 6+ xgboost pool integration | -30 to -40% on xgboost | 3-4 days | Designed, not implemented |
-| SP7 GPU-resident witness (recursion/rv32im/keccak) | -7% per circuit | 2-3 weeks per circuit | Not started |
-| SP9 pipeline + bind-group cache | -5% smokes | 1 week | Not started |
-| Per-kernel WGSL improvements (SP3/SP6a revisits) | -5% per kernel | per-kernel, low priority | Parked |
+| Phase | Target win | Status |
+|---|---:|---|
+| SP6 KeccakUnion eval_check GPU | -keccak fallback | **CLOSED 2026-05-15**: KU(1) 13.7×, KU(3) 14.7× |
+| SP6d multi-device pool | -25% on segment∥anything | Hit po2_18 wasm32 ceiling; dependency-graph scheduler iter 9 lands a ~8% heterogeneous win |
+| SP7 iter 6d-a/b/c (probe-mode GPU witgen) | infrastructure | **LANDED 2026-05-15** -- vendored exec_TopChunk0 WGSL, Tint-valid kernel, probe behind static flag |
+| SP7 iter 6d-d/e (replace rust_steps witgen) | -6 s of 103 s wall (~6%) | Gated on solving the ~60 s Tint compile cost (one-time per session) |
+| SP7 iter 6d-deeper (TopAccum split + GPU accumulate) | -22 s of 103 s wall (~21%) | Blocked: TopAccumChunk0 closure 1.7 MB is 4× over Chrome's 0.4 MB reachable-closure cliff; needs straight-line-arithmetic chunking pass MuxChunk doesn't provide |
+| SP8 iter 1 + iter 3 (parallel readbacks) | -wall on FRI | **LANDED 2026-05-15** -- noise on xgboost (FRI is small), larger fixtures TBD |
+| SP9 phase 1 + phase 2 take 3 (layout cache + min_binding_size collapse) | infrastructure | **LANDED 2026-05-15** -- pipeline-cache itself showed +1.2% regression (Chrome already dedupes); cache infrastructure is the foundation for SP6e |
+| SP6e bind-group cache (62 sites) | -2-3% smokes | Not started |
+| Per-kernel WGSL improvements (SP3/SP6a revisits) | -5% per kernel | Parked (low priority per SP6c submission-bound diagnosis) |
 
-Composed expectation:
-- Today: xgboost 18.3× CUDA
-- + SP6d full integration on xgboost: 12-13× CUDA
-- + SP7 across all 3 circuits: 10-11× CUDA
-- + SP9 cache: 9-10× CUDA
-- Floor estimate (single-tab single-GPU Chrome): 5-8× CUDA
+Composed expectation (per `project_sp7_witgen_savings_ceiling`):
+- Today (2026-05-15): xgboost **18.0× CUDA**
+- + SP7 iter 6d-d/e (rv32im witgen GPU): **17.0× CUDA** (-6 s)
+- + SP7 iter 6d-deeper (rv32im accum GPU): **13.5× CUDA** (-22 s)
+- + recursion circuit witgen+accum on GPU: **12.0× CUDA** (-12 s)
+- + SP6e bind-group cache + SP8 readback coalescing: **11× CUDA** (~3 s)
+- Floor estimate (single-tab single-GPU Chrome, per SP6c
+  submission-bound diagnosis): **5-8× CUDA**
 
-Sub-1.0× CUDA parity on this hardware/browser stack is not achievable without either (a) multi-GPU exposed to the browser session or (b) substantial Chrome/Dawn WGSL→SPIR-V quality improvements. Document this as a structural residual at SP11 close.
+The 5-8× floor reflects the structural per-active-second density gap
+(~2×: nvcc-compiled CUDA PTX vs Tint-compiled SPIR-V) and the single
+JS thread + single GpuQueue submission overhead. Closing further
+than that requires either (a) multi-device exposed to a single proof
+(WebGPU API restriction), (b) substantial Chrome/Dawn WGSL→SPIR-V
+quality improvements, or (c) running the witness generator out of
+the JS event loop entirely (Web Workers with SharedArrayBuffer +
+async device coordination -- not currently supported in
+wasm-bindgen-test). Document this as a structural residual at SP11
+close.
 
 See `docs/wasm-webgpu-prover-learnings.md` for the pause handoff and `.recursive/run/wasm-webgpu-prover-perf/evidence/perf/r1-baselines/` for the canonical capture commands plus the refreshed summary table.
 
