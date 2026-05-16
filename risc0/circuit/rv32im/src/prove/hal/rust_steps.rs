@@ -838,11 +838,11 @@ fn cycle_short_circuited(major: u8, minor: u8) -> bool {
     if (mask & (1u16 << major)) == 0 {
         return false;
     }
-    // SP7 iter-6d-g step 6.2.4 finding: each arm has 8 chunks in
-    // chunk0_all.wgsl, but only chunk0 and chunk1 modules are vendored.
-    // GPU dispatch only handles minor 0 and minor 1 per arm. Skip only
-    // those cycles -- the other 6 minors per arm fall through to rust
-    // step_Top as before.
+    // SP7 iter-6d-g step 6.2.12 finding: narrowing to minor==0 only
+    // produces the same verify_segment failure as minor<2. The bug is
+    // in MISC0/Add (minor=0) chunk0 path itself, not chunk1. Restore
+    // minor<2 gate for future bisection now that we know the bug is
+    // chunk0-side.
     minor < 2
 }
 
