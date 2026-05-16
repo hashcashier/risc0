@@ -1115,6 +1115,91 @@ impl WebGpuCircuitEvalCheck for WebGpuCircuitHal {
     }
 }
 
+impl WebGpuCircuitHal {
+    /// SP7 iter 6d-g step 6.2.8 (2026-05-16): async pre-dispatch hook.
+    /// Does the iter-6d-g GPU work (shadow_init + per-arm chunks) and then
+    /// `sync_gpu_to_cpu` on the data buffer so rust_steps' subsequent
+    /// view_mut sees GPU writes in the CPU shadow. Sets the short-circuit
+    /// mask so rust_steps skips arms covered by GPU dispatch.
+    ///
+    /// Called from `prove_core_async` BEFORE `WitnessGenerator::populate_from_parts`
+    /// (which runs the sync `generate_witness` / rust_steps path). No-op when
+    /// the probe flag is off (legacy sync path still works).
+    pub async fn pre_witgen_dispatch_async(
+        &self,
+        preflight: &PreflightTrace,
+        data: &MetaBuffer<WebGpuHal>,
+        global: &MetaBuffer<WebGpuHal>,
+    ) -> Result<()> {
+        if !WITGEN_GPU_PROBE_ENABLED.load(Ordering::SeqCst) {
+            super::rust_steps::set_witgen_gpu_replace_arm_mask(0);
+            return Ok(());
+        }
+        // SP7 iter 6d-g step 6.2.11 (2026-05-16): only run the GPU
+        // dispatches + sync if we're actually going to short-circuit
+        // (replace flag on). For probe-only mode, the dispatches'
+        // partial cell writes would conflict with rust_steps' full
+        // writes via set_at's "inconsistent set" check. Probe-only
+        // exists to measure dispatch cost; with the async refactor it's
+        // moot since we'd be syncing back values that rust_steps
+        // overwrites anyway.
+        if !WITGEN_GPU_REPLACE_ENABLED.load(Ordering::SeqCst) {
+            super::rust_steps::set_witgen_gpu_replace_arm_mask(0);
+            return Ok(());
+        }
+        let _timer = WebGpuStageTimer::new(format!(
+            "iter6d_g_pre_witgen_dispatch_async cycles={}",
+            preflight.cycles.len()
+        ));
+        // 1. shadow_init outer Top cells from preflight.
+        if let Err(err) = self.dispatch_shadow_init(data, preflight) {
+            risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                "iter6d_g_shadow_init FAILED err={err:?}"
+            ));
+        }
+        // 2. Per-arm chunk0+chunk1 dispatches. Returns the arm_idx values
+        //    actually dispatched (kernel ready + cycles > 0).
+        let dispatched_arms = match self.dispatch_witgen_per_arm_probe(data, global, preflight) {
+            Ok(arms) => arms,
+            Err(err) => {
+                risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                    "iter6d_g_per_arm_dispatch FAILED err={err:?}"
+                ));
+                Vec::new()
+            }
+        };
+        // 3. Compute the short-circuit mask (MISC0-only for the initial
+        //    bring-up; expand once verify passes).
+        let mut mask: u16 = 0;
+        if WITGEN_GPU_REPLACE_ENABLED.load(Ordering::SeqCst) {
+            for arm_idx in &dispatched_arms {
+                if is_zero_back_reg_arm(*arm_idx) && *arm_idx < 13 {
+                    mask |= 1u16 << arm_idx;
+                }
+            }
+            mask &= 0x0001;
+        }
+        super::rust_steps::set_witgen_gpu_replace_arm_mask(mask);
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "iter6d_g_pre_witgen_dispatch_async mask=0x{:04x} dispatched_arms={:?}",
+            mask, dispatched_arms,
+        ));
+        // 4. Mark GPU writes as authoritative + sync GPU -> CPU shadow.
+        //    Use the UNCHECKED variant: cells GPU didn't write remain
+        //    Val::INVALID (0xffffffff), which the standard validator
+        //    rejects. Preserving INVALID is critical because rust_steps'
+        //    set_at panics on "inconsistent set" only when the target
+        //    cell is valid AND has a different value -- with INVALID,
+        //    set_at allows the write through. Earlier attempt zeroed
+        //    cells first which broke this invariant.
+        data.buf.mark_gpu_dirty();
+        data.buf
+            .sync_gpu_to_cpu_unchecked(self.hal.as_ref())
+            .await?;
+        Ok(())
+    }
+}
+
 impl CircuitWitnessGenerator<WebGpuHal> for WebGpuCircuitHal {
     fn generate_witness(
         &self,
@@ -1132,118 +1217,15 @@ impl CircuitWitnessGenerator<WebGpuHal> for WebGpuCircuitHal {
             data.rows,
             data.cols
         ));
-        // SP7 iter 6d-c (2026-05-15): probe-mode GPU dispatch alongside
-        // rust_steps. Default off. Tests flip the process-global flag
-        // via `set_witgen_gpu_probe_enabled(true)` to measure the
-        // per-segment GPU dispatch wall and the one-time Tint compile;
-        // probe output is discarded so rust_steps remains the witness.
-        let mut chunks_ready = 0usize;
-        if WITGEN_GPU_PROBE_ENABLED.load(Ordering::SeqCst) {
-            let total_cycles = data.rows as u32;
-            // iter-6d-g step 6.2.4 finding: when WITGEN_GPU_REPLACE_ENABLED
-            // is set, the iter-6d-c full-TopChunk{0,1} probe ACTIVELY
-            // CORRUPTS cells because extern_isFirstCycle_0() returns 0
-            // always and extern_getMajorMinor() returns [0,0] -- so
-            // TopChunk1 enters every cycle as "not first" and dispatches
-            // MISC0 (major=0) with minor=0 inputs to ALL cycles, writing
-            // wrong data into every arm's layout. The per-arm dispatch
-            // (which uses preflight_meta correctly) then overwrites only
-            // the matching arm's cells -- but non-matching arms' cells
-            // retain the probe's garbage. With replace ON, rust_steps
-            // can't fix this. So skip the probe entirely when replace is on.
-            let skip_probe = WITGEN_GPU_REPLACE_ENABLED.load(Ordering::SeqCst);
-            if skip_probe {
-                // We still need chunks_ready=2 to satisfy the short-circuit
-                // gate condition (gate documents that both chunks are ready
-                // to dispatch -- meaningful only as a "kernels available"
-                // signal here, not as "cells written").
-                let c0 = self.lookup_witgen_top_chunk0_kernel().is_some() as usize;
-                let c1 = self.lookup_witgen_top_chunk1_kernel().is_some() as usize;
-                chunks_ready = c0 + c1;
-            } else {
-                chunks_ready = match self.dispatch_witgen_top_chunk0_probe(data, global, total_cycles) {
-                    Ok(n) => n,
-                    Err(err) => {
-                        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                            "iter6d_c_witgen_probe FAILED err={err:?}"
-                        ));
-                        0
-                    }
-                };
-            }
-            // iter-6d-g step 6.2.0: shadow-init the 5 outer Top layout
-            // cells (nextPcLow/High, nextState_0, nextMachineMode,
-            // isFirstCycle) from preflight before any per-arm dispatch
-            // so back_Reg(1, ...) reads return correct values without
-            // needing rust_steps to have run first.
-            if let Err(err) = self.dispatch_shadow_init(data, preflight) {
-                risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "iter6d_g_shadow_init FAILED err={err:?}"
-                ));
-            }
-            // iter-6d-g step 6 (partial): per-arm dispatch validates
-            // the multi-kernel dispatch path works in the prove
-            // pipeline. Returns the set of arm_idx values that were
-            // actually dispatched -- step 6.2.3 uses this to decide
-            // whether to short-circuit rust_steps per cycle.
-            let dispatched_arms = match self.dispatch_witgen_per_arm_probe(data, global, preflight) {
-                Ok(arms) => arms,
-                Err(err) => {
-                    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "iter6d_g_per_arm_dispatch FAILED err={err:?}"
-                    ));
-                    Vec::new()
-                }
-            };
-            // iter-6d-g step 6.2.3: short-circuit rust_steps for the zero-
-            // back-reg arms when BOTH (a) the full TopChunk0+TopChunk1
-            // dispatches landed (`chunks_ready == 2` so cells for both
-            // first-cycle AND non-first-cycle arms got written by GPU),
-            // AND (b) the per-arm chunk0 wrapper for that arm dispatched
-            // (so cycle-0-specific arm cells got written too -- safety
-            // net for the rare case that cycle 0 is one of the 8 arms).
-            // 5 inter-cycle arms (CONTROL0/POSEIDON0/1/SHA0/BIGINT0) are
-            // never short-circuited because their internal back_Reg(N)
-            // reads need cells shadow_init doesn't pre-populate.
-            if WITGEN_GPU_REPLACE_ENABLED.load(Ordering::SeqCst) && chunks_ready == 2 {
-                let mut mask: u16 = 0;
-                for arm_idx in &dispatched_arms {
-                    if is_zero_back_reg_arm(*arm_idx) && *arm_idx < 13 {
-                        mask |= 1u16 << arm_idx;
-                    }
-                }
-                // SP7 iter 6d-g step 6.2.7 (2026-05-16): shadowed bail!
-                // macro now carries steps.rs.inc line info. Localized
-                // bail to line 25306 (END of major_onehot mux in
-                // exec_TopExtract) at cycle 5866 MISC0 -- meaning
-                // major_onehot[i] is 0 for ALL i. But shadow_init AND
-                // chunk1's exec_OneHot_13_ both write MONT_ONE to
-                // cell[1, 5866] (major_onehot[0] for major=0). So
-                // something between the GPU dispatch and the rust
-                // step_TopAccum read is corrupting the cell to 0.
-                // Likely candidates: chunk0 wrapper's exec_Misc0Chunk0
-                // call path triggers an internal store with the wrong
-                // value, or buffer-row indexing mismatch. Cannot localize
-                // without data_buf cell snapshot (deferred step 6.2.2).
-                // Mask forced to 0; line-info bail diagnostic retained.
-                mask = 0;
-                super::rust_steps::set_witgen_gpu_replace_arm_mask(mask);
-                risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "iter6d_g_replace mask=0x{:04x} chunks_ready={} dispatched_arms={:?}",
-                    mask, chunks_ready, dispatched_arms,
-                ));
-            } else {
-                super::rust_steps::set_witgen_gpu_replace_arm_mask(0);
-                if WITGEN_GPU_REPLACE_ENABLED.load(Ordering::SeqCst) {
-                    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "iter6d_g_replace SKIP chunks_ready={}", chunks_ready,
-                    ));
-                }
-            }
-        } else {
-            // Probe disabled -- no GPU writes -- rust_steps must run every arm.
-            super::rust_steps::set_witgen_gpu_replace_arm_mask(0);
-        }
+        // SP7 iter 6d-g step 6.2.8 (2026-05-16): GPU dispatches now happen
+        // in `pre_witgen_dispatch_async` (called from the async prove path
+        // BEFORE this sync `generate_witness`). The mask and CPU shadow
+        // are already in sync by the time we get here, so rust_steps
+        // reads correct values for short-circuited cycles.
+        //
+        // For the sync prove path (no pre_dispatch hook), mask was reset
+        // to 0 by pre_witgen_dispatch_async's no-op branch, OR if that
+        // wasn't called, the legacy state stands (still 0 by default).
         super::rust_steps::generate_witness(mode, preflight, global, data)
     }
 }
@@ -1358,11 +1340,34 @@ impl SegmentProver for WebGpuSegmentProver {
             let circuit_hal = self.circuit_hal.as_ref();
 
             let po2 = preflight_results.po2();
-            let witgen = super::super::witgen::WitnessGenerator::new(
+            // SP7 iter 6d-g step 6.2.8 (2026-05-16): split WitnessGenerator
+            // construction so we can insert an ASYNC pre-dispatch hook
+            // (GPU shadow_init + per-arm chunks + sync_gpu_to_cpu) BEFORE
+            // sync `generate_witness` runs. This is the fix for the
+            // CPU/GPU shadow desync blocker that step 6.2.7 identified.
+            let (global_vec, injector, cycles, trace, _po2_inner) =
+                super::super::witgen::WitnessGenerator::<WebGpuHal>::preflight_components(
+                    preflight_results,
+                );
+            let (global_buf, code_buf, data_buf) =
+                super::super::witgen::WitnessGenerator::<WebGpuHal>::allocate_buffers(
+                    hal,
+                    &global_vec,
+                    cycles,
+                    &injector,
+                );
+            circuit_hal
+                .pre_witgen_dispatch_async(&trace, &data_buf, &global_buf)
+                .await?;
+            let witgen = super::super::witgen::WitnessGenerator::<WebGpuHal>::populate_from_parts(
                 hal,
                 circuit_hal,
-                preflight_results,
                 mode,
+                trace,
+                cycles,
+                global_buf,
+                code_buf,
+                data_buf,
             )?;
 
             let code = &witgen.code.buf;

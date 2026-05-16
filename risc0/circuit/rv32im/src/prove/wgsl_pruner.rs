@@ -311,14 +311,22 @@ fn shadow_init_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (cycle >= params.data_rows) {
     return;
   }
-  let next_cycle = (cycle + 1u) % params.data_rows;
-  let next_base = next_cycle * 4u;
-  let next_pc = preflight_meta[next_base + 0u];
-  let next_state = preflight_meta[next_base + 1u];
-  let next_mode = preflight_meta[next_base + 2u];
-  let next_pc_low = next_pc & 0xFFFFu;
-  let next_pc_high = (next_pc >> 16u) & 0xFFFFu;
+  // SP7 iter 6d-g step 6.2.9 (2026-05-16): match scatter convention from
+  // `build_injector::set_cycle` -- the nextPcLow/High/state/mode cells
+  // store the CURRENT cycle's pc/state/mode (NOT the next cycle's).
+  // Per-cycle the arm sub-fn then OVERWRITES these with its computed
+  // output (the "next" semantics is conceptual, not the cell value at
+  // init time). Earlier shadow_init wrote next cycle's values which
+  // broke cycle 0's wrap-around eqz (expected state=7 for padding
+  // ControlDone but got state=0 for LoadRootAndNonce cycle 0).
   let base = cycle * 4u;
+  let cur_pc = preflight_meta[base + 0u];
+  let cur_state = preflight_meta[base + 1u];
+  let cur_mode = preflight_meta[base + 2u];
+  let next_pc_low = cur_pc & 0xFFFFu;
+  let next_pc_high = (cur_pc >> 16u) & 0xFFFFu;
+  let next_state = cur_state;
+  let next_mode = cur_mode;
   let packed = preflight_meta[base + 3u];
   let major_u = packed >> 16u;
   let minor_u = packed & 0xFFFFu;

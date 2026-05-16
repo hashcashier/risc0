@@ -4931,6 +4931,61 @@ impl<T> WebGpuBuffer<T> {
         Ok(())
     }
 
+    /// SP7 iter 6d-g step 6.2.10 (2026-05-16): bitwise GPU->CPU sync
+    /// that ALLOWS `Val::INVALID` (0xffffffff) values to flow back into
+    /// the CPU shadow without failing the `CheckedBitPattern` validator.
+    /// Required for the iter-6d-g pre-witgen dispatch path: GPU partially
+    /// populates `data_buf` (shadow_init + per-arm chunks), other cells
+    /// remain `INVALID`. Standard `sync_gpu_to_cpu` would error on the
+    /// INVALID bytes; this variant transmutes raw u32 bytes into the
+    /// target type via `repr(transparent)` semantics. Caller takes
+    /// responsibility for ensuring T is bitwise-equivalent to u32 (i.e.,
+    /// `BabyBearElem` is `#[repr(transparent)] struct(u32)`).
+    pub async fn sync_gpu_to_cpu_unchecked(&self, hal: &WebGpuHal) -> Result<()>
+    where
+        T: Clone,
+    {
+        if !self.cpu_stale.get() {
+            return Ok(());
+        }
+
+        let Some(gpu) = self.raw_buffer() else {
+            ensure!(
+                self.cpu.size() == 0,
+                "cannot read back missing GPU buffer {}",
+                self.cpu.name()
+            );
+            self.mark_synced();
+            return Ok(());
+        };
+
+        let byte_len = byte_len_for::<T>(self.cpu.size());
+        let bytes = hal
+            .read_buffer_range_named(gpu, self.byte_offset(), byte_len, self.cpu.name())
+            .await?;
+        // SAFETY: caller asserts T is bitwise-equivalent to a sequence of
+        // u32 (`repr(transparent)`). For `BabyBearElem` (T = Val) this
+        // holds: it's `#[repr(transparent)] struct Elem(u32)`. We read
+        // raw u32s (Pod) and reinterpret as T via unsafe transmute on
+        // the slice pointer.
+        let u32s: &[u32] = bytemuck::cast_slice(bytes.as_slice());
+        ensure!(
+            u32s.len() == self.cpu.size(),
+            "readback size mismatch for WebGPU buffer {}: got {} elems, expected {}",
+            self.cpu.name(),
+            u32s.len(),
+            self.cpu.size()
+        );
+        let values: &[T] = unsafe {
+            std::slice::from_raw_parts(u32s.as_ptr() as *const T, u32s.len())
+        };
+        self.cpu.view_mut(|cpu| {
+            cpu.clone_from_slice(values);
+        });
+        self.mark_synced();
+        Ok(())
+    }
+
     fn assert_cpu_current(&self, op: &str)
     where
         T: Clone,
