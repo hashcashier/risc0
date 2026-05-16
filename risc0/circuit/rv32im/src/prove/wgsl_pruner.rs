@@ -184,7 +184,9 @@ pub const TOP_CHUNK0_ARM_DELTAS: &[(&str, &str, &str)] = &[
 pub fn assemble_arm_kernel(delta: &str, compute_entry: &str) -> String {
     let mut out =
         String::with_capacity(WITGEN_BASELINE_WGSL.len() + delta.len() + compute_entry.len() + 2);
-    out.push_str(&patch_extern_get_diff_count(WITGEN_BASELINE_WGSL));
+    let patched = patch_extern_get_diff_count(WITGEN_BASELINE_WGSL);
+    let patched = patch_extern_get_memory_txn(&patched);
+    out.push_str(&patched);
     if !out.ends_with('\n') {
         out.push('\n');
     }
@@ -209,6 +211,23 @@ pub fn assemble_arm_kernel(delta: &str, compute_entry: &str) -> String {
 pub fn patch_extern_get_diff_count(wgsl: &str) -> String {
     const STUB: &str = "fn extern_getDiffCount(txn_cycle: Val) -> Val {\n  return 0u;\n}";
     const REPLACEMENT: &str = "@group(0) @binding(7) var<storage, read> preflight_diff_count_buf: array<u32>;\nfn extern_getDiffCount(txn_cycle: Val) -> Val {\n  let idx = decode(txn_cycle);\n  if (idx >= arrayLength(&preflight_diff_count_buf)) { return 0u; }\n  return encode(preflight_diff_count_buf[idx]);\n}";
+    wgsl.replacen(STUB, REPLACEMENT, 1)
+}
+
+/// SP7 iter 6d-g step 6.2.6 (2026-05-16): replace the stub
+/// `extern_getMemoryTxn` body with a per-cycle, stateful preflight
+/// lookup matching rust `get_memory_txn`. Stub returns `[0,0,0,0,0]`
+/// in WGSL but rust returns the next sequential preflight txn record
+/// (advancing `txn_idx` within the cycle), encoded into (prev_cycle,
+/// prev_word_low, prev_word_high, word_low, word_high).
+///
+/// Caller is responsible for declaring `preflight_txn_start` and
+/// `preflight_txns_buf` at bindings 8 and 9 and uploading them.
+/// `txn_call_idx` is a per-invocation `var<private>` that resets to 0
+/// at the start of each lane and advances with each call.
+pub fn patch_extern_get_memory_txn(wgsl: &str) -> String {
+    const STUB: &str = "fn extern_getMemoryTxn(addr: Val) -> array<Val, 5> {\n  return array<Val, 5>(0u, 0u, 0u, 0u, 0u);\n}";
+    const REPLACEMENT: &str = "@group(0) @binding(8) var<storage, read> preflight_txn_start: array<u32>;\n@group(0) @binding(9) var<storage, read> preflight_txns_buf: array<u32>;\nvar<private> txn_call_idx: u32 = 0u;\nfn extern_getMemoryTxn(addr: Val) -> array<Val, 5> {\n  let txn_idx = preflight_txn_start[cycle] + txn_call_idx;\n  txn_call_idx = txn_call_idx + 1u;\n  let base = txn_idx * 5u;\n  if (base + 4u >= arrayLength(&preflight_txns_buf)) {\n    return array<Val, 5>(0u, 0u, 0u, 0u, 0u);\n  }\n  return array<Val, 5>(\n    encode(preflight_txns_buf[base]),\n    encode(preflight_txns_buf[base + 1u]),\n    encode(preflight_txns_buf[base + 2u]),\n    encode(preflight_txns_buf[base + 3u]),\n    encode(preflight_txns_buf[base + 4u]),\n  );\n}";
     wgsl.replacen(STUB, REPLACEMENT, 1)
 }
 

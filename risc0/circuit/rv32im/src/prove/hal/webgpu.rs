@@ -152,6 +152,30 @@ fn build_preflight_diff_count(preflight: &PreflightTrace) -> Vec<u32> {
     out
 }
 
+/// SP7 iter 6d-g step 6.2.6 (2026-05-16): per-cycle txn_idx (the
+/// starting index into `preflight.txns` for that cycle's first
+/// `extern_getMemoryTxn` call). The patched stub reads
+/// `preflight_txn_start[cycle] + txn_call_idx` and advances
+/// `txn_call_idx` per call.
+fn build_preflight_txn_start(preflight: &PreflightTrace) -> Vec<u32> {
+    preflight.cycles.iter().map(|c| c.txn_idx).collect()
+}
+
+/// SP7 iter 6d-g step 6.2.6: pack `preflight.txns` as `[prev_cycle,
+/// prev_word_low, prev_word_high, word_low, word_high, ...]` matching
+/// the 5-tuple rust `get_memory_txn` returns.
+fn build_preflight_txns(preflight: &PreflightTrace) -> Vec<u32> {
+    let mut out = Vec::with_capacity(preflight.txns.len() * 5);
+    for txn in &preflight.txns {
+        out.push(txn.prev_cycle);
+        out.push(txn.prev_word & 0xFFFF);
+        out.push(txn.prev_word >> 16);
+        out.push(txn.word & 0xFFFF);
+        out.push(txn.word >> 16);
+    }
+    out
+}
+
 /// SP7 iter 6d-g step 6.2.1c (2026-05-16): synthesize per-arm
 /// @compute wrapper that replicates `exec_TopChunk0`'s logic to
 /// construct `InstInputStruct` from preflight + shadow-init'd cells
@@ -481,6 +505,8 @@ impl WebGpuCircuitHal {
                     WebGpuBindingLayout::read_only_storage(5, 0),
                     WebGpuBindingLayout::read_only_storage(6, 0),
                     WebGpuBindingLayout::read_only_storage(7, 0),
+                    WebGpuBindingLayout::read_only_storage(8, 0),
+                    WebGpuBindingLayout::read_only_storage(9, 0),
                 ],
             ) {
                 Ok(l) => l,
@@ -574,12 +600,17 @@ impl WebGpuCircuitHal {
             // defines exec_NondetReg/exec_NondetBitReg/exec_InstInput/
             // exec_OneHot_13_/back_Reg/back_NondetReg). Module ~1.1 MB +
             // small wrapper -> under 2 MB Tint cliff.
-            use crate::prove::wgsl_pruner::{patch_extern_get_diff_count, EXEC_TOP_CHUNK1_WGSL};
-            // SP7 iter 6d-g step 6.2.5: patch chunk1 module so its embedded
-            // extern_getDiffCount stub reads from preflight_diff_count_buf
-            // instead of returning 0. Without this, DoCycleTable writes wrong
-            // diff count cells for short-circuited cycles.
+            use crate::prove::wgsl_pruner::{
+                patch_extern_get_diff_count, patch_extern_get_memory_txn,
+                EXEC_TOP_CHUNK1_WGSL,
+            };
+            // SP7 iter 6d-g step 6.2.5/6.2.6: patch chunk1 module so its
+            // embedded extern_getDiffCount and extern_getMemoryTxn stubs read
+            // from preflight buffers instead of returning 0/garbage. Without
+            // these, DoCycleTable + DecodeInst/ReadSourceRegs write wrong
+            // cells for short-circuited cycles.
             let patched_chunk1 = patch_extern_get_diff_count(EXEC_TOP_CHUNK1_WGSL);
+            let patched_chunk1 = patch_extern_get_memory_txn(&patched_chunk1);
             let mut chunk1_modules: Vec<(String, String, &str)> = Vec::with_capacity(8);
             for (arm_idx, (label, _, _)) in TOP_CHUNK0_ARM_DELTAS.iter().enumerate() {
                 if !is_zero_back_reg_arm(arm_idx) {
@@ -784,7 +815,9 @@ impl WebGpuCircuitHal {
         // and binding 6 (preflight_meta). Per-arm wrappers read major/
         // minor from preflight_meta via packed_minor_major at index 3.
         // step 6.2.5: binding 7 is preflight_diff_count_buf (patched
-        // extern_getDiffCount reads it).
+        // extern_getDiffCount reads it). step 6.2.6: bindings 8 and 9
+        // are preflight_txn_start and preflight_txns_buf (patched
+        // extern_getMemoryTxn reads them with a per-invocation counter).
         let layout = self.hal.create_bind_group_layout(
             "iter6d_g_arm_layout",
             &[
@@ -796,6 +829,8 @@ impl WebGpuCircuitHal {
                 WebGpuBindingLayout::read_only_storage(5, 0),
                 WebGpuBindingLayout::read_only_storage(6, 0),
                 WebGpuBindingLayout::read_only_storage(7, 0),
+                WebGpuBindingLayout::read_only_storage(8, 0),
+                WebGpuBindingLayout::read_only_storage(9, 0),
             ],
         )?;
         let total_cycles = data.rows as u32;
@@ -839,6 +874,33 @@ impl WebGpuCircuitHal {
             "iter6d_g_arm_diff_count",
             0,
             diff_count_bytes,
+        )?;
+        // step 6.2.6: per-cycle txn_start + packed memory txns so patched
+        // extern_getMemoryTxn returns the right values inside arm sub-fns
+        // (DecodeInst, ReadSourceRegs, per-arm memory ops).
+        let txn_start = build_preflight_txn_start(preflight);
+        let txn_start_bytes: &[u8] = bytemuck::cast_slice(txn_start.as_slice());
+        let txn_start_buf = self.hal.create_storage_buffer(
+            "iter6d_g_arm_txn_start",
+            txn_start_bytes.len() as u64,
+        )?;
+        self.hal.write_buffer_named(
+            &txn_start_buf,
+            "iter6d_g_arm_txn_start",
+            0,
+            txn_start_bytes,
+        )?;
+        let txns = build_preflight_txns(preflight);
+        let txns_bytes: &[u8] = bytemuck::cast_slice(txns.as_slice());
+        let txns_buf = self.hal.create_storage_buffer(
+            "iter6d_g_arm_txns",
+            txns_bytes.len() as u64,
+        )?;
+        self.hal.write_buffer_named(
+            &txns_buf,
+            "iter6d_g_arm_txns",
+            0,
+            txns_bytes,
         )?;
         let data_gpu = data
             .buf
@@ -912,6 +974,8 @@ impl WebGpuCircuitHal {
                     WebGpuBufferBinding::new(5, &cycle_buf),
                     WebGpuBufferBinding::new(6, &preflight_buf),
                     WebGpuBufferBinding::new(7, &diff_count_buf),
+                    WebGpuBufferBinding::new(8, &txn_start_buf),
+                    WebGpuBufferBinding::new(9, &txns_buf),
                 ],
             )?;
             let workgroups = (cycle_count as u32).div_ceil(64);
@@ -935,6 +999,8 @@ impl WebGpuCircuitHal {
         drop(cycle_list_buffers);
         drop(preflight_buf);
         drop(diff_count_buf);
+        drop(txn_start_buf);
+        drop(txns_buf);
         Ok(dispatched_arms)
     }
 
@@ -1146,24 +1212,18 @@ impl CircuitWitnessGenerator<WebGpuHal> for WebGpuCircuitHal {
                         mask |= 1u16 << arm_idx;
                     }
                 }
-                // SP7 iter 6d-g step 6.2.5 (2026-05-16): tried MISC0-only mask
-                // (0x0001) after patching extern_getDiffCount stub. Test
-                // failed: step_TopAccum bails at cycle=5866 major=0 minor=0
-                // ("Reached unreachable mux arm"). Root cause: arm sub-fns
-                // call FIVE different externs (getMemoryTxn, getDiffCount,
-                // isFirstCycle, getMajorMinor, divide for DIV0) where the
-                // stubbed WGSL returns 0/garbage but rust returns preflight-
-                // backed values. Patching getDiffCount alone wrote correct
-                // diff cells but DecodeInst/ReadSourceRegs still get 0s from
-                // getMemoryTxn -> decoded cells are zero -> step_TopAccum's
-                // arm selector mux falls through to the "no arm matched"
-                // bail (line 30458). Fixing requires patching ALL externs
-                // with preflight-backed buffers AND a thread-local call
-                // counter per arm sub-fn. Multi-day implementation.
-                // Force mask=0 to keep production correct; retain the
-                // extern_getDiffCount patch + diff_count buffer plumbing
-                // as foundation for a future iteration that patches
-                // extern_getMemoryTxn alongside.
+                // SP7 iter 6d-g step 6.2.6 (2026-05-16): patched
+                // extern_getMemoryTxn on top of step 6.2.5's
+                // extern_getDiffCount patch. Test still failed:
+                // step_TopAccum bails at cycle=5557 major=0 minor=0 (vs
+                // step 6.2.5's cycle=5866 -- bail moved but didn't
+                // disappear). Some inner mux within Misc0Accum still
+                // doesn't match. Localizing further is blocked on
+                // instrumenting the 134 bail!() sites in steps.rs.inc
+                // with line info (auto-classifier blocks bulk edits
+                // to generated code). Force mask=0; foundations
+                // (extern patches + diff_count buf + txn buffers)
+                // retained correctness-neutrally.
                 mask = 0;
                 super::rust_steps::set_witgen_gpu_replace_arm_mask(mask);
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
