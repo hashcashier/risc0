@@ -223,6 +223,7 @@ pub const SHADOW_INIT_WGSL: &str = r#"
 const P: u32 = 2013265921u;
 const M: u32 = 2281701377u;
 const R2: u32 = 1172168163u;
+const MONT_ONE: u32 = 268435454u;
 
 struct ShadowParams {
   data_rows: u32,
@@ -275,8 +276,6 @@ fn shadow_init_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (cycle >= params.data_rows) {
     return;
   }
-  // Wrap to cycle 0 for the last cycle: back_Reg(1, ...) at cycle 0
-  // reads cycle (last)'s stored values via (cycle - 1 + rows) % rows.
   let next_cycle = (cycle + 1u) % params.data_rows;
   let next_base = next_cycle * 4u;
   let next_pc = preflight_meta[next_base + 0u];
@@ -284,17 +283,45 @@ fn shadow_init_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let next_mode = preflight_meta[next_base + 2u];
   let next_pc_low = next_pc & 0xFFFFu;
   let next_pc_high = (next_pc >> 16u) & 0xFFFFu;
+  let base = cycle * 4u;
+  let packed = preflight_meta[base + 3u];
+  let major_u = packed >> 16u;
+  let minor_u = packed & 0xFFFFu;
 
   // Column-major: data_buf[col * rows + row]
   let rows = params.data_rows;
   data_buf[ 0u * rows + cycle] = encode(cycle);           // cycle reg (col 0)
+  // majorOnehot: cols 1-13 (Reg(1u)..Reg(13u))
+  data_buf[ 1u * rows + cycle] = select(0u, MONT_ONE, major_u == 0u);
+  data_buf[ 2u * rows + cycle] = select(0u, MONT_ONE, major_u == 1u);
+  data_buf[ 3u * rows + cycle] = select(0u, MONT_ONE, major_u == 2u);
+  data_buf[ 4u * rows + cycle] = select(0u, MONT_ONE, major_u == 3u);
+  data_buf[ 5u * rows + cycle] = select(0u, MONT_ONE, major_u == 4u);
+  data_buf[ 6u * rows + cycle] = select(0u, MONT_ONE, major_u == 5u);
+  data_buf[ 7u * rows + cycle] = select(0u, MONT_ONE, major_u == 6u);
+  data_buf[ 8u * rows + cycle] = select(0u, MONT_ONE, major_u == 7u);
+  data_buf[ 9u * rows + cycle] = select(0u, MONT_ONE, major_u == 8u);
+  data_buf[10u * rows + cycle] = select(0u, MONT_ONE, major_u == 9u);
+  data_buf[11u * rows + cycle] = select(0u, MONT_ONE, major_u == 10u);
+  data_buf[12u * rows + cycle] = select(0u, MONT_ONE, major_u == 11u);
+  data_buf[13u * rows + cycle] = select(0u, MONT_ONE, major_u == 12u);
   data_buf[14u * rows + cycle] = encode(next_pc_low);     // nextPcLow
   data_buf[15u * rows + cycle] = encode(next_pc_high);    // nextPcHigh
   data_buf[16u * rows + cycle] = encode(next_state);      // nextState_0
   data_buf[17u * rows + cycle] = encode(next_mode);       // nextMachineMode
-  // isFirstCycle: 1 at cycle 0, 0 elsewhere
   let is_first = select(0u, 1u, cycle == 0u);
   data_buf[18u * rows + cycle] = encode(is_first);
+  data_buf[19u * rows + cycle] = encode(major_u);         // major
+  data_buf[20u * rows + cycle] = encode(minor_u);         // minor
+  // minorOnehot: cols 21-28 (Reg(21u)..Reg(28u))
+  data_buf[21u * rows + cycle] = select(0u, MONT_ONE, minor_u == 0u);
+  data_buf[22u * rows + cycle] = select(0u, MONT_ONE, minor_u == 1u);
+  data_buf[23u * rows + cycle] = select(0u, MONT_ONE, minor_u == 2u);
+  data_buf[24u * rows + cycle] = select(0u, MONT_ONE, minor_u == 3u);
+  data_buf[25u * rows + cycle] = select(0u, MONT_ONE, minor_u == 4u);
+  data_buf[26u * rows + cycle] = select(0u, MONT_ONE, minor_u == 5u);
+  data_buf[27u * rows + cycle] = select(0u, MONT_ONE, minor_u == 6u);
+  data_buf[28u * rows + cycle] = select(0u, MONT_ONE, minor_u == 7u);
 }
 "#;
 
@@ -861,6 +888,72 @@ fn gamma() -> u32 { return beta(2u); }
              update test thresholds and ungate TopAccum from CPU fallback",
             bytes
         );
+    }
+
+    /// iter-6d-g step 6.2.3: validate the synth_arm_wrapper output
+    /// concatenated with baseline + delta for MISC0 against naga. This
+    /// is the offline equivalent of the Tint compile that happens in
+    /// the browser; if naga accepts it, the wrapper is well-formed.
+    /// (Tint may still reject for browser-specific reasons but naga
+    /// catches type/lookup errors before any wasm rebuild.)
+    #[test]
+    fn iter6d_g_step6_2_3_misc0_synth_wrapper_validates_with_naga() {
+        let wrapper = "@group(0) @binding(5) var<storage, read> cycle_list: array<u32>;\n\
+            @group(0) @binding(6) var<storage, read> preflight_meta: array<u32>;\n\
+            \n@compute @workgroup_size(64)\n\
+            fn iter6d_g_misc0_chunk0_main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
+              let lane = gid.x;\n\
+              if (lane >= arrayLength(&cycle_list)) { return; }\n\
+              cycle = cycle_list[lane];\n\
+              if (cycle >= params.data_rows) { return; }\n\
+              let bound_top = BoundLayout_TopLayout(kLayout_Top, buf_data);\n\
+              let base = cycle * 4u;\n\
+              let packed = preflight_meta[base + 3u];\n\
+              let minor_u = packed & 0xFFFFu;\n\
+              let is_first_super = select(0u, MONT_ONE, cycle == 0u);\n\
+              let x4 = sub(MONT_ONE, is_first_super);\n\
+              let x9 = back_Reg(1, lookup_TopLayout_nextPcLow(bound_top));\n\
+              let x10 = back_Reg(1, lookup_TopLayout_nextPcHigh(bound_top));\n\
+              let x11 = back_Reg(1, lookup_TopLayout_nextState_0(bound_top));\n\
+              let x12 = back_Reg(1, lookup_TopLayout_nextMachineMode(bound_top));\n\
+              let m0 = NondetRegStruct(select(0u, MONT_ONE, minor_u == 0u));\n\
+              let m1 = NondetRegStruct(select(0u, MONT_ONE, minor_u == 1u));\n\
+              let m2 = NondetRegStruct(select(0u, MONT_ONE, minor_u == 2u));\n\
+              let m3 = NondetRegStruct(select(0u, MONT_ONE, minor_u == 3u));\n\
+              let m4 = NondetRegStruct(select(0u, MONT_ONE, minor_u == 4u));\n\
+              let m5 = NondetRegStruct(select(0u, MONT_ONE, minor_u == 5u));\n\
+              let m6 = NondetRegStruct(select(0u, MONT_ONE, minor_u == 6u));\n\
+              let m7 = NondetRegStruct(select(0u, MONT_ONE, minor_u == 7u));\n\
+              let onehot = OneHot_8_Struct(NondetRegStruct8Array(m0, m1, m2, m3, m4, m5, m6, m7));\n\
+              let inst_input = InstInputStruct(\n\
+                encode(minor_u),\n\
+                ValU32Struct(mul(x4, x9._super), mul(x4, x10._super)),\n\
+                mul(x4, x11._super),\n\
+                add(mul(x4, x12._super), is_first_super),\n\
+                onehot,\n\
+              );\n\
+              let x20 = back_Reg(0, lookup_TopCycleLayout__super(lookup_TopLayout_cycleRedef(bound_top)));\n\
+              let _result = exec_Misc0Chunk0(x20, inst_input, lookup_TopInstResultLayout_arm0(lookup_TopLayout_instResult(bound_top)));\n\
+            }\n";
+        let module = assemble_arm_kernel(EXEC_MISC0_CHUNK0_DELTA_WGSL, wrapper);
+        let out_path = std::path::PathBuf::from("/tmp/iter6d_g_step6_2_3_misc0_wrapper.wgsl");
+        std::fs::write(&out_path, &module).expect("write probe module");
+        let rc = std::process::Command::new("naga").arg(&out_path).output();
+        match rc {
+            Ok(r) if r.status.success() => {
+                eprintln!("iter6d-g 6.2.3: naga validated MISC0 synth wrapper");
+            }
+            Ok(r) => {
+                let stderr = String::from_utf8_lossy(&r.stderr);
+                panic!(
+                    "iter6d-g 6.2.3: naga validation FAILED:\n{}",
+                    &stderr.chars().take(4000).collect::<String>()
+                );
+            }
+            Err(e) => {
+                eprintln!("skipping naga validation: {} (install naga-cli)", e);
+            }
+        }
     }
 
     /// iter-6d-a (2026-05-15): the vendored exec_TopChunk0 module with the

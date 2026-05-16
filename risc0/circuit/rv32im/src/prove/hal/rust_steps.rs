@@ -21,7 +21,11 @@
     unused_variables
 )]
 
-use std::{cell::Cell, marker::PhantomData};
+use std::{
+    cell::Cell,
+    marker::PhantomData,
+    sync::atomic::{AtomicBool, AtomicU16, Ordering},
+};
 
 use anyhow::{bail, ensure, Result};
 use risc0_core::field::{
@@ -798,6 +802,36 @@ fn run_accum_steps(
     Ok(())
 }
 
+// SP7 iter-6d-g step 6.2.3: per-segment arm mask. Bit k set => major
+// opcode k's cycles short-circuit step_Top. WebGPU HAL sets this before
+// `generate_witness` runs based on which per-arm GPU kernels actually
+// dispatched this segment (kernel ready + cycles > 0). CPU HAL leaves
+// it 0 (no short-circuit ever).
+static WITGEN_GPU_REPLACE_ARM_MASK: AtomicU16 = AtomicU16::new(0);
+// Legacy process-wide gate kept for the public setter so callers can
+// flip the feature on/off; webgpu.rs reads this to decide whether to
+// populate WITGEN_GPU_REPLACE_ARM_MASK each segment.
+static WITGEN_GPU_REPLACE_ENABLED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_witgen_gpu_replace_enabled(enabled: bool) {
+    WITGEN_GPU_REPLACE_ENABLED.store(enabled, Ordering::Release);
+    if !enabled {
+        WITGEN_GPU_REPLACE_ARM_MASK.store(0, Ordering::Release);
+    }
+}
+
+pub fn set_witgen_gpu_replace_arm_mask(mask: u16) {
+    WITGEN_GPU_REPLACE_ARM_MASK.store(mask, Ordering::Release);
+}
+
+fn cycle_short_circuited(major: u8) -> bool {
+    if major >= 13 {
+        return false;
+    }
+    let mask = WITGEN_GPU_REPLACE_ARM_MASK.load(Ordering::Acquire);
+    (mask & (1u16 << major)) != 0
+}
+
 fn step_exec(
     preflight: &PreflightTrace,
     tables: &LookupTables,
@@ -805,6 +839,10 @@ fn step_exec(
     data: BufferRow<Val>,
     global: BufferRow<Val>,
 ) -> Result<()> {
+    let major = preflight.cycles[cycle].major;
+    if cycle_short_circuited(major) {
+        return Ok(());
+    }
     let ctx = ExecContext::new(preflight, tables, cycle);
     step_Top(&ctx, data, global)
 }

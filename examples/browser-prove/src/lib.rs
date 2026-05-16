@@ -2899,6 +2899,51 @@ fn witgen_top_accum(@builtin(global_invocation_id) gid: vec3<u32>) {
         set_witgen_gpu_probe_enabled(false);
     }
 
+    /// SP7 iter 6d-g step 6.2.3 -- short-circuit validation. Enables
+    /// both the probe (so prewarm + shadow_init + per-arm dispatch
+    /// runs) AND the replace flag (so rust_steps skips its step_Top
+    /// for the 8 zero-back_Reg arms). If the synthesized per-arm
+    /// wrappers produce correct data_buf cells, the receipt verifies.
+    /// If any wrapper has a bug, the receipt fails verification.
+    ///
+    /// Expected wall savings on xgboost: ~4.5 s vs probe-only baseline
+    /// (~102.6 s -> ~98 s), pulling effective CUDA ratio from 18.0x
+    /// to ~17.4x. Architectural 5-8x floor remains gated on
+    /// multi-device / Chrome-Dawn improvements outside per-kernel
+    /// scope, but this validates the synthesis correctness.
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_replace_xgboost() {
+        use forust_ml::GradientBooster;
+        use risc0_circuit_rv32im::prove::{
+            set_witgen_gpu_probe_enabled, set_witgen_gpu_replace_enabled,
+        };
+        use xgboost_methods::{XGBOOST_ELF, XGBOOST_ID};
+
+        console_error_panic_hook::set_once();
+        risc0_zkp::hal::webgpu::log_webgpu_metric("iter6d_g replace=on fixture=xgboost");
+        set_witgen_gpu_probe_enabled(true);
+        set_witgen_gpu_replace_enabled(true);
+
+        let prover = init_prover().await;
+        let model: GradientBooster =
+            serde_json::from_str(include_str!("../../xgboost/res/trained_model.json"))
+                .unwrap();
+        let model_bytes = rmp_serde::to_vec(&model).unwrap();
+        let data: Vec<f64> = vec![18511304.0, 117.0];
+        let env = ExecutorEnv::builder()
+            .write(&data)
+            .unwrap()
+            .write(&model_bytes)
+            .unwrap()
+            .build()
+            .unwrap();
+        let receipt =
+            prove_succinct_async(prover.as_ref(), "xgboost", env, XGBOOST_ELF, XGBOOST_ID).await;
+        assert_eq!(receipt.journal.decode::<f64>().unwrap(), 30.528042544062632);
+        set_witgen_gpu_replace_enabled(false);
+        set_witgen_gpu_probe_enabled(false);
+    }
+
     /// SP7 iter 6d-g step 3 -- batch Tint compile validation for all
     /// 13 TopChunk0 major opcode arms. Walks `TOP_CHUNK0_ARM_DELTAS`,
     /// assembles each (baseline + delta + per-arm @compute wrapper),

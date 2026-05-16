@@ -39,6 +39,9 @@ pub use witgen::PreflightResults;
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 pub use hal::webgpu::set_witgen_gpu_probe_enabled;
 
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::set_witgen_gpu_replace_enabled;
+
 const GLOBAL_MIX: usize = 0;
 const GLOBAL_OUT: usize = 1;
 
