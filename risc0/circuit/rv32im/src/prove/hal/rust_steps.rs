@@ -769,7 +769,13 @@ fn run_accum_steps(
 
     for cycle in 0..last_cycle {
         let ctx = ExecContext::new(preflight, &tables, cycle);
-        step_TopAccum(&ctx, accum, data, global, mix)?;
+        let major = preflight.cycles[cycle].major;
+        let minor = preflight.cycles[cycle].minor;
+        step_TopAccum(&ctx, accum, data, global, mix).map_err(|e| {
+            anyhow::anyhow!(
+                "step_TopAccum failed at cycle={cycle} major={major} minor={minor}: {e}"
+            )
+        })?;
     }
 
     let accum = accum.unchecked();
@@ -853,7 +859,13 @@ fn step_exec(
         return Ok(());
     }
     let ctx = ExecContext::new(preflight, tables, cycle);
-    step_Top(&ctx, data, global)
+    // SP7 iter 6d-g step 6.2.5 diagnostic: tag the error with cycle + arm
+    // info so a downstream bail localizes WHICH cycle's step_Top blew up.
+    step_Top(&ctx, data, global).map_err(|e| {
+        anyhow::anyhow!(
+            "step_Top failed at cycle={cycle} major={major} minor={minor}: {e}"
+        )
+    })
 }
 
 include!("../../zirgen/steps.rs.inc");

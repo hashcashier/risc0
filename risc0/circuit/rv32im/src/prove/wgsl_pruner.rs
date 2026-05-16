@@ -184,7 +184,7 @@ pub const TOP_CHUNK0_ARM_DELTAS: &[(&str, &str, &str)] = &[
 pub fn assemble_arm_kernel(delta: &str, compute_entry: &str) -> String {
     let mut out =
         String::with_capacity(WITGEN_BASELINE_WGSL.len() + delta.len() + compute_entry.len() + 2);
-    out.push_str(WITGEN_BASELINE_WGSL);
+    out.push_str(&patch_extern_get_diff_count(WITGEN_BASELINE_WGSL));
     if !out.ends_with('\n') {
         out.push('\n');
     }
@@ -194,6 +194,22 @@ pub fn assemble_arm_kernel(delta: &str, compute_entry: &str) -> String {
     }
     out.push_str(compute_entry);
     out
+}
+
+/// SP7 iter 6d-g step 6.2.5 (2026-05-16): replace the stub
+/// `extern_getDiffCount` body with a buffer-backed lookup so per-arm
+/// short-circuit cycles get the correct diff_count cell writes from
+/// `DoCycleTable`. Stub returns 0 in WGSL but rust expects
+/// `preflight.cycles[cycle].diff_count[i]` -- short-circuiting
+/// without this fix produces wrong cells that break verify with
+/// "Reached unreachable mux arm" downstream.
+///
+/// Caller is responsible for declaring `preflight_diff_count_buf` at
+/// binding 7 in the @compute wrapper and uploading the buffer to it.
+pub fn patch_extern_get_diff_count(wgsl: &str) -> String {
+    const STUB: &str = "fn extern_getDiffCount(txn_cycle: Val) -> Val {\n  return 0u;\n}";
+    const REPLACEMENT: &str = "@group(0) @binding(7) var<storage, read> preflight_diff_count_buf: array<u32>;\nfn extern_getDiffCount(txn_cycle: Val) -> Val {\n  let idx = decode(txn_cycle);\n  if (idx >= arrayLength(&preflight_diff_count_buf)) { return 0u; }\n  return encode(preflight_diff_count_buf[idx]);\n}";
+    wgsl.replacen(STUB, REPLACEMENT, 1)
 }
 
 /// SP7 iter 6d-g step 6.2.0 (2026-05-16): self-contained shadow-init
