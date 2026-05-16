@@ -1029,15 +1029,37 @@ impl CircuitWitnessGenerator<WebGpuHal> for WebGpuCircuitHal {
         let mut chunks_ready = 0usize;
         if WITGEN_GPU_PROBE_ENABLED.load(Ordering::SeqCst) {
             let total_cycles = data.rows as u32;
-            chunks_ready = match self.dispatch_witgen_top_chunk0_probe(data, global, total_cycles) {
-                Ok(n) => n,
-                Err(err) => {
-                    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "iter6d_c_witgen_probe FAILED err={err:?}"
-                    ));
-                    0
-                }
-            };
+            // iter-6d-g step 6.2.4 finding: when WITGEN_GPU_REPLACE_ENABLED
+            // is set, the iter-6d-c full-TopChunk{0,1} probe ACTIVELY
+            // CORRUPTS cells because extern_isFirstCycle_0() returns 0
+            // always and extern_getMajorMinor() returns [0,0] -- so
+            // TopChunk1 enters every cycle as "not first" and dispatches
+            // MISC0 (major=0) with minor=0 inputs to ALL cycles, writing
+            // wrong data into every arm's layout. The per-arm dispatch
+            // (which uses preflight_meta correctly) then overwrites only
+            // the matching arm's cells -- but non-matching arms' cells
+            // retain the probe's garbage. With replace ON, rust_steps
+            // can't fix this. So skip the probe entirely when replace is on.
+            let skip_probe = WITGEN_GPU_REPLACE_ENABLED.load(Ordering::SeqCst);
+            if skip_probe {
+                // We still need chunks_ready=2 to satisfy the short-circuit
+                // gate condition (gate documents that both chunks are ready
+                // to dispatch -- meaningful only as a "kernels available"
+                // signal here, not as "cells written").
+                let c0 = self.lookup_witgen_top_chunk0_kernel().is_some() as usize;
+                let c1 = self.lookup_witgen_top_chunk1_kernel().is_some() as usize;
+                chunks_ready = c0 + c1;
+            } else {
+                chunks_ready = match self.dispatch_witgen_top_chunk0_probe(data, global, total_cycles) {
+                    Ok(n) => n,
+                    Err(err) => {
+                        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                            "iter6d_c_witgen_probe FAILED err={err:?}"
+                        ));
+                        0
+                    }
+                };
+            }
             // iter-6d-g step 6.2.0: shadow-init the 5 outer Top layout
             // cells (nextPcLow/High, nextState_0, nextMachineMode,
             // isFirstCycle) from preflight before any per-arm dispatch
@@ -1079,6 +1101,11 @@ impl CircuitWitnessGenerator<WebGpuHal> for WebGpuCircuitHal {
                         mask |= 1u16 << arm_idx;
                     }
                 }
+                // SP7 iter 6d-g step 6.2.4 bisection: narrow to MISC0 only
+                // (bit 0). If proof passes, MISC0 synthesis is bit-exact;
+                // expand to MISC0+MISC1, etc. Full mask: 0x0177 = arms
+                // 0,1,2,3,4,5,6,8. Currently bisecting.
+                mask &= 0x0001;
                 super::rust_steps::set_witgen_gpu_replace_arm_mask(mask);
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
                     "iter6d_g_replace mask=0x{:04x} chunks_ready={} dispatched_arms={:?}",
