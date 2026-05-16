@@ -16,7 +16,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use risc0_core::scope;
 use risc0_zkp::{
     adapter::{CircuitInfo as _, PROOF_SYSTEM_INFO},
@@ -1386,9 +1386,15 @@ impl SegmentProver for WebGpuSegmentProver {
             // SP7 iter 6d-g step 6.2.13 (2026-05-16): if diff mode is on,
             // snapshot GPU result from CPU shadow, reset shadow to
             // INVALID, re-scatter injector, force mask=0 so rust_steps
-            // can write cleanly, then diff after generate_witness.
+            // can write cleanly, then diff BEFORE zeroize.
+            //
+            // SP7 iter 6d-g step 6.2.14 (2026-05-16): snapshot AFTER
+            // generate_witness but BEFORE eltwise_zeroize_elem so we can
+            // distinguish "INVALID (not written)" from "0 (actually
+            // written zero)". The 6.2.13 filter conflated both, missing
+            // mismatches where GPU wrote V != 0 but rust_steps wrote 0.
             let diff_mode = WITGEN_GPU_DIFF_ENABLED.load(Ordering::SeqCst);
-            let gpu_snap: Option<Vec<u32>> = if diff_mode {
+            let witgen = if diff_mode {
                 let mut snap = vec![0u32; data_buf.buf.size()];
                 data_buf.buf.view(|slice: &[Val]| {
                     let u32s: &[u32] = unsafe {
@@ -1408,47 +1414,43 @@ impl SegmentProver for WebGpuSegmentProver {
                     &injector.values,
                 );
                 super::rust_steps::set_witgen_gpu_replace_arm_mask(0);
-                Some(snap)
-            } else {
-                None
-            };
-            let witgen = super::super::witgen::WitnessGenerator::<WebGpuHal>::populate_from_parts(
-                hal,
-                circuit_hal,
-                mode,
-                trace,
-                cycles,
-                global_buf,
-                code_buf,
-                data_buf,
-            )?;
-            if let Some(snap) = gpu_snap {
-                let data_buf = &witgen.data.buf;
-                let cols = witgen.data.cols;
-                let rows = witgen.data.rows;
-                let mut cpu_snap = vec![0u32; data_buf.size()];
-                data_buf.view(|slice: &[Val]| {
+                // Run generate_witness only (no zeroize) so the CPU shadow
+                // still has INVALID markers for unwritten cells.
+                circuit_hal
+                    .generate_witness(mode, &trace, &global_buf, &data_buf)
+                    .context("witness generation failure (DIFF mode)")?;
+                let cols = data_buf.cols;
+                let rows = data_buf.rows;
+                let mut cpu_snap = vec![0u32; data_buf.buf.size()];
+                data_buf.buf.view(|slice: &[Val]| {
                     let u32s: &[u32] = unsafe {
                         std::slice::from_raw_parts(slice.as_ptr() as *const u32, slice.len())
                     };
                     cpu_snap.copy_from_slice(u32s);
                 });
                 const INVALID_U32: u32 = 0xffffffffu32;
-                const ZERO_U32: u32 = 0u32;
                 let mut mismatches = 0usize;
                 let mut gpu_wrote = 0usize;
                 let mut cpu_wrote = 0usize;
                 let mut both_wrote_match = 0usize;
+                let mut gpu_only = 0usize;
+                let mut cpu_only = 0usize;
                 for i in 0..snap.len() {
                     let g = snap[i];
                     let c = cpu_snap[i];
                     let g_wrote = g != INVALID_U32;
-                    let c_wrote = c != INVALID_U32 && c != ZERO_U32;
+                    let c_wrote = c != INVALID_U32;
                     if g_wrote {
                         gpu_wrote += 1;
                     }
                     if c_wrote {
                         cpu_wrote += 1;
+                    }
+                    if g_wrote && !c_wrote {
+                        gpu_only += 1;
+                    }
+                    if !g_wrote && c_wrote {
+                        cpu_only += 1;
                     }
                     if g_wrote && c_wrote && g != c {
                         if mismatches < 20 {
@@ -1465,14 +1467,25 @@ impl SegmentProver for WebGpuSegmentProver {
                     }
                 }
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "DIFF_SUMMARY total_cells={} gpu_wrote={} cpu_wrote={} both_match={} mismatches={} rows={} cols={}",
-                    snap.len(), gpu_wrote, cpu_wrote, both_wrote_match, mismatches, rows, cols,
+                    "DIFF_SUMMARY total_cells={} gpu_wrote={} cpu_wrote={} both_match={} mismatches={} gpu_only={} cpu_only={} rows={} cols={}",
+                    snap.len(), gpu_wrote, cpu_wrote, both_wrote_match, mismatches, gpu_only, cpu_only, rows, cols,
                 ));
                 anyhow::bail!(
-                    "DIFF mode: {} mismatches between GPU and rust_steps witgen (see DIFF_MISMATCH logs)",
-                    mismatches
+                    "DIFF mode: {} mismatches (gpu_only={} cpu_only={} both_match={}); see DIFF_MISMATCH + DIFF_SUMMARY",
+                    mismatches, gpu_only, cpu_only, both_wrote_match
                 );
-            }
+            } else {
+                super::super::witgen::WitnessGenerator::<WebGpuHal>::populate_from_parts(
+                    hal,
+                    circuit_hal,
+                    mode,
+                    trace,
+                    cycles,
+                    global_buf,
+                    code_buf,
+                    data_buf,
+                )?
+            };
 
             let code = &witgen.code.buf;
             let data = &witgen.data.buf;
