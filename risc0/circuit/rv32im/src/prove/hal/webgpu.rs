@@ -1212,18 +1212,20 @@ impl CircuitWitnessGenerator<WebGpuHal> for WebGpuCircuitHal {
                         mask |= 1u16 << arm_idx;
                     }
                 }
-                // SP7 iter 6d-g step 6.2.6 (2026-05-16): patched
-                // extern_getMemoryTxn on top of step 6.2.5's
-                // extern_getDiffCount patch. Test still failed:
-                // step_TopAccum bails at cycle=5557 major=0 minor=0 (vs
-                // step 6.2.5's cycle=5866 -- bail moved but didn't
-                // disappear). Some inner mux within Misc0Accum still
-                // doesn't match. Localizing further is blocked on
-                // instrumenting the 134 bail!() sites in steps.rs.inc
-                // with line info (auto-classifier blocks bulk edits
-                // to generated code). Force mask=0; foundations
-                // (extern patches + diff_count buf + txn buffers)
-                // retained correctness-neutrally.
+                // SP7 iter 6d-g step 6.2.7 (2026-05-16): shadowed bail!
+                // macro now carries steps.rs.inc line info. Localized
+                // bail to line 25306 (END of major_onehot mux in
+                // exec_TopExtract) at cycle 5866 MISC0 -- meaning
+                // major_onehot[i] is 0 for ALL i. But shadow_init AND
+                // chunk1's exec_OneHot_13_ both write MONT_ONE to
+                // cell[1, 5866] (major_onehot[0] for major=0). So
+                // something between the GPU dispatch and the rust
+                // step_TopAccum read is corrupting the cell to 0.
+                // Likely candidates: chunk0 wrapper's exec_Misc0Chunk0
+                // call path triggers an internal store with the wrong
+                // value, or buffer-row indexing mismatch. Cannot localize
+                // without data_buf cell snapshot (deferred step 6.2.2).
+                // Mask forced to 0; line-info bail diagnostic retained.
                 mask = 0;
                 super::rust_steps::set_witgen_gpu_replace_arm_mask(mask);
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(

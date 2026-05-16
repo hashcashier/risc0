@@ -868,4 +868,21 @@ fn step_exec(
     })
 }
 
+// SP7 iter 6d-g step 6.2.7 (2026-05-16): shadow the anyhow::bail! macro
+// inside the included steps.rs.inc so each "Reached unreachable mux arm"
+// bail carries its line number. Lets us bisect down to a specific mux
+// site without editing the generated file.
+macro_rules! bail {
+    ($msg:literal) => {
+        return Err(::anyhow::anyhow!("{} (steps.rs.inc:{})", $msg, ::std::line!()));
+    };
+    ($fmt:literal, $($arg:tt)*) => {
+        return Err(::anyhow::anyhow!(
+            "{} (steps.rs.inc:{})",
+            format!($fmt, $($arg)*),
+            ::std::line!()
+        ));
+    };
+}
+
 include!("../../zirgen/steps.rs.inc");
