@@ -2944,6 +2944,44 @@ fn witgen_top_accum(@builtin(global_invocation_id) gid: vec3<u32>) {
         set_witgen_gpu_probe_enabled(false);
     }
 
+    /// SP7 iter 6d-g step 6.2.13 -- cell-level diff diagnostic. Runs
+    /// GPU pre-dispatch, snapshots the CPU shadow, then resets it +
+    /// re-scatters injector + runs rust_steps with mask=0 so we get a
+    /// pure-CPU result. Diffs the two snapshots cell-by-cell and logs
+    /// the first 20 mismatches before bailing.
+    ///
+    /// PROBE and REPLACE flags must be off; the diff path bypasses
+    /// their gates internally so we don't double-run the dispatches.
+    /// Expected to FAIL with the bail message and the DIFF_MISMATCH
+    /// / DIFF_SUMMARY log lines being the actionable output.
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_diff_xgboost() {
+        use forust_ml::GradientBooster;
+        use risc0_circuit_rv32im::prove::set_witgen_gpu_diff_enabled;
+        use xgboost_methods::{XGBOOST_ELF, XGBOOST_ID};
+
+        console_error_panic_hook::set_once();
+        risc0_zkp::hal::webgpu::log_webgpu_metric("iter6d_g diff=on fixture=xgboost");
+        set_witgen_gpu_diff_enabled(true);
+
+        let prover = init_prover().await;
+        let model: GradientBooster =
+            serde_json::from_str(include_str!("../../xgboost/res/trained_model.json"))
+                .unwrap();
+        let model_bytes = rmp_serde::to_vec(&model).unwrap();
+        let data: Vec<f64> = vec![18511304.0, 117.0];
+        let env = ExecutorEnv::builder()
+            .write(&data)
+            .unwrap()
+            .write(&model_bytes)
+            .unwrap()
+            .build()
+            .unwrap();
+        let _ =
+            prove_succinct_async(prover.as_ref(), "xgboost", env, XGBOOST_ELF, XGBOOST_ID).await;
+        set_witgen_gpu_diff_enabled(false);
+    }
+
     /// SP7 iter 6d-g step 3 -- batch Tint compile validation for all
     /// 13 TopChunk0 major opcode arms. Walks `TOP_CHUNK0_ARM_DELTAS`,
     /// assembles each (baseline + delta + per-arm @compute wrapper),

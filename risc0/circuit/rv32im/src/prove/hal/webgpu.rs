@@ -86,6 +86,22 @@ pub fn set_witgen_gpu_replace_enabled(enabled: bool) {
     super::rust_steps::set_witgen_gpu_replace_enabled(enabled);
 }
 
+/// SP7 iter 6d-g step 6.2.13: cell-level diff diagnostic. When enabled,
+/// `prove_core_async` runs the GPU pre-dispatch normally, snapshots the
+/// CPU shadow data buffer, then resets it to INVALID + re-scatters the
+/// injector + forces mask=0, runs rust_steps to fill everything via the
+/// pure-CPU path, snapshots again, and emits the first N cells where
+/// (gpu_snap != INVALID && cpu_snap != INVALID && gpu_snap != cpu_snap).
+/// Bails out at the end so the test fails fast with the diagnostic
+/// output. Requires both PROBE and REPLACE off (otherwise the early
+/// returns in `pre_witgen_dispatch_async` make the diagnostic a no-op).
+pub static WITGEN_GPU_DIFF_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Public setter for the iter-6d-g step 6.2.13 diff flag.
+pub fn set_witgen_gpu_diff_enabled(enabled: bool) {
+    WITGEN_GPU_DIFF_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
 thread_local! {
     /// SP7 iter 6d-d: session-local cache for the witgen kernel. Lives
     /// across WebGpuCircuitHal constructions so the spawn_local'd
@@ -1131,7 +1147,8 @@ impl WebGpuCircuitHal {
         data: &MetaBuffer<WebGpuHal>,
         global: &MetaBuffer<WebGpuHal>,
     ) -> Result<()> {
-        if !WITGEN_GPU_PROBE_ENABLED.load(Ordering::SeqCst) {
+        let diff_mode = WITGEN_GPU_DIFF_ENABLED.load(Ordering::SeqCst);
+        if !WITGEN_GPU_PROBE_ENABLED.load(Ordering::SeqCst) && !diff_mode {
             super::rust_steps::set_witgen_gpu_replace_arm_mask(0);
             return Ok(());
         }
@@ -1143,7 +1160,14 @@ impl WebGpuCircuitHal {
         // exists to measure dispatch cost; with the async refactor it's
         // moot since we'd be syncing back values that rust_steps
         // overwrites anyway.
-        if !WITGEN_GPU_REPLACE_ENABLED.load(Ordering::SeqCst) {
+        //
+        // SP7 iter 6d-g step 6.2.13 (2026-05-16): diff mode bypasses
+        // the replace-off gate so we can run GPU writes for snapshot
+        // purposes even when not short-circuiting. Caller in
+        // `prove_core_async` will reset the CPU shadow + re-scatter
+        // injector + force mask=0 after snapshot to keep rust_steps'
+        // set_at consistency check satisfied.
+        if !WITGEN_GPU_REPLACE_ENABLED.load(Ordering::SeqCst) && !diff_mode {
             super::rust_steps::set_witgen_gpu_replace_arm_mask(0);
             return Ok(());
         }
@@ -1359,6 +1383,35 @@ impl SegmentProver for WebGpuSegmentProver {
             circuit_hal
                 .pre_witgen_dispatch_async(&trace, &data_buf, &global_buf)
                 .await?;
+            // SP7 iter 6d-g step 6.2.13 (2026-05-16): if diff mode is on,
+            // snapshot GPU result from CPU shadow, reset shadow to
+            // INVALID, re-scatter injector, force mask=0 so rust_steps
+            // can write cleanly, then diff after generate_witness.
+            let diff_mode = WITGEN_GPU_DIFF_ENABLED.load(Ordering::SeqCst);
+            let gpu_snap: Option<Vec<u32>> = if diff_mode {
+                let mut snap = vec![0u32; data_buf.buf.size()];
+                data_buf.buf.view(|slice: &[Val]| {
+                    let u32s: &[u32] = unsafe {
+                        std::slice::from_raw_parts(slice.as_ptr() as *const u32, slice.len())
+                    };
+                    snap.copy_from_slice(u32s);
+                });
+                data_buf.buf.view_mut(|slice: &mut [Val]| {
+                    for v in slice.iter_mut() {
+                        *v = Val::INVALID;
+                    }
+                });
+                hal.scatter(
+                    &data_buf.buf,
+                    &injector.index,
+                    &injector.offsets,
+                    &injector.values,
+                );
+                super::rust_steps::set_witgen_gpu_replace_arm_mask(0);
+                Some(snap)
+            } else {
+                None
+            };
             let witgen = super::super::witgen::WitnessGenerator::<WebGpuHal>::populate_from_parts(
                 hal,
                 circuit_hal,
@@ -1369,6 +1422,57 @@ impl SegmentProver for WebGpuSegmentProver {
                 code_buf,
                 data_buf,
             )?;
+            if let Some(snap) = gpu_snap {
+                let data_buf = &witgen.data.buf;
+                let cols = witgen.data.cols;
+                let rows = witgen.data.rows;
+                let mut cpu_snap = vec![0u32; data_buf.size()];
+                data_buf.view(|slice: &[Val]| {
+                    let u32s: &[u32] = unsafe {
+                        std::slice::from_raw_parts(slice.as_ptr() as *const u32, slice.len())
+                    };
+                    cpu_snap.copy_from_slice(u32s);
+                });
+                const INVALID_U32: u32 = 0xffffffffu32;
+                const ZERO_U32: u32 = 0u32;
+                let mut mismatches = 0usize;
+                let mut gpu_wrote = 0usize;
+                let mut cpu_wrote = 0usize;
+                let mut both_wrote_match = 0usize;
+                for i in 0..snap.len() {
+                    let g = snap[i];
+                    let c = cpu_snap[i];
+                    let g_wrote = g != INVALID_U32;
+                    let c_wrote = c != INVALID_U32 && c != ZERO_U32;
+                    if g_wrote {
+                        gpu_wrote += 1;
+                    }
+                    if c_wrote {
+                        cpu_wrote += 1;
+                    }
+                    if g_wrote && c_wrote && g != c {
+                        if mismatches < 20 {
+                            let col = i / rows;
+                            let row = i % rows;
+                            risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                                "DIFF_MISMATCH idx={} row={} col={} gpu=0x{:08x} cpu=0x{:08x}",
+                                i, row, col, g, c,
+                            ));
+                        }
+                        mismatches += 1;
+                    } else if g_wrote && c_wrote && g == c {
+                        both_wrote_match += 1;
+                    }
+                }
+                risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                    "DIFF_SUMMARY total_cells={} gpu_wrote={} cpu_wrote={} both_match={} mismatches={} rows={} cols={}",
+                    snap.len(), gpu_wrote, cpu_wrote, both_wrote_match, mismatches, rows, cols,
+                ));
+                anyhow::bail!(
+                    "DIFF mode: {} mismatches between GPU and rust_steps witgen (see DIFF_MISMATCH logs)",
+                    mismatches
+                );
+            }
 
             let code = &witgen.code.buf;
             let data = &witgen.data.buf;
