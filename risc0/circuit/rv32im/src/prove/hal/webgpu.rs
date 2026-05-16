@@ -1101,11 +1101,18 @@ impl CircuitWitnessGenerator<WebGpuHal> for WebGpuCircuitHal {
                         mask |= 1u16 << arm_idx;
                     }
                 }
-                // SP7 iter 6d-g step 6.2.4 bisection: narrow to MISC0 only
-                // (bit 0). If proof passes, MISC0 synthesis is bit-exact;
-                // expand to MISC0+MISC1, etc. Full mask: 0x0177 = arms
-                // 0,1,2,3,4,5,6,8. Currently bisecting.
-                mask &= 0x0001;
+                // SP7 iter 6d-g step 6.2.4 dead-end: ALL bisections of the
+                // short-circuit mask (full 0x0177, DIV0-only 0x0010, MISC0-
+                // only 0x0001 with minor<2 gating) failed receipt verify
+                // with "Reached unreachable mux arm". Synthesis is
+                // fundamentally bit-incorrect for at least the per-arm
+                // wrappers tested, in a way bisection-by-arm-or-minor
+                // cannot localize without a data_buf diff diagnostic.
+                // Force mask=0 to disable broken short-circuit while
+                // keeping the foundations (shadow_init, chunk1 dispatch,
+                // per-arm bind layouts) intact for a future iteration
+                // that builds the diff diagnostic first.
+                mask = 0;
                 super::rust_steps::set_witgen_gpu_replace_arm_mask(mask);
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
                     "iter6d_g_replace mask=0x{:04x} chunks_ready={} dispatched_arms={:?}",

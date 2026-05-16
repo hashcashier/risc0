@@ -824,12 +824,20 @@ pub fn set_witgen_gpu_replace_arm_mask(mask: u16) {
     WITGEN_GPU_REPLACE_ARM_MASK.store(mask, Ordering::Release);
 }
 
-fn cycle_short_circuited(major: u8) -> bool {
+fn cycle_short_circuited(major: u8, minor: u8) -> bool {
     if major >= 13 {
         return false;
     }
     let mask = WITGEN_GPU_REPLACE_ARM_MASK.load(Ordering::Acquire);
-    (mask & (1u16 << major)) != 0
+    if (mask & (1u16 << major)) == 0 {
+        return false;
+    }
+    // SP7 iter-6d-g step 6.2.4 finding: each arm has 8 chunks in
+    // chunk0_all.wgsl, but only chunk0 and chunk1 modules are vendored.
+    // GPU dispatch only handles minor 0 and minor 1 per arm. Skip only
+    // those cycles -- the other 6 minors per arm fall through to rust
+    // step_Top as before.
+    minor < 2
 }
 
 fn step_exec(
@@ -840,7 +848,8 @@ fn step_exec(
     global: BufferRow<Val>,
 ) -> Result<()> {
     let major = preflight.cycles[cycle].major;
-    if cycle_short_circuited(major) {
+    let minor = preflight.cycles[cycle].minor;
+    if cycle_short_circuited(major, minor) {
         return Ok(());
     }
     let ctx = ExecContext::new(preflight, tables, cycle);
