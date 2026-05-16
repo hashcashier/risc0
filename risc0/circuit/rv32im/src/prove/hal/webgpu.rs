@@ -105,6 +105,13 @@ thread_local! {
     /// `dispatch_witgen_arms_probe`.
     static WITGEN_ARM_KERNELS: RefCell<std::collections::BTreeMap<&'static str, WebGpuKernel>> =
         RefCell::new(std::collections::BTreeMap::new());
+    /// SP7 iter 6d-g step 6.2.4: per-arm chunk1 kernel cache. Mirrors
+    /// WITGEN_ARM_KERNELS but for the chunk1 sub-fns (exec_Misc0Chunk1
+    /// etc.). Together with chunk0 these cover all minor opcodes of each
+    /// arm; rust_steps short-circuit needs BOTH chunks dispatched per
+    /// segment per arm to be safe.
+    static WITGEN_ARM_KERNELS_CHUNK1: RefCell<std::collections::BTreeMap<&'static str, WebGpuKernel>> =
+        RefCell::new(std::collections::BTreeMap::new());
     /// Tracks whether the async prewarm task has been spawned this
     /// session, so multiple `prewarm_witgen_kernel()` calls (one per
     /// segment_prover) only fire the compile once.
@@ -220,6 +227,66 @@ const ZERO_BACK_REG_ARMS: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 8];
 
 fn is_zero_back_reg_arm(arm_idx: usize) -> bool {
     ZERO_BACK_REG_ARMS.contains(&arm_idx)
+}
+
+/// SP7 iter 6d-g step 6.2.4: synthesize chunk1 wrapper. Uses
+/// EXEC_TOP_CHUNK1_WGSL as the standalone module (already contains
+/// exec_NondetReg, exec_NondetBitReg, exec_InstInput, exec_OneHot_13_,
+/// back_Reg, back_NondetReg, lookup helpers, kLayout_Top, etc.). The
+/// wrapper just appends a @compute entry that calls exec_<arm>Chunk1.
+fn synth_arm_chunk1_wrapper(label: &str, arm_idx: usize) -> String {
+    let sub_fn = format!("exec_{}", match arm_idx {
+        0 => "Misc0",
+        1 => "Misc1",
+        2 => "Misc2",
+        3 => "Mul0",
+        4 => "Div0",
+        5 => "Mem0",
+        6 => "Mem1",
+        8 => "ECall0",
+        _ => "UNUSED",
+    });
+    let extra_arg = if arm_idx == 8 { ", buf_global" } else { "" };
+    format!(
+        "@group(0) @binding(5) var<storage, read> cycle_list: array<u32>;\n\
+         @group(0) @binding(6) var<storage, read> preflight_meta: array<u32>;\n\
+         \n\
+         @compute @workgroup_size(64)\n\
+         fn iter6d_g_{label}_c1_main(@builtin(global_invocation_id) gid: vec3<u32>) {{\n\
+           let lane = gid.x;\n\
+           if (lane >= arrayLength(&cycle_list)) {{ return; }}\n\
+           cycle = cycle_list[lane];\n\
+           if (cycle >= params.data_rows) {{ return; }}\n\
+           let bound_top = BoundLayout_TopLayout(kLayout_Top, buf_data);\n\
+           let base = cycle * 4u;\n\
+           let packed = preflight_meta[base + 3u];\n\
+           let major_v = encode(packed >> 16u);\n\
+           let minor_v = encode(packed & 0xFFFFu);\n\
+           let is_first_v = select(0u, encode(1u), cycle == 0u);\n\
+           let x3 = exec_NondetBitReg(is_first_v, lookup_TopLayout_isFirstCycle(bound_top));\n\
+           let x4 = sub(MONT_ONE, x3._super);\n\
+           let x9 = back_Reg(1, lookup_TopLayout_nextPcLow(bound_top));\n\
+           let x10 = back_Reg(1, lookup_TopLayout_nextPcHigh(bound_top));\n\
+           let x11 = back_Reg(1, lookup_TopLayout_nextState_0(bound_top));\n\
+           let x12 = back_Reg(1, lookup_TopLayout_nextMachineMode(bound_top));\n\
+           let x15 = exec_NondetReg(major_v, lookup_TopLayout_major(bound_top));\n\
+           let x16 = exec_NondetReg(minor_v, lookup_TopLayout_minor(bound_top));\n\
+           let x17 = exec_InstInput(\n\
+             x15._super, x16._super,\n\
+             ValU32Struct(mul(x4, x9._super), mul(x4, x10._super)),\n\
+             mul(x4, x11._super),\n\
+             add(mul(x4, x12._super), x3._super),\n\
+             lookup_TopLayout_instInput(bound_top)\n\
+           );\n\
+           let _x18 = exec_OneHot_13_(x15._super, lookup_TopLayout_majorOnehot(bound_top));\n\
+           let x20 = back_Reg(0, lookup_TopCycleLayout__super(lookup_TopLayout_cycleRedef(bound_top)));\n\
+           let _result = {sub_fn}Chunk1(x20, x17, lookup_TopInstResultLayout_arm{arm_idx}(lookup_TopLayout_instResult(bound_top)){extra_arg});\n\
+         }}\n",
+        label = label,
+        sub_fn = sub_fn,
+        arm_idx = arm_idx,
+        extra_arg = extra_arg,
+    )
 }
 
 #[allow(dead_code)]
@@ -479,6 +546,69 @@ impl WebGpuCircuitHal {
                 "iter6d_g_prewarm ALL arms requested={}",
                 TOP_CHUNK0_ARM_DELTAS.len(),
             ));
+
+            // iter-6d-g step 6.2.4: also prewarm chunk1 kernels for the
+            // 8 zero-back-reg arms. Uses full EXEC_TOP_CHUNK1_WGSL as
+            // standalone module + per-arm wrapper (chunk1.wgsl already
+            // defines exec_NondetReg/exec_NondetBitReg/exec_InstInput/
+            // exec_OneHot_13_/back_Reg/back_NondetReg). Module ~1.1 MB +
+            // small wrapper -> under 2 MB Tint cliff.
+            use crate::prove::wgsl_pruner::EXEC_TOP_CHUNK1_WGSL;
+            let mut chunk1_modules: Vec<(String, String, &str)> = Vec::with_capacity(8);
+            for (arm_idx, (label, _, _)) in TOP_CHUNK0_ARM_DELTAS.iter().enumerate() {
+                if !is_zero_back_reg_arm(arm_idx) {
+                    continue;
+                }
+                let wrapper = synth_arm_chunk1_wrapper(label, arm_idx);
+                let mut module = String::with_capacity(
+                    EXEC_TOP_CHUNK1_WGSL.len() + wrapper.len() + 2
+                );
+                module.push_str(EXEC_TOP_CHUNK1_WGSL);
+                if !module.ends_with('\n') { module.push('\n'); }
+                module.push_str(&wrapper);
+                let entry = format!("iter6d_g_{}_c1_main", label);
+                chunk1_modules.push((module, entry, *label));
+            }
+            let chunk1_labels: Vec<&'static str> =
+                chunk1_modules.iter().map(|(_, _, l)| *l).collect();
+            let chunk1_entries: Vec<String> =
+                chunk1_modules.iter().map(|(_, e, _)| e.clone()).collect();
+            let chunk1_futures: Vec<_> = chunk1_modules
+                .iter()
+                .enumerate()
+                .map(|(i, (module, entry, _))| {
+                    let _label: &'static str = chunk1_labels[i];
+                    let entry: &str = entry;
+                    hal.create_compute_kernel_async(
+                        "iter6d_g_arm_chunk1_kernel",
+                        module,
+                        entry,
+                        &arm_layouts,
+                    )
+                })
+                .collect();
+            for (i, fut) in chunk1_futures.into_iter().enumerate() {
+                match fut.await {
+                    Ok(kernel) => {
+                        let label = chunk1_labels[i];
+                        WITGEN_ARM_KERNELS_CHUNK1
+                            .with(|cell| cell.borrow_mut().insert(label, kernel));
+                        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                            "iter6d_g_prewarm arm={}_chunk1 DONE", label
+                        ));
+                    }
+                    Err(err) => {
+                        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                            "iter6d_g_prewarm arm={}_chunk1 FAILED err={err:?}",
+                            chunk1_labels[i]
+                        ));
+                    }
+                }
+            }
+            let _ = chunk1_entries;
+            risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                "iter6d_g_prewarm chunk1 ALL requested={}", chunk1_labels.len(),
+            ));
         });
     }
 
@@ -606,6 +736,7 @@ impl WebGpuCircuitHal {
     fn dispatch_witgen_per_arm_probe(
         &self,
         data: &MetaBuffer<WebGpuHal>,
+        global: &MetaBuffer<WebGpuHal>,
         preflight: &PreflightTrace,
     ) -> Result<Vec<usize>> {
         use crate::prove::wgsl_pruner::TOP_CHUNK0_ARM_DELTAS;
@@ -670,7 +801,7 @@ impl WebGpuCircuitHal {
             .buf
             .raw_buffer()
             .ok_or_else(|| anyhow::anyhow!("iter-6d-g: data missing GPU storage"))?;
-        let global_gpu = data
+        let global_gpu = global
             .buf
             .raw_buffer()
             .ok_or_else(|| anyhow::anyhow!("iter-6d-g: global missing GPU storage"))?;
@@ -696,6 +827,23 @@ impl WebGpuCircuitHal {
             let Some(kernel) = kernel else {
                 skipped += 1;
                 continue;
+            };
+            // iter-6d-g step 6.2.4: for short-circuit safety the arm's
+            // chunk1 kernel MUST also be dispatched (chunk0 alone covers
+            // only some minor opcodes; chunk1 covers the rest).
+            // No-op-wrapper arms (5 inter-cycle) don't have chunk1
+            // kernels and aren't in ZERO_BACK_REG_ARMS so they're never
+            // short-circuited; skip the chunk1 check for them.
+            let chunk1_kernel = if is_zero_back_reg_arm(arm_idx) {
+                let k = WITGEN_ARM_KERNELS_CHUNK1
+                    .with(|cell| cell.borrow().get(*label).cloned());
+                if k.is_none() {
+                    skipped += 1;
+                    continue;
+                }
+                k
+            } else {
+                None
             };
             // Per-arm cycle list upload (storage buffer + queue write).
             let cycle_bytes: &[u8] = bytemuck::cast_slice(per_arm_cycles[arm_idx].as_slice());
@@ -724,6 +872,11 @@ impl WebGpuCircuitHal {
             )?;
             let workgroups = (cycle_count as u32).div_ceil(64);
             self.hal.dispatch_compute_1d(&kernel, &bind_group, workgroups);
+            // iter-6d-g step 6.2.4: dispatch chunk1 too if we have it
+            // (shares the same bind group -- bindings are identical).
+            if let Some(k1) = chunk1_kernel {
+                self.hal.dispatch_compute_1d(&k1, &bind_group, workgroups);
+            }
             cycle_list_buffers.push(cycle_buf);
             bind_groups.push(bind_group);
             dispatched += 1;
@@ -740,12 +893,17 @@ impl WebGpuCircuitHal {
         Ok(dispatched_arms)
     }
 
+    /// Returns the number of TopChunk{0,1} kernels actually dispatched
+    /// (0 = neither ready, 1 = only one ready, 2 = both ready). step_witgen
+    /// gates the replace short-circuit on this returning 2 -- only then do
+    /// we trust that GPU has written cells for both first-cycle (chunk0)
+    /// and non-first-cycle (chunk1) arm dispatches.
     fn dispatch_witgen_top_chunk0_probe(
         &self,
         data: &MetaBuffer<WebGpuHal>,
         global: &MetaBuffer<WebGpuHal>,
         total_cycles: u32,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         // iter-6d-e: dispatch chunk0 and chunk1 (if available). Each
         // kernel internally filters by major opcode arm via its mux
         // dispatch; cycles whose opcode is outside the kernel's arms
@@ -760,8 +918,9 @@ impl WebGpuCircuitHal {
             risc0_zkp::hal::webgpu::log_webgpu_metric(
                 "iter6d_c_witgen_probe SKIP kernels_not_ready",
             );
-            return Ok(());
+            return Ok(0);
         }
+        let chunks_ready = kernels.len();
         let _t = WebGpuStageTimer::new(format!(
             "iter6d_c_witgen_probe cycles={} chunks={}",
             total_cycles,
@@ -817,7 +976,7 @@ impl WebGpuCircuitHal {
         for kernel in &kernels {
             self.hal.dispatch_compute_1d(kernel, &bind_group, workgroups);
         }
-        Ok(())
+        Ok(chunks_ready)
     }
 }
 
@@ -867,13 +1026,18 @@ impl CircuitWitnessGenerator<WebGpuHal> for WebGpuCircuitHal {
         // via `set_witgen_gpu_probe_enabled(true)` to measure the
         // per-segment GPU dispatch wall and the one-time Tint compile;
         // probe output is discarded so rust_steps remains the witness.
+        let mut chunks_ready = 0usize;
         if WITGEN_GPU_PROBE_ENABLED.load(Ordering::SeqCst) {
             let total_cycles = data.rows as u32;
-            if let Err(err) = self.dispatch_witgen_top_chunk0_probe(data, global, total_cycles) {
-                risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "iter6d_c_witgen_probe FAILED err={err:?}"
-                ));
-            }
+            chunks_ready = match self.dispatch_witgen_top_chunk0_probe(data, global, total_cycles) {
+                Ok(n) => n,
+                Err(err) => {
+                    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                        "iter6d_c_witgen_probe FAILED err={err:?}"
+                    ));
+                    0
+                }
+            };
             // iter-6d-g step 6.2.0: shadow-init the 5 outer Top layout
             // cells (nextPcLow/High, nextState_0, nextMachineMode,
             // isFirstCycle) from preflight before any per-arm dispatch
@@ -889,7 +1053,7 @@ impl CircuitWitnessGenerator<WebGpuHal> for WebGpuCircuitHal {
             // pipeline. Returns the set of arm_idx values that were
             // actually dispatched -- step 6.2.3 uses this to decide
             // whether to short-circuit rust_steps per cycle.
-            let dispatched_arms = match self.dispatch_witgen_per_arm_probe(data, preflight) {
+            let dispatched_arms = match self.dispatch_witgen_per_arm_probe(data, global, preflight) {
                 Ok(arms) => arms,
                 Err(err) => {
                     risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
@@ -899,11 +1063,16 @@ impl CircuitWitnessGenerator<WebGpuHal> for WebGpuCircuitHal {
                 }
             };
             // iter-6d-g step 6.2.3: short-circuit rust_steps for the zero-
-            // back-reg arms that were actually GPU-dispatched this segment.
-            // Wrapper synthesis is only safe for arms in ZERO_BACK_REG_ARMS
-            // AND only when they actually dispatched (kernel ready, no
-            // compile failure). Compute the AND and feed to rust_steps.
-            if WITGEN_GPU_REPLACE_ENABLED.load(Ordering::SeqCst) {
+            // back-reg arms when BOTH (a) the full TopChunk0+TopChunk1
+            // dispatches landed (`chunks_ready == 2` so cells for both
+            // first-cycle AND non-first-cycle arms got written by GPU),
+            // AND (b) the per-arm chunk0 wrapper for that arm dispatched
+            // (so cycle-0-specific arm cells got written too -- safety
+            // net for the rare case that cycle 0 is one of the 8 arms).
+            // 5 inter-cycle arms (CONTROL0/POSEIDON0/1/SHA0/BIGINT0) are
+            // never short-circuited because their internal back_Reg(N)
+            // reads need cells shadow_init doesn't pre-populate.
+            if WITGEN_GPU_REPLACE_ENABLED.load(Ordering::SeqCst) && chunks_ready == 2 {
                 let mut mask: u16 = 0;
                 for arm_idx in &dispatched_arms {
                     if is_zero_back_reg_arm(*arm_idx) && *arm_idx < 13 {
@@ -912,11 +1081,16 @@ impl CircuitWitnessGenerator<WebGpuHal> for WebGpuCircuitHal {
                 }
                 super::rust_steps::set_witgen_gpu_replace_arm_mask(mask);
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "iter6d_g_replace mask=0x{:04x} dispatched_arms={:?}",
-                    mask, dispatched_arms,
+                    "iter6d_g_replace mask=0x{:04x} chunks_ready={} dispatched_arms={:?}",
+                    mask, chunks_ready, dispatched_arms,
                 ));
             } else {
                 super::rust_steps::set_witgen_gpu_replace_arm_mask(0);
+                if WITGEN_GPU_REPLACE_ENABLED.load(Ordering::SeqCst) {
+                    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                        "iter6d_g_replace SKIP chunks_ready={}", chunks_ready,
+                    ));
+                }
             }
         } else {
             // Probe disabled -- no GPU writes -- rust_steps must run every arm.
