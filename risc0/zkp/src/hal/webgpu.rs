@@ -10902,7 +10902,6 @@ impl WebGpuHal {
             bytemuck::cast_slice(&params),
         )?;
 
-        output.sync_cpu_to_gpu(self)?;
         matrix.sync_cpu_to_gpu(self)?;
 
         let bind_group = self.create_bind_group(

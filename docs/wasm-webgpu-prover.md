@@ -100,6 +100,10 @@ The NTT step path uses the same dynamic-offset pattern for forward and inverse
 NTT levels, reducing xgboost bind-group creations further to 3,358 and buffer
 allocations to 6,171. The measured xgboost wall was 102.25 s, a small/noisy
 improvement over the prior 102.82-103.35 s band.
+The hash_rows Merkle path no longer uploads its output node buffer before
+overwriting every digest. On xgboost this removed the 4.37 GB `nodes` upload
+source, reducing total host-to-GPU upload bytes from 15.28 GB to 10.91 GB;
+wall measured 101.93 s in the same diagnostic run.
 
 `default_prover()` is intentionally unavailable for browser WebGPU builds
 because it cannot synchronously request a `GPUAdapter`/`GPUDevice`.

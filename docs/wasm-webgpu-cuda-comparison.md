@@ -27,6 +27,9 @@ allocations from 15,323 to 11,835; wall stayed flat at 102.86 s.
 SP6h applied the same dynamic-offset pattern to forward and inverse NTT
 steps, dropping bind-group creations to 3,358 and buffer allocations to
 6,171; xgboost measured 102.25 s.
+SP6i then removed a redundant `hash_rows` output-buffer upload, cutting
+xgboost host-to-GPU upload bytes from 15.28 GB to 10.91 GB and measuring
+101.93 s.
 
 ## Final per-fixture matrix (2026-05-15)
 
@@ -38,7 +41,7 @@ Hardware: RTX 5090 (32 GB, SM120/Blackwell, CUDA 13.0), Chrome 148.
 | libm succinct | 510 ms | 3178 ms | 6.2× | 0.35 | refreshed 2026-05-15 (SP10) |
 | keccak_union_small succinct (4 seg + 9 keccak) | 7.7 s | 106.1 s | 13.7× | 0.35 | SP6 closed: `op=eval_check cpu_fallbacks=0` |
 | keccak_union succinct (KeccakUnion(3), 11 seg + 25 keccak) | 20.7 s | 303.2 s | 14.7× | 0.37 | SP6 closed (was SIGKILL > 3600 s) |
-| **xgboost succinct (multi-segment)** | **5.7 s** | **102.7 s** | **18.0×** | **0.44** | refreshed 2026-05-15; 2-slot default scheduled pool smoke 102.82 s; SP6f pipeline cache 103.35 s; SP6g fold-chain dynamic bind group 102.86 s; SP6h NTT dynamic bind groups 102.25 s |
+| **xgboost succinct (multi-segment)** | **5.7 s** | **102.7 s** | **18.0×** | **0.44** | refreshed 2026-05-15; 2-slot default scheduled pool smoke 102.82 s; SP6f pipeline cache 103.35 s; SP6g fold-chain dynamic bind group 102.86 s; SP6h NTT dynamic bind groups 102.25 s; SP6i hash_rows output upload removal 101.93 s |
 
 The xgboost ratio 18.0× is the closest current proxy for real-world
 workloads. R1 single-segment fixtures sit at 6.2-7.2× because their
@@ -78,7 +81,7 @@ Every measured fixture remains above 1.0× CUDA. Reasons:
 | SP7 iter 6d-deeper (TopAccum split + GPU accumulate) | -22 s of 103 s wall (~21%) | Blocked: TopAccumChunk0 closure 1.7 MB is 4× over Chrome's 0.4 MB reachable-closure cliff; needs straight-line-arithmetic chunking pass MuxChunk doesn't provide |
 | SP8 iter 1 + iter 3 (parallel readbacks) | -wall on FRI | **LANDED 2026-05-15** -- noise on xgboost (FRI is small), larger fixtures TBD |
 | SP9 phase 1 + phase 2 take 3 (layout cache + min_binding_size collapse) | infrastructure | **LANDED 2026-05-15** -- layout identity is now stable enough for higher-level caches |
-| SP6e-SP6h object churn caches | -2-3% smokes | Bind-group diagnostics showed 12,510 bind groups for 5,365 dispatches. Compute-pipeline cache landed with 1,592 hits on xgboost but wall stayed flat at 103.35 s. Poseidon2 fold-chain dynamic bind groups cut xgboost bind groups to 9,022 and buffers to 11,835, still flat at 102.86 s. NTT dynamic bind groups cut bind groups to 3,358 and buffers to 6,171; xgboost measured 102.25 s. Global bind-group caching remains deferred until buffer lifetime/invalidation is explicit |
+| SP6e-SP6i object churn and upload trimming | -2-3% smokes | Bind-group diagnostics showed 12,510 bind groups for 5,365 dispatches. Compute-pipeline cache landed with 1,592 hits on xgboost but wall stayed flat at 103.35 s. Poseidon2 fold-chain dynamic bind groups cut xgboost bind groups to 9,022 and buffers to 11,835, still flat at 102.86 s. NTT dynamic bind groups cut bind groups to 3,358 and buffers to 6,171; xgboost measured 102.25 s. Removing redundant hash_rows output uploads cut xgboost upload bytes from 15.28 GB to 10.91 GB and measured 101.93 s. Global bind-group caching remains deferred until buffer lifetime/invalidation is explicit |
 | Per-kernel WGSL improvements (SP3/SP6a revisits) | -5% per kernel | Parked (low priority per SP6c submission-bound diagnosis) |
 
 Composed expectation (per `project_sp7_witgen_savings_ceiling`):

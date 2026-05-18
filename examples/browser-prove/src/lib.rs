@@ -540,6 +540,37 @@ mod tests {
     }
 
     #[wasm_bindgen_test(async)]
+    async fn webgpu_hal_hash_rows_does_not_upload_output_buffer() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        let rows = 8;
+        let cols = 4;
+        let matrix = hal.copy_from_elem(
+            "webgpu_hal_hash_rows_input",
+            &(0..rows * cols)
+                .map(|idx| elem(idx + 16_000))
+                .collect::<Vec<_>>(),
+        );
+        let output = hal.alloc_digest("webgpu_hal_hash_rows_output", rows);
+
+        hal.reset_diagnostics();
+        hal.hash_rows(&output, &matrix);
+        assert_gpu_buffer_matches_cpu(&hal, "hash_rows_no_output_upload", &output).await;
+
+        let diagnostics = hal.diagnostics();
+        let output_uploads = diagnostics
+            .upload_sources
+            .iter()
+            .find(|source| source.name == "webgpu_hal_hash_rows_output")
+            .map(|source| source.upload_bytes)
+            .unwrap_or(0);
+        assert_eq!(output_uploads, 0);
+    }
+
+    #[wasm_bindgen_test(async)]
     async fn webgpu_hal_reports_layout_and_bind_group_diagnostics() {
         console_error_panic_hook::set_once();
 
