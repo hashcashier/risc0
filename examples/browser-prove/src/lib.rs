@@ -721,6 +721,28 @@ fn main() {
         hal.hash_fold(&hash_fold, 8, 4);
         assert_gpu_buffer_matches_cpu(&hal, "hash_fold", &hash_fold).await;
 
+        let hash_chain_values = (0..32).map(|idx| digest(idx + 100)).collect::<Vec<_>>();
+        let hash_chain = hal.copy_from_digest("webgpu_hal_hash_fold_chain", &hash_chain_values);
+        let hash_chain_expected =
+            hal.copy_from_digest("webgpu_hal_hash_fold_chain_expected", &hash_chain_values);
+        hash_chain_expected.sync_cpu_to_gpu(&hal).unwrap();
+        hal.hash_fold(&hash_chain_expected, 16, 8);
+        hal.hash_fold(&hash_chain_expected, 8, 4);
+        hal.hash_fold(&hash_chain_expected, 4, 2);
+        hal.hash_fold(&hash_chain_expected, 2, 1);
+        hal.reset_diagnostics();
+        {
+            let _gpu_scope = hal.gpu_authoritative_scope(true);
+            hal.hash_fold_chain_async(&hash_chain, &[8, 4, 2, 1])
+                .await
+                .unwrap();
+        }
+        hash_chain.sync_gpu_to_cpu(&hal).await.unwrap();
+        assert_eq!(hash_chain.to_vec(), hash_chain_expected.to_vec());
+        let diagnostics = hal.diagnostics();
+        assert_eq!(diagnostics.gpu_dispatches, 4);
+        assert_eq!(diagnostics.bind_group_creations, 1);
+
         let add_output = hal.alloc_elem("webgpu_hal_add_output", 16);
         let add_input1 = hal.copy_from_elem(
             "webgpu_hal_add_input1",

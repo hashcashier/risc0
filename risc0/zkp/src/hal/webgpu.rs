@@ -4536,6 +4536,8 @@ struct WebGpuPoseidon2Hash {
     m_int_diag: WebGpuBuffer<BabyBearElem>,
     fold_layout: web_sys::GpuBindGroupLayout,
     fold_kernel: WebGpuKernel,
+    fold_chain_layout: web_sys::GpuBindGroupLayout,
+    fold_chain_kernel: WebGpuKernel,
     rows_layout: web_sys::GpuBindGroupLayout,
     rows_kernel: WebGpuKernel,
 }
@@ -4564,6 +4566,21 @@ impl WebGpuPoseidon2Hash {
             "poseidon2_fold",
             &[fold_layout.clone()],
         )?;
+        let fold_chain_layout = hal.create_bind_group_layout(
+            "webgpu_poseidon2_fold_chain_layout",
+            &[
+                WebGpuBindingLayout::read_only_storage(0, 0),
+                WebGpuBindingLayout::read_only_storage(1, 0),
+                WebGpuBindingLayout::storage(2, 0),
+                WebGpuBindingLayout::uniform_dynamic(4, 32),
+            ],
+        )?;
+        let fold_chain_kernel = hal.create_compute_kernel(
+            "webgpu_poseidon2_fold_chain",
+            POSEIDON2_WGSL,
+            "poseidon2_fold",
+            &[fold_chain_layout.clone()],
+        )?;
 
         let rows_layout = hal.create_bind_group_layout(
             "webgpu_poseidon2_rows_layout",
@@ -4587,6 +4604,8 @@ impl WebGpuPoseidon2Hash {
             m_int_diag,
             fold_layout,
             fold_kernel,
+            fold_chain_layout,
+            fold_chain_kernel,
             rows_layout,
             rows_kernel,
         })
@@ -5129,6 +5148,7 @@ pub struct WebGpuHal {
     max_buffer_size: u64,
     max_storage_buffer_binding_size: u64,
     max_compute_workgroup_storage_size: u32,
+    min_uniform_buffer_offset_alignment: u32,
     eval_check_interpreter_pipelines:
         RefCell<BTreeMap<EvalCheckInterpreterPipelineKey, EvalCheckInterpreterPipeline>>,
     // SP3 iter 5 (2026-05-12): runtime flag that opts a HAL into the
@@ -5200,6 +5220,7 @@ impl WebGpuHal {
         let max_buffer_size = limits.max_buffer_size() as u64;
         let max_storage_buffer_binding_size = limits.max_storage_buffer_binding_size() as u64;
         let max_compute_workgroup_storage_size = limits.max_compute_workgroup_storage_size();
+        let min_uniform_buffer_offset_alignment = limits.min_uniform_buffer_offset_alignment();
         log_webgpu_stage(&format!(
             "browser-prove:webgpu-limits max_buffer_size={} max_storage_buffer_binding_size={} max_compute_workgroup_storage_size={}",
             max_buffer_size, max_storage_buffer_binding_size, max_compute_workgroup_storage_size
@@ -5249,6 +5270,7 @@ impl WebGpuHal {
             max_buffer_size,
             max_storage_buffer_binding_size,
             max_compute_workgroup_storage_size,
+            min_uniform_buffer_offset_alignment,
             eval_check_interpreter_pipelines: RefCell::new(BTreeMap::new()),
             staged_eval_check_enabled: Cell::new(false),
             staged_eval_check_pipelines: RefCell::new(BTreeMap::new()),
@@ -10665,11 +10687,16 @@ impl WebGpuHal {
         };
         io.sync_cpu_to_gpu(self)?;
 
-        // Pre-build params + bind groups for every layer so the
-        // compute pass below can reference each by index. The JS GC
-        // keeps them alive while the encoder/pass borrow them.
-        let mut params_bufs: Vec<web_sys::GpuBuffer> = Vec::with_capacity(output_sizes.len());
-        let mut bind_groups: Vec<web_sys::GpuBindGroup> = Vec::with_capacity(output_sizes.len());
+        // SP6g (2026-05-18): pack all per-layer params into one dynamic
+        // uniform buffer and bind it once. This keeps the existing single-pass
+        // dispatch batching while avoiding one bind group per Merkle layer.
+        let params_len = mem::size_of::<[u32; 8]>();
+        let params_stride = align_up(
+            params_len,
+            self.min_uniform_buffer_offset_alignment as usize,
+        );
+        let mut params_bytes = Vec::new();
+        let mut params_offsets: Vec<u32> = Vec::with_capacity(output_sizes.len());
         let mut workgroups_per_layer: Vec<u32> = Vec::with_capacity(output_sizes.len());
         for &output_size in output_sizes {
             if output_size == 0 {
@@ -10688,41 +10715,62 @@ impl WebGpuHal {
                 0,
                 0,
             ];
-            let params_buf = self.create_uniform_buffer(
-                "webgpu_poseidon2_fold_params",
-                bytemuck::cast_slice(&params),
-            )?;
-            let bind_group = self.create_bind_group(
-                "webgpu_poseidon2_fold_bind_group",
-                &hash.fold_layout,
-                &[
-                    WebGpuBufferBinding::new(0, round_constants_gpu),
-                    WebGpuBufferBinding::new(1, m_int_diag_gpu),
-                    WebGpuBufferBinding::new(2, io_gpu),
-                    WebGpuBufferBinding {
-                        binding: 4,
-                        buffer: &params_buf,
-                        offset: 0,
-                        size: Some(32),
-                    },
-                ],
-            )?;
-            params_bufs.push(params_buf);
-            bind_groups.push(bind_group);
+            let params_offset = params_bytes.len();
+            params_bytes.resize(params_offset + params_stride, 0);
+            params_bytes[params_offset..params_offset + params_len]
+                .copy_from_slice(bytemuck::cast_slice(&params));
+            params_offsets.push(
+                u32::try_from(params_offset)
+                    .map_err(|_| anyhow!("WebGPU hash_fold params offset exceeds u32"))?,
+            );
             workgroups_per_layer.push(
                 u32::try_from(output_size)
                     .expect("WebGPU hash_fold output size exceeds u32")
                     .div_ceil(256),
             );
         }
-        if bind_groups.is_empty() {
+        if params_offsets.is_empty() {
             return Ok(true);
         }
+        let params_buf = self.create_buffer(
+            "webgpu_poseidon2_fold_chain_params",
+            params_bytes.len() as u64,
+            WEBGPU_BUFFER_USAGE_UNIFORM | WEBGPU_BUFFER_USAGE_COPY_DST,
+        )?;
+        self.write_buffer_named(
+            &params_buf,
+            "webgpu_poseidon2_fold_chain_params",
+            0,
+            params_bytes.as_slice(),
+        )?;
+        let bind_group = self.create_bind_group(
+            "webgpu_poseidon2_fold_chain_bind_group",
+            &hash.fold_chain_layout,
+            &[
+                WebGpuBufferBinding::new(0, round_constants_gpu),
+                WebGpuBufferBinding::new(1, m_int_diag_gpu),
+                WebGpuBufferBinding::new(2, io_gpu),
+                WebGpuBufferBinding {
+                    binding: 4,
+                    buffer: &params_buf,
+                    offset: 0,
+                    size: Some(params_len as u64),
+                },
+            ],
+        )?;
         let encoder = self.device.create_command_encoder();
         let pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&hash.fold_kernel.pipeline);
-        for (bind_group, workgroups) in bind_groups.iter().zip(workgroups_per_layer.iter()) {
-            pass.set_bind_group(0, Some(bind_group));
+        pass.set_pipeline(&hash.fold_chain_kernel.pipeline);
+        for (params_offset, workgroups) in params_offsets.iter().zip(workgroups_per_layer.iter()) {
+            let dynamic_offsets = [*params_offset];
+            pass.set_bind_group_with_u32_slice_and_u32_and_dynamic_offsets_data_length(
+                0,
+                Some(&bind_group),
+                &dynamic_offsets,
+                0,
+                1,
+            )
+            .map_err(js_error)?;
             pass.dispatch_workgroups_with_workgroup_count_y_and_workgroup_count_z(
                 *workgroups, 1, 1,
             );
@@ -10730,7 +10778,7 @@ impl WebGpuHal {
         pass.end();
         self.submit(encoder.finish());
         // Mirror finish_hal_op accounting for each layer.
-        for _ in 0..bind_groups.len() {
+        for _ in 0..params_offsets.len() {
             self.record_gpu_result_authoritative("hash_fold", true);
         }
         io.mark_gpu_dirty();
@@ -10827,6 +10875,13 @@ fn byte_offset_as_f64(byte_offset: u64) -> Result<f64> {
         "WebGPU byte offset exceeds JS integer precision: {byte_offset}"
     );
     Ok(byte_offset as f64)
+}
+
+fn align_up(value: usize, alignment: usize) -> usize {
+    if alignment == 0 {
+        return value;
+    }
+    value.div_ceil(alignment) * alignment
 }
 
 fn byte_len_for<T>(size: usize) -> u64 {

@@ -92,6 +92,10 @@ pipelines when their bind-group layouts were created by the same HAL; this is
 safe because pipelines do not retain per-proof buffers. On the xgboost pooled
 smoke, the cache reduced repeated compute-pipeline creation to 36 creations
 and 1,592 hits, but wall time remained flat at 103.35 s.
+The Poseidon2 fold-chain path also packs per-layer parameters into one
+dynamic-offset uniform buffer and reuses one bind group per chain. On xgboost
+this reduced bind-group creations from 12,510 to 9,022 and buffer allocations
+from 15,323 to 11,835, while wall time stayed flat at 102.86 s.
 
 `default_prover()` is intentionally unavailable for browser WebGPU builds
 because it cannot synchronously request a `GPUAdapter`/`GPUDevice`.
