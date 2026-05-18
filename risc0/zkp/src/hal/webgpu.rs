@@ -11514,6 +11514,9 @@ impl Hal for WebGpuHal {
         offsets: &[u32],
         values: &[Self::Elem],
     ) {
+        if !index.windows(2).any(|window| window[0] < window[1]) {
+            return;
+        }
         let gpu_scattered = self
             .dispatch_scatter(into, index, offsets, values)
             .unwrap_or_else(|err| panic!("failed to scatter WebGPU buffers: {err}"));

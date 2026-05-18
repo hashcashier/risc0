@@ -571,6 +571,27 @@ mod tests {
     }
 
     #[wasm_bindgen_test(async)]
+    async fn webgpu_hal_empty_scatter_is_noop_without_cpu_fallback() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        let into = hal.copy_from_elem(
+            "webgpu_hal_empty_scatter_into",
+            &(0..16).map(|idx| elem(idx + 17_000)).collect::<Vec<_>>(),
+        );
+
+        hal.reset_diagnostics();
+        hal.scatter(&into, &[0], &[], &[]);
+
+        let diagnostics = hal.diagnostics();
+        assert_eq!(diagnostics.gpu_dispatches, 0);
+        assert_eq!(diagnostics.cpu_fallbacks, 0);
+        assert_eq!(diagnostics.host_to_gpu_uploads, 0);
+    }
+
+    #[wasm_bindgen_test(async)]
     async fn webgpu_hal_reports_layout_and_bind_group_diagnostics() {
         console_error_panic_hook::set_once();
 

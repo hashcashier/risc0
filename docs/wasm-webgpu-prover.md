@@ -104,6 +104,9 @@ The hash_rows Merkle path no longer uploads its output node buffer before
 overwriting every digest. On xgboost this removed the 4.37 GB `nodes` upload
 source, reducing total host-to-GPU upload bytes from 15.28 GB to 10.91 GB;
 wall measured 101.93 s in the same diagnostic run.
+Empty RV32IM scatter ranges are also treated as true no-ops before fallback
+accounting, so xgboost now reports `cpu_fallbacks=0`; the change is a
+diagnostic cleanup and wall time stayed noisy/flat.
 
 `default_prover()` is intentionally unavailable for browser WebGPU builds
 because it cannot synchronously request a `GPUAdapter`/`GPUDevice`.
