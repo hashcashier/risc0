@@ -1117,6 +1117,15 @@ fn merge_webgpu_diagnostics(aggregate: &mut WebGpuDiagnostics, diagnostics: WebG
     aggregate.readback_bytes = aggregate
         .readback_bytes
         .saturating_add(diagnostics.readback_bytes);
+    aggregate.bind_group_layout_creations = aggregate
+        .bind_group_layout_creations
+        .saturating_add(diagnostics.bind_group_layout_creations);
+    aggregate.bind_group_layout_cache_hits = aggregate
+        .bind_group_layout_cache_hits
+        .saturating_add(diagnostics.bind_group_layout_cache_hits);
+    aggregate.bind_group_creations = aggregate
+        .bind_group_creations
+        .saturating_add(diagnostics.bind_group_creations);
     aggregate.gpu_dispatches = aggregate
         .gpu_dispatches
         .saturating_add(diagnostics.gpu_dispatches);

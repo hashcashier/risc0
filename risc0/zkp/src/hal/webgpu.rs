@@ -2400,6 +2400,9 @@ pub struct WebGpuDiagnostics {
     pub device_copy_bytes: u64,
     pub readbacks: u64,
     pub readback_bytes: u64,
+    pub bind_group_layout_creations: u64,
+    pub bind_group_layout_cache_hits: u64,
+    pub bind_group_creations: u64,
     pub gpu_dispatches: u64,
     pub cpu_mirrors: u64,
     pub cpu_fallbacks: u64,
@@ -2465,6 +2468,9 @@ struct WebGpuDiagnosticsState {
     device_copy_bytes: Cell<u64>,
     readbacks: Cell<u64>,
     readback_bytes: Cell<u64>,
+    bind_group_layout_creations: Cell<u64>,
+    bind_group_layout_cache_hits: Cell<u64>,
+    bind_group_creations: Cell<u64>,
     gpu_dispatches: Cell<u64>,
     cpu_mirrors: Cell<u64>,
     cpu_fallbacks: Cell<u64>,
@@ -2485,6 +2491,9 @@ impl WebGpuDiagnosticsState {
             device_copy_bytes: self.device_copy_bytes.get(),
             readbacks: self.readbacks.get(),
             readback_bytes: self.readback_bytes.get(),
+            bind_group_layout_creations: self.bind_group_layout_creations.get(),
+            bind_group_layout_cache_hits: self.bind_group_layout_cache_hits.get(),
+            bind_group_creations: self.bind_group_creations.get(),
             gpu_dispatches: self.gpu_dispatches.get(),
             cpu_mirrors: self.cpu_mirrors.get(),
             cpu_fallbacks: self.cpu_fallbacks.get(),
@@ -2533,6 +2542,9 @@ impl WebGpuDiagnosticsState {
         self.device_copy_bytes.set(0);
         self.readbacks.set(0);
         self.readback_bytes.set(0);
+        self.bind_group_layout_creations.set(0);
+        self.bind_group_layout_cache_hits.set(0);
+        self.bind_group_creations.set(0);
         self.gpu_dispatches.set(0);
         self.cpu_mirrors.set(0);
         self.cpu_fallbacks.set(0);
@@ -2577,6 +2589,18 @@ impl WebGpuDiagnosticsState {
         let stats = readbacks.entry(name).or_default();
         stats.readbacks = stats.readbacks.saturating_add(1);
         stats.readback_bytes = stats.readback_bytes.saturating_add(byte_len);
+    }
+
+    fn record_bind_group_layout_creation(&self) {
+        Self::add(&self.bind_group_layout_creations, 1);
+    }
+
+    fn record_bind_group_layout_cache_hit(&self) {
+        Self::add(&self.bind_group_layout_cache_hits, 1);
+    }
+
+    fn record_bind_group_creation(&self) {
+        Self::add(&self.bind_group_creations, 1);
     }
 
     fn record_gpu_dispatch(&self, name: &'static str) {
@@ -7983,6 +8007,7 @@ impl WebGpuHal {
         // pipeline cache requires this invariant to be sound.
         let cache_key = compute_bind_group_layout_cache_key(label, entries);
         if let Some(cached) = self.bind_group_layout_cache.borrow().get(&cache_key).cloned() {
+            self.diagnostics.record_bind_group_layout_cache_hit();
             return Ok(cached);
         }
 
@@ -8009,6 +8034,7 @@ impl WebGpuHal {
             .device
             .create_bind_group_layout(&desc)
             .map_err(js_error)?;
+        self.diagnostics.record_bind_group_layout_creation();
         self.bind_group_layout_cache
             .borrow_mut()
             .insert(cache_key, layout.clone());
@@ -8039,6 +8065,7 @@ impl WebGpuHal {
 
         let desc = web_sys::GpuBindGroupDescriptor::new(bind_entries.as_ref(), layout);
         desc.set_label(label);
+        self.diagnostics.record_bind_group_creation();
         Ok(self.device.create_bind_group(&desc))
     }
 

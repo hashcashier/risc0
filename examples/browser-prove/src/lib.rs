@@ -24,7 +24,7 @@ mod tests {
             Elem as _, ExtElem as _, RootsOfUnity as _,
         },
         hal::{
-            webgpu::{WebGpuBuffer, WebGpuHal},
+            webgpu::{WebGpuBindingLayout, WebGpuBuffer, WebGpuBufferBinding, WebGpuHal},
             Buffer as _, Hal,
         },
         taps::{TapData, TapSet},
@@ -224,7 +224,7 @@ mod tests {
             "{name}: WebGPU proof path used CPU-only HAL operations"
         );
         console_log!(
-            "browser-prove:webgpu {name}: gpu_dispatches={} cpu_mirrors={} cpu_fallbacks={} cpu_only_ops={} uploads={} upload_bytes={} device_copies={} device_copy_bytes={} readbacks={} readback_bytes={} buffers={} buffer_bytes={}",
+            "browser-prove:webgpu {name}: gpu_dispatches={} cpu_mirrors={} cpu_fallbacks={} cpu_only_ops={} uploads={} upload_bytes={} device_copies={} device_copy_bytes={} readbacks={} readback_bytes={} bind_group_layout_creations={} bind_group_layout_cache_hits={} bind_group_creations={} buffers={} buffer_bytes={}",
             diagnostics.gpu_dispatches,
             diagnostics.cpu_mirrors,
             diagnostics.cpu_fallbacks,
@@ -235,6 +235,9 @@ mod tests {
             diagnostics.device_copy_bytes,
             diagnostics.readbacks,
             diagnostics.readback_bytes,
+            diagnostics.bind_group_layout_creations,
+            diagnostics.bind_group_layout_cache_hits,
+            diagnostics.bind_group_creations,
             diagnostics.buffers_allocated,
             diagnostics.bytes_allocated,
         );
@@ -277,7 +280,7 @@ mod tests {
             "{name}: WebGPU pool proof path used CPU-only HAL operations"
         );
         console_log!(
-            "browser-prove:webgpu-pool {name}: gpu_dispatches={} cpu_mirrors={} cpu_fallbacks={} cpu_only_ops={} uploads={} upload_bytes={} device_copies={} device_copy_bytes={} readbacks={} readback_bytes={} buffers={} buffer_bytes={}",
+            "browser-prove:webgpu-pool {name}: gpu_dispatches={} cpu_mirrors={} cpu_fallbacks={} cpu_only_ops={} uploads={} upload_bytes={} device_copies={} device_copy_bytes={} readbacks={} readback_bytes={} bind_group_layout_creations={} bind_group_layout_cache_hits={} bind_group_creations={} buffers={} buffer_bytes={}",
             diagnostics.gpu_dispatches,
             diagnostics.cpu_mirrors,
             diagnostics.cpu_fallbacks,
@@ -288,6 +291,9 @@ mod tests {
             diagnostics.device_copy_bytes,
             diagnostics.readbacks,
             diagnostics.readback_bytes,
+            diagnostics.bind_group_layout_creations,
+            diagnostics.bind_group_layout_cache_hits,
+            diagnostics.bind_group_creations,
             diagnostics.buffers_allocated,
             diagnostics.bytes_allocated,
         );
@@ -523,6 +529,51 @@ mod tests {
         let io = hal.copy_from_elem("webgpu_hal_intt_io", &io);
         hal.batch_interpolate_ntt(&io, count);
         assert_gpu_buffer_matches_cpu(&hal, "batch_interpolate_ntt", &io).await;
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_hal_reports_layout_and_bind_group_diagnostics() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        hal.reset_diagnostics();
+
+        let layout = hal
+            .create_bind_group_layout(
+                "diagnostic_bind_group_layout",
+                &[WebGpuBindingLayout::storage(0, 0)],
+            )
+            .expect("first layout");
+        let _same_layout = hal
+            .create_bind_group_layout(
+                "diagnostic_bind_group_layout",
+                &[WebGpuBindingLayout::storage(0, 0)],
+            )
+            .expect("cached layout");
+        let buf = hal
+            .create_storage_buffer("diagnostic_bind_group_buffer", 4)
+            .expect("buffer");
+        let _bind_group_a = hal
+            .create_bind_group(
+                "diagnostic_bind_group",
+                &layout,
+                &[WebGpuBufferBinding::new(0, &buf)],
+            )
+            .expect("first bind group");
+        let _bind_group_b = hal
+            .create_bind_group(
+                "diagnostic_bind_group",
+                &layout,
+                &[WebGpuBufferBinding::new(0, &buf)],
+            )
+            .expect("second bind group");
+
+        let diagnostics = hal.diagnostics();
+        assert_eq!(diagnostics.bind_group_layout_creations, 1);
+        assert_eq!(diagnostics.bind_group_layout_cache_hits, 1);
+        assert_eq!(diagnostics.bind_group_creations, 2);
     }
 
     #[wasm_bindgen_test(async)]
