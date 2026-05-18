@@ -49,6 +49,9 @@ machine-column carry, and 0.01 s in terminal ExtVal prefix.
 SP7b moved the machine-column carry scan to WebGPU. The focused GPU/CPU test
 caught the required column-major trace layout, and xgboost verified at 101.38 s
 with RV32IM accumulation down to 21.03 s.
+SP7c profiled recursion accumulation and found no cheap prefix-scan analogue:
+prefix products are only 59 ms across xgboost, while generated
+`compute_accum`/`verify_accum` total 5.66 s.
 
 ## Final per-fixture matrix (2026-05-15)
 
@@ -99,6 +102,7 @@ Every measured fixture remains above 1.0× CUDA. Reasons:
 | SP7 iter 6d-g (replace rust_steps witgen) | -6 s of 103 s wall (~6%) | **BLOCKED**: generated WGSL is bit-exact for GPU-written cells, but only covers 8.15M of 33.36M CPU-written cells; whole-`step_Top` short-circuit leaves ~25.2M cpu_only cells invalid |
 | SP7 iter 6d-deeper (TopAccum split + GPU accumulate) | -22 s of 103 s wall (~21%) | Blocked: TopAccumChunk0 closure 1.7 MB is 4× over Chrome's 0.4 MB reachable-closure cliff; needs straight-line-arithmetic chunking pass MuxChunk doesn't provide |
 | SP7a/SP7b RV32IM accumulation substage profile + carry offload | -0.8 s observed | xgboost profile: 22.13 s RV32IM accumulation total; 20.55 s generated `step_TopAccum`, 1.57 s machine-column carry, 0.01 s terminal ExtVal prefix. SP7b offloads carry to WebGPU: CPU carry 1.57 s -> 0, GPU carry 0.274 s, RV32IM accumulation total 21.03 s, xgboost wall 101.38 s. Full TopAccum offload remains the larger blocked lever |
+| SP7c recursion accumulation profile | no simple scan win | xgboost verifies at 101.25 s. Recursion accumulation totals 5.72 s: `compute_accum` 3.36 s, `verify_accum` 2.30 s, prefix products 0.059 s. Next recursion win also requires generated circuit work on GPU |
 | SP8 iter 1 + iter 3 (parallel readbacks) | -wall on FRI | **LANDED 2026-05-15** -- noise on xgboost (FRI is small), larger fixtures TBD |
 | SP9 phase 1 + phase 2 take 3 (layout cache + min_binding_size collapse) | infrastructure | **LANDED 2026-05-15** -- layout identity is now stable enough for higher-level caches |
 | SP6e-SP6m object churn, upload trimming, and copy reduction | -2-3% smokes | Bind-group diagnostics showed 12,510 bind groups for 5,365 dispatches. Compute-pipeline cache landed with 1,592 hits on xgboost but wall stayed flat at 103.35 s. Poseidon2 fold-chain dynamic bind groups cut xgboost bind groups to 9,022 and buffers to 11,835, still flat at 102.86 s. NTT dynamic bind groups cut bind groups to 3,358 and buffers to 6,171; xgboost measured 102.25 s. Removing redundant hash_rows output uploads cut xgboost upload bytes from 15.28 GB to 10.91 GB and measured 101.93 s. Empty scatter cleanup removed the last reported xgboost CPU fallbacks but wall stayed flat/noisy. Device-copy attribution showed xgboost's 7.22 GB copy traffic was almost entirely `coeffs`; in-place dead commit groups reduced that to 5.76 GB and 85 copies; fused copy-preserving interpolate reduced remaining device-copy traffic to only `final_coeffs`, 32 copies / 32,768 bytes. Wall remained flat at 102.26 s, so this line is now treated as correctness/infrastructure cleanup rather than the next wall-time lever. Global bind-group caching remains deferred until buffer lifetime/invalidation is explicit |

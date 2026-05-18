@@ -29,7 +29,10 @@ use risc0_core::field::{
     baby_bear::{BabyBearElem, BabyBearExtElem},
     Elem as _,
 };
-use risc0_zkp::hal::{webgpu::WebGpuBuffer, Buffer};
+use risc0_zkp::hal::{
+    webgpu::{WebGpuBuffer, WebGpuStageTimer},
+    Buffer,
+};
 
 type Fp = BabyBearElem;
 type FpExt = BabyBearExtElem;
@@ -418,10 +421,26 @@ pub(crate) fn accumulate(
                     accum.view_mut(|accum| {
                         let mut ctx = AccumContext::new(work_cycles);
                         let mut args = KernelArgs::accum(ctrl, global, data, mix, accum);
-                        result = ctx
-                            .compute_accum(work_cycles, total_cycles, &mut args)
-                            .map(|_| ctx.calc_prefix_products())
-                            .and_then(|_| ctx.verify_accum(work_cycles, total_cycles, &mut args));
+                        result = {
+                            let _timer = WebGpuStageTimer::new(format!(
+                                "recursion_accumulate compute_accum work_cycles={} total_cycles={}",
+                                work_cycles, total_cycles
+                            ));
+                            ctx.compute_accum(work_cycles, total_cycles, &mut args)
+                        }
+                        .map(|_| {
+                            let _timer = WebGpuStageTimer::new(format!(
+                                "recursion_accumulate prefix_products work_cycles={work_cycles}"
+                            ));
+                            ctx.calc_prefix_products()
+                        })
+                        .and_then(|_| {
+                            let _timer = WebGpuStageTimer::new(format!(
+                                "recursion_accumulate verify_accum work_cycles={} total_cycles={}",
+                                work_cycles, total_cycles
+                            ));
+                            ctx.verify_accum(work_cycles, total_cycles, &mut args)
+                        });
                     });
                 });
             });

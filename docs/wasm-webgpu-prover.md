@@ -131,6 +131,10 @@ SP7b moved the isolated machine-column carry scan to WebGPU. The focused
 GPU/CPU test and xgboost e2e proof both pass; xgboost wall measured
 101.38 s, RV32IM accumulation fell to 21.03 s, and the remaining large
 target is still generated `step_TopAccum`.
+SP7c profiled recursion accumulation and found no equivalent cheap scan:
+prefix products are only 59 ms across xgboost, while generated
+`compute_accum` and `verify_accum` account for 5.66 s. The next material
+recursion win also requires generated circuit execution on GPU.
 
 `default_prover()` is intentionally unavailable for browser WebGPU builds
 because it cannot synchronously request a `GPUAdapter`/`GPUDevice`.
