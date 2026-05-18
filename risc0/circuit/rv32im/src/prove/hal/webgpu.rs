@@ -14,7 +14,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anyhow::{Context as _, Result};
 use risc0_core::scope;
@@ -102,6 +102,24 @@ pub fn set_witgen_gpu_diff_enabled(enabled: bool) {
     WITGEN_GPU_DIFF_ENABLED.store(enabled, Ordering::SeqCst);
 }
 
+/// SP7 TopAccum arm5 real-buffer probe. This is intentionally opt-in:
+/// the first version validates one real proof row after CPU TopAccum has
+/// populated authoritative buffers, then leaves the normal proof flow to
+/// verify the receipt end to end.
+pub static ACCUM_GPU_ARM5_PROBE_ENABLED: AtomicBool = AtomicBool::new(false);
+static ACCUM_GPU_ARM5_PROBE_DISPATCHES: AtomicUsize = AtomicUsize::new(0);
+
+pub fn set_accum_gpu_arm5_probe_enabled(enabled: bool) {
+    if enabled {
+        ACCUM_GPU_ARM5_PROBE_DISPATCHES.store(0, Ordering::SeqCst);
+    }
+    ACCUM_GPU_ARM5_PROBE_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
+pub fn accum_gpu_arm5_probe_dispatches() -> usize {
+    ACCUM_GPU_ARM5_PROBE_DISPATCHES.load(Ordering::SeqCst)
+}
+
 thread_local! {
     /// SP7 iter 6d-d: session-local cache for the witgen kernel. Lives
     /// across WebGpuCircuitHal constructions so the spawn_local'd
@@ -135,6 +153,10 @@ thread_local! {
     /// SP7 iter 6d-g step 6.2.0: cached shadow_init pipeline.
     /// Compiled once per session and reused across all segments.
     static SHADOW_INIT_KERNEL: RefCell<Option<WebGpuKernel>> =
+        const { RefCell::new(None) };
+    /// SP7 TopAccum arm5 real-buffer probe pipeline. Compiled lazily
+    /// on first opt-in proof and reused for later segments.
+    static TOPACCUM_ARM5_PROBE_KERNEL: RefCell<Option<WebGpuKernel>> =
         const { RefCell::new(None) };
 }
 
@@ -1230,6 +1252,181 @@ impl WebGpuCircuitHal {
         }
         Ok(chunks_ready)
     }
+
+    fn lookup_topaccum_arm5_probe_kernel(&self) -> Result<WebGpuKernel> {
+        if let Some(kernel) = TOPACCUM_ARM5_PROBE_KERNEL.with(|cell| cell.borrow().clone()) {
+            return Ok(kernel);
+        }
+        use crate::prove::wgsl_pruner::{
+            TOPACCUM_ARM5_CYCLE_LIST_ENTRY, TOPACCUM_ARM5_PROBE_WGSL, WITGEN_BASELINE_WGSL,
+        };
+        let layout = self.hal.create_bind_group_layout(
+            "rv32im_accum_topaccum_arm5_probe_layout",
+            &[
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::storage(1, 0),
+                WebGpuBindingLayout::storage(2, 0),
+                WebGpuBindingLayout::storage(3, 0),
+                WebGpuBindingLayout::uniform(4, 32),
+                WebGpuBindingLayout::read_only_storage(5, 0),
+            ],
+        )?;
+        let mut module = String::with_capacity(
+            WITGEN_BASELINE_WGSL.len()
+                + TOPACCUM_ARM5_PROBE_WGSL.len()
+                + TOPACCUM_ARM5_CYCLE_LIST_ENTRY.len()
+                + 2,
+        );
+        module.push_str(WITGEN_BASELINE_WGSL);
+        if !module.ends_with('\n') {
+            module.push('\n');
+        }
+        module.push_str(TOPACCUM_ARM5_PROBE_WGSL);
+        if !module.ends_with('\n') {
+            module.push('\n');
+        }
+        module.push_str(TOPACCUM_ARM5_CYCLE_LIST_ENTRY);
+        let kernel = self.hal.create_compute_kernel(
+            "rv32im_accum_topaccum_arm5_probe",
+            &module,
+            "topaccum_arm5_cycle_list_main",
+            &[layout],
+        )?;
+        TOPACCUM_ARM5_PROBE_KERNEL.with(|cell| *cell.borrow_mut() = Some(kernel.clone()));
+        Ok(kernel)
+    }
+
+    fn dispatch_topaccum_arm5_real_buffer_probe(
+        &self,
+        preflight: &PreflightTrace,
+        data: &MetaBuffer<WebGpuHal>,
+        accum: &MetaBuffer<WebGpuHal>,
+        global: &MetaBuffer<WebGpuHal>,
+        mix: &MetaBuffer<WebGpuHal>,
+    ) -> Result<bool> {
+        if !ACCUM_GPU_ARM5_PROBE_ENABLED.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        let Some(sample_cycle) = preflight
+            .cycles
+            .iter()
+            .enumerate()
+            .find_map(|(idx, cycle)| (cycle.major == 5).then_some(idx as u32))
+        else {
+            risc0_zkp::hal::webgpu::log_webgpu_metric(
+                "rv32im_accumulate topaccum_arm5_probe SKIP no_arm5_cycles",
+            );
+            return Ok(false);
+        };
+        let available_cycles = preflight
+            .cycles
+            .iter()
+            .filter(|cycle| cycle.major == 5)
+            .count();
+        let _timer = WebGpuStageTimer::new_active_for(
+            format!(
+                "rv32im_accumulate topaccum_arm5_probe sample_cycle={sample_cycle} available_cycles={available_cycles}"
+            ),
+            self.hal.as_ref(),
+        );
+        let kernel = self.lookup_topaccum_arm5_probe_kernel()?;
+        data.buf.sync_cpu_to_gpu(self.hal.as_ref())?;
+        accum.buf.sync_cpu_to_gpu(self.hal.as_ref())?;
+        global.buf.sync_cpu_to_gpu(self.hal.as_ref())?;
+        mix.buf.sync_cpu_to_gpu(self.hal.as_ref())?;
+        let data_gpu = data
+            .buf
+            .raw_buffer()
+            .ok_or_else(|| anyhow::anyhow!("TopAccum arm5 probe: data missing GPU storage"))?;
+        let accum_gpu = accum
+            .buf
+            .raw_buffer()
+            .ok_or_else(|| anyhow::anyhow!("TopAccum arm5 probe: accum missing GPU storage"))?;
+        let global_gpu = global
+            .buf
+            .raw_buffer()
+            .ok_or_else(|| anyhow::anyhow!("TopAccum arm5 probe: global missing GPU storage"))?;
+        let mix_gpu = mix
+            .buf
+            .raw_buffer()
+            .ok_or_else(|| anyhow::anyhow!("TopAccum arm5 probe: mix missing GPU storage"))?;
+        let accum_scratch_bytes = u64::try_from(
+            accum
+                .rows
+                .checked_mul(accum.cols)
+                .context("TopAccum arm5 probe accum size overflow")?
+                .checked_mul(std::mem::size_of::<Val>())
+                .context("TopAccum arm5 probe accum byte size overflow")?,
+        )
+        .context("TopAccum arm5 probe accum byte size exceeds u64")?;
+        let accum_scratch = self.hal.create_storage_buffer(
+            "rv32im_accum_topaccum_arm5_probe_accum_scratch",
+            accum_scratch_bytes,
+        )?;
+        self.hal.copy_gpu_buffer_named(
+            "rv32im_accum_topaccum_arm5_probe_accum_scratch",
+            accum_gpu,
+            accum.buf.byte_offset(),
+            &accum_scratch,
+            0,
+            accum_scratch_bytes,
+        )?;
+        let layout = self.hal.create_bind_group_layout(
+            "rv32im_accum_topaccum_arm5_probe_layout",
+            &[
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::storage(1, 0),
+                WebGpuBindingLayout::storage(2, 0),
+                WebGpuBindingLayout::storage(3, 0),
+                WebGpuBindingLayout::uniform(4, 32),
+                WebGpuBindingLayout::read_only_storage(5, 0),
+            ],
+        )?;
+        let split = LAYOUT_TOP_ACCUM.columns[0].offset;
+        let params = [
+            u32::try_from(data.rows).context("TopAccum arm5 probe data rows exceed u32")?,
+            u32::try_from(global.rows).context("TopAccum arm5 probe global rows exceed u32")?,
+            u32::try_from(accum.rows).context("TopAccum arm5 probe accum rows exceed u32")?,
+            u32::try_from(mix.rows).context("TopAccum arm5 probe mix rows exceed u32")?,
+            u32::try_from(split).context("TopAccum arm5 probe zero-back split exceeds u32")?,
+            0,
+            0,
+            0,
+        ];
+        let params_buf = self.hal.create_uniform_buffer(
+            "rv32im_accum_topaccum_arm5_probe_params",
+            bytemuck::cast_slice(&params),
+        )?;
+        let cycle_list = [sample_cycle];
+        let cycle_buf = self.hal.create_storage_buffer(
+            "rv32im_accum_topaccum_arm5_probe_cycles",
+            std::mem::size_of_val(&cycle_list) as u64,
+        )?;
+        self.hal.write_buffer_named(
+            &cycle_buf,
+            "rv32im_accum_topaccum_arm5_probe_cycles",
+            0,
+            bytemuck::cast_slice(&cycle_list),
+        )?;
+        let bind_group = self.hal.create_bind_group(
+            "rv32im_accum_topaccum_arm5_probe_bg",
+            &layout,
+            &[
+                WebGpuBufferBinding::new(0, data_gpu),
+                WebGpuBufferBinding::new(1, global_gpu),
+                WebGpuBufferBinding::new(2, &accum_scratch),
+                WebGpuBufferBinding::new(3, mix_gpu),
+                WebGpuBufferBinding::new(4, &params_buf),
+                WebGpuBufferBinding::new(5, &cycle_buf),
+            ],
+        )?;
+        self.hal.dispatch_compute_1d(&kernel, &bind_group, 1);
+        ACCUM_GPU_ARM5_PROBE_DISPATCHES.fetch_add(1, Ordering::SeqCst);
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "rv32im_accumulate topaccum_arm5_probe dispatched sample_cycle={sample_cycle} available_cycles={available_cycles}"
+        ));
+        Ok(true)
+    }
 }
 
 impl WebGpuCircuitEvalCheck for WebGpuCircuitHal {
@@ -1402,6 +1599,7 @@ impl CircuitAccumulator<WebGpuHal> for WebGpuCircuitHal {
             super::rust_steps::step_accum_without_machine_column_carry(
                 preflight, data, accum, global, mix,
             )?;
+            self.dispatch_topaccum_arm5_real_buffer_probe(preflight, data, accum, global, mix)?;
             let split = LAYOUT_TOP_ACCUM.columns[0].offset;
             {
                 let _timer = WebGpuStageTimer::new_active_for(

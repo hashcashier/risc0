@@ -3257,6 +3257,16 @@ fn witgen_top_accum(@builtin(global_invocation_id) gid: vec3<u32>) {
   step_TopAccum(buf_accum, buf_data, buf_global, buf_mix);
 }
 ";
+    const SP7_TOPACCUM_ARM5_GUARDED_ENTRY: &str = "
+@compute @workgroup_size(64)
+fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  cycle = gid.x;
+  if (gid.x == 0xffffffffu) {
+    step_TopAccumArm5(buf_accum, buf_data, buf_global, buf_mix);
+  }
+  data_buf[gid.x] = gid.x;
+}
+";
 
     /// SP7 iter 5c — does step_Top dispatch as a PRUNED per-entry module?
     ///
@@ -3354,6 +3364,28 @@ fn witgen_top_accum(@builtin(global_invocation_id) gid: vec3<u32>) {
                  3.27 MB; narrows it to (1.99, 3.27] for the real-module shape"
             }
         ));
+    }
+
+    /// SP7 TopAccum per-arm split capacity probe. The guarded call keeps
+    /// the arm5 body reachable to Tint without executing it over dummy data.
+    #[wasm_bindgen_test(async)]
+    async fn sp7_topaccum_arm5_split_probe_dispatches() {
+        console_error_panic_hook::set_once();
+        const PRELUDE: &str = include_str!("sp7_wgsl/witgen_prelude.wgsl");
+        const TYPES: &str = include_str!("sp7_wgsl/types.wgsl.inc");
+        const LAYOUT: &str = include_str!("sp7_wgsl/layout.wgsl.inc");
+        const ARM5: &str =
+            include_str!("../../../risc0/circuit/rv32im/src/zirgen/topaccum_arm5_probe.wgsl");
+
+        let arm5 = format!("{PRELUDE}\n{TYPES}\n{LAYOUT}\n{ARM5}\n{SP7_TOPACCUM_ARM5_GUARDED_ENTRY}");
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "sp7_topaccum_arm5 split module assembled: {} bytes",
+            arm5.len()
+        ));
+        assert!(
+            sp7_probe("sp7_topaccum_arm5", &arm5, "topaccum_arm5_guarded_main").await,
+            "small TopAccum arm5 split module should compile and dispatch when its body is reachable but not executed"
+        );
     }
 
     /// SP7 iter 6d-c/d -- end-to-end check: the probe-mode GPU witgen
@@ -4376,6 +4408,39 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
         .await;
         assert_eq!(prove_info.stats.segments, 1);
         assert_eq!(prove_info.stats.total_cycles, 1 << 18);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn rv32im_accum_topaccum_arm5_real_buffer_probe_e2e_verify() {
+        use risc0_circuit_rv32im::prove::{
+            accum_gpu_arm5_probe_dispatches, set_accum_gpu_arm5_probe_enabled,
+        };
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        set_accum_gpu_arm5_probe_enabled(true);
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_topaccum_arm5_probe",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        set_accum_gpu_arm5_probe_enabled(false);
+        assert_eq!(prove_info.stats.segments, 1);
+        assert_eq!(prove_info.stats.total_cycles, 1 << 18);
+        assert!(
+            accum_gpu_arm5_probe_dispatches() > 0,
+            "TopAccum arm5 real-buffer probe should dispatch during the proof"
+        );
     }
 
     #[wasm_bindgen_test(async)]

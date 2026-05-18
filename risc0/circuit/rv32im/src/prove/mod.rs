@@ -46,6 +46,9 @@ pub use hal::webgpu::set_witgen_gpu_replace_enabled;
 pub use hal::webgpu::set_witgen_gpu_diff_enabled;
 
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::{accum_gpu_arm5_probe_dispatches, set_accum_gpu_arm5_probe_enabled};
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 pub fn dispatch_webgpu_accum_machine_column_carry_for_test(
     hal: &WebGpuHal,
     accum: &WebGpuBuffer<crate::zirgen::circuit::Val>,

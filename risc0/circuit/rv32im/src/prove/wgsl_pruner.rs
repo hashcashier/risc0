@@ -104,6 +104,32 @@ fn exec_top_chunk1_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 pub const WITGEN_BASELINE_WGSL: &str =
     include_str!("../zirgen/witgen_baseline.wgsl");
 
+/// SP7 TopAccum arm5 real-buffer probe body. This is the pruned
+/// reachable closure for `step_TopAccumArm5`, generated from
+/// `steps_step_TopAccum.pruned.wgsl`; it is concatenated with
+/// [`WITGEN_BASELINE_WGSL`] plus a cycle-list compute entry.
+pub const TOPACCUM_ARM5_PROBE_WGSL: &str =
+    include_str!("../zirgen/topaccum_arm5_probe.wgsl");
+
+/// Compute entry used by the real-buffer TopAccum arm5 probe. The HAL
+/// uploads a bounded cycle list so the probe executes on valid proof
+/// rows instead of dummy all-zero storage.
+pub const TOPACCUM_ARM5_CYCLE_LIST_ENTRY: &str = r#"
+@group(0) @binding(5) var<storage, read> topaccum_arm5_cycle_list: array<u32>;
+
+@compute @workgroup_size(1)
+fn topaccum_arm5_cycle_list_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x >= arrayLength(&topaccum_arm5_cycle_list)) {
+    return;
+  }
+  cycle = topaccum_arm5_cycle_list[gid.x];
+  if (cycle >= params.data_rows) {
+    return;
+  }
+  step_TopAccumArm5(buf_accum, buf_data, buf_global, buf_mix);
+}
+"#;
+
 /// SP7 iter 6d-g: per-major-arm deltas. Each contains ONLY the
 /// steps fns reachable from one major opcode arm's sub-fn (Chunk0
 /// variant). Total ~38 KB average × 13 arms = ~488 KB vendored.
