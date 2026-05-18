@@ -90,6 +90,32 @@ cpu_fallbacks=0 cpu_only_ops=0
 device_copy source=rv32im_accum_topaccum_arm5_probe_accum_scratch bytes=108003328
 ```
 
+## Scratch-vs-CPU Row Diff
+
+Follow-up diagnostic added a GPU row-compare kernel for the sampled row. The
+same focused e2e proof still verifies:
+
+```text
+test tests::rv32im_accum_topaccum_arm5_real_buffer_probe_e2e_verify ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 117 filtered out; finished in 8.80s
+```
+
+Key metrics:
+
+```text
+prove_session_async wall_ms=8637.0 gpu_active_ms=5244.0 gpu_idle_ratio=0.393
+rv32im_accumulate step_top_accum elapsed_ms=1918.000
+rv32im_accumulate topaccum_arm5_probe elapsed_ms=27.000 gpu_active=true
+rv32im_accumulate topaccum_arm5_probe dispatched sample_cycle=18334 available_cycles=40968
+topaccum_arm5_probe mismatch_count=40 first_mismatch_col=23
+cpu_fallbacks=0 cpu_only_ops=0
+```
+
+Interpretation: the generated arm5 body is executable on real buffers, but it
+does not match CPU `step_TopAccum` for the sampled row. The mismatch is now
+bounded: 40 accum columns differ, with first mismatch at column 23. Authoritative
+replacement remains blocked until those columns are explained and fixed.
+
 ## Default-Off Regression
 
 Command:
@@ -126,6 +152,7 @@ scratch `accum` copy, so it intentionally adds overhead when enabled and has no
 effect when disabled.
 
 The useful result is that Chrome executes the split arm5 TopAccum body on real
-proof buffers without device loss. The next performance step is a targeted
-scratch-vs-CPU diff for the sample row or row slice; only after bit-exact
-evidence should this move from scratch probe to authoritative replacement.
+proof buffers without device loss, and the scratch row diff now explains why the
+authoritative attempt failed. The next performance step is to map mismatch
+columns 23+ back to TopAccum layout fields and fix the generated arm or wrapper
+until the sampled row reaches `mismatch_count=0`.

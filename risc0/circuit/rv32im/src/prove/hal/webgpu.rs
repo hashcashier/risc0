@@ -112,12 +112,42 @@ static ACCUM_GPU_ARM5_PROBE_DISPATCHES: AtomicUsize = AtomicUsize::new(0);
 pub fn set_accum_gpu_arm5_probe_enabled(enabled: bool) {
     if enabled {
         ACCUM_GPU_ARM5_PROBE_DISPATCHES.store(0, Ordering::SeqCst);
+        TOPACCUM_ARM5_PROBE_COMPARE.with(|cell| *cell.borrow_mut() = None);
     }
     ACCUM_GPU_ARM5_PROBE_ENABLED.store(enabled, Ordering::SeqCst);
 }
 
 pub fn accum_gpu_arm5_probe_dispatches() -> usize {
     ACCUM_GPU_ARM5_PROBE_DISPATCHES.load(Ordering::SeqCst)
+}
+
+pub async fn accum_gpu_arm5_probe_mismatch_summary() -> Result<Option<(u32, u32)>> {
+    let Some((hal, flags)) = TOPACCUM_ARM5_PROBE_COMPARE.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|summary| (summary.hal.clone(), summary.flags.clone()))
+    }) else {
+        return Ok(None);
+    };
+    flags.sync_gpu_to_cpu(hal.as_ref()).await?;
+    let flags = flags.to_vec();
+    let mut mismatch_count = 0u32;
+    let mut first_mismatch_col = u32::MAX;
+    for (col, flag) in flags.iter().enumerate() {
+        if *flag != Val::ZERO {
+            mismatch_count = mismatch_count.saturating_add(1);
+            if first_mismatch_col == u32::MAX {
+                first_mismatch_col =
+                    u32::try_from(col).context("TopAccum arm5 mismatch column exceeds u32")?;
+            }
+        }
+    }
+    Ok(Some((mismatch_count, first_mismatch_col)))
+}
+
+struct TopAccumArm5ProbeCompare {
+    hal: Rc<WebGpuHal>,
+    flags: WebGpuBuffer<Val>,
 }
 
 thread_local! {
@@ -158,7 +188,38 @@ thread_local! {
     /// on first opt-in proof and reused for later segments.
     static TOPACCUM_ARM5_PROBE_KERNEL: RefCell<Option<WebGpuKernel>> =
         const { RefCell::new(None) };
+    /// SP7 TopAccum arm5 scratch-vs-CPU row compare pipeline.
+    static TOPACCUM_ARM5_COMPARE_KERNEL: RefCell<Option<WebGpuKernel>> =
+        const { RefCell::new(None) };
+    /// Latest scratch-vs-CPU row compare result buffer, readable by the
+    /// async browser test after proof generation finishes.
+    static TOPACCUM_ARM5_PROBE_COMPARE: RefCell<Option<TopAccumArm5ProbeCompare>> =
+        const { RefCell::new(None) };
 }
+
+const TOPACCUM_ARM5_COMPARE_ROW_WGSL: &str = r#"
+struct CompareParams {
+  rows: u32,
+  cols: u32,
+  row: u32,
+  _pad: u32,
+}
+
+@group(0) @binding(0) var<storage, read> expected_accum: array<u32>;
+@group(0) @binding(1) var<storage, read> actual_accum: array<u32>;
+@group(0) @binding(2) var<storage, read_write> mismatch_flags: array<u32>;
+@group(0) @binding(3) var<uniform> params: CompareParams;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let col = gid.x;
+  if (col >= params.cols) {
+    return;
+  }
+  let idx = col * params.rows + params.row;
+  mismatch_flags[col] = select(0u, 1u, expected_accum[idx] != actual_accum[idx]);
+}
+"#;
 
 /// SP7 iter 6d-g step 6.2.0 (2026-05-16): build the per-cycle preflight
 /// metadata buffer consumed by `SHADOW_INIT_WGSL`. Layout: 4 u32 per
@@ -1296,6 +1357,29 @@ impl WebGpuCircuitHal {
         Ok(kernel)
     }
 
+    fn lookup_topaccum_arm5_compare_kernel(&self) -> Result<WebGpuKernel> {
+        if let Some(kernel) = TOPACCUM_ARM5_COMPARE_KERNEL.with(|cell| cell.borrow().clone()) {
+            return Ok(kernel);
+        }
+        let layout = self.hal.create_bind_group_layout(
+            "rv32im_accum_topaccum_arm5_compare_layout",
+            &[
+                WebGpuBindingLayout::read_only_storage(0, 0),
+                WebGpuBindingLayout::read_only_storage(1, 0),
+                WebGpuBindingLayout::storage(2, 0),
+                WebGpuBindingLayout::uniform(3, 16),
+            ],
+        )?;
+        let kernel = self.hal.create_compute_kernel(
+            "rv32im_accum_topaccum_arm5_compare",
+            TOPACCUM_ARM5_COMPARE_ROW_WGSL,
+            "main",
+            &[layout],
+        )?;
+        TOPACCUM_ARM5_COMPARE_KERNEL.with(|cell| *cell.borrow_mut() = Some(kernel.clone()));
+        Ok(kernel)
+    }
+
     fn dispatch_topaccum_arm5_real_buffer_probe(
         &self,
         preflight: &PreflightTrace,
@@ -1421,6 +1505,56 @@ impl WebGpuCircuitHal {
             ],
         )?;
         self.hal.dispatch_compute_1d(&kernel, &bind_group, 1);
+        let compare_kernel = self.lookup_topaccum_arm5_compare_kernel()?;
+        let compare_layout = self.hal.create_bind_group_layout(
+            "rv32im_accum_topaccum_arm5_compare_layout",
+            &[
+                WebGpuBindingLayout::read_only_storage(0, 0),
+                WebGpuBindingLayout::read_only_storage(1, 0),
+                WebGpuBindingLayout::storage(2, 0),
+                WebGpuBindingLayout::uniform(3, 16),
+            ],
+        )?;
+        let compare_flags = self
+            .hal
+            .alloc_elem("rv32im_accum_topaccum_arm5_compare_flags", accum.cols);
+        let compare_flags_gpu = compare_flags
+            .raw_buffer()
+            .ok_or_else(|| anyhow::anyhow!("TopAccum arm5 compare: flags missing GPU storage"))?;
+        let compare_params = [
+            u32::try_from(accum.rows).context("TopAccum arm5 compare rows exceed u32")?,
+            u32::try_from(accum.cols).context("TopAccum arm5 compare cols exceed u32")?,
+            sample_cycle,
+            0,
+        ];
+        let compare_params_buf = self.hal.create_uniform_buffer(
+            "rv32im_accum_topaccum_arm5_compare_params",
+            bytemuck::cast_slice(&compare_params),
+        )?;
+        let compare_bind_group = self.hal.create_bind_group(
+            "rv32im_accum_topaccum_arm5_compare_bg",
+            &compare_layout,
+            &[
+                WebGpuBufferBinding::new(0, accum_gpu),
+                WebGpuBufferBinding::new(1, &accum_scratch),
+                WebGpuBufferBinding::new(2, compare_flags_gpu),
+                WebGpuBufferBinding::new(3, &compare_params_buf),
+            ],
+        )?;
+        self.hal.dispatch_compute_1d(
+            &compare_kernel,
+            &compare_bind_group,
+            u32::try_from(accum.cols)
+                .context("TopAccum arm5 compare cols exceed u32")?
+                .div_ceil(64),
+        );
+        compare_flags.mark_gpu_dirty();
+        TOPACCUM_ARM5_PROBE_COMPARE.with(|cell| {
+            *cell.borrow_mut() = Some(TopAccumArm5ProbeCompare {
+                hal: self.hal.clone(),
+                flags: compare_flags,
+            });
+        });
         ACCUM_GPU_ARM5_PROBE_DISPATCHES.fetch_add(1, Ordering::SeqCst);
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
             "rv32im_accumulate topaccum_arm5_probe dispatched sample_cycle={sample_cycle} available_cycles={available_cycles}"

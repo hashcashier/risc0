@@ -4413,7 +4413,8 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
     #[wasm_bindgen_test(async)]
     async fn rv32im_accum_topaccum_arm5_real_buffer_probe_e2e_verify() {
         use risc0_circuit_rv32im::prove::{
-            accum_gpu_arm5_probe_dispatches, set_accum_gpu_arm5_probe_enabled,
+            accum_gpu_arm5_probe_dispatches, accum_gpu_arm5_probe_mismatch_summary,
+            set_accum_gpu_arm5_probe_enabled,
         };
         use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
 
@@ -4441,6 +4442,13 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
             accum_gpu_arm5_probe_dispatches() > 0,
             "TopAccum arm5 real-buffer probe should dispatch during the proof"
         );
+        let (mismatch_count, first_mismatch_col) = accum_gpu_arm5_probe_mismatch_summary()
+            .await
+            .unwrap()
+            .expect("TopAccum arm5 probe should record a scratch-vs-CPU mismatch summary");
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "topaccum_arm5_probe mismatch_count={mismatch_count} first_mismatch_col={first_mismatch_col}"
+        ));
     }
 
     #[wasm_bindgen_test(async)]
