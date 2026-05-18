@@ -27,6 +27,7 @@ mod tests {
             webgpu::{WebGpuBindingLayout, WebGpuBuffer, WebGpuBufferBinding, WebGpuHal},
             Buffer as _, Hal,
         },
+        prove::Prover as ZkpProver,
         taps::{TapData, TapSet},
         INV_RATE,
     };
@@ -908,6 +909,37 @@ fn main() {
         );
         hal.prefix_products(&prefix);
         assert_gpu_buffer_matches_cpu(&hal, "prefix_products", &prefix).await;
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_prover_commit_group_in_place_avoids_coeffs_device_copy() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        let witness = hal.copy_from_elem(
+            "webgpu_in_place_commit_witness",
+            &(0..8).map(|idx| elem(idx + 19_000)).collect::<Vec<_>>(),
+        );
+        let _gpu_scope = hal.gpu_authoritative_scope(true);
+        let mut prover = ZkpProver::new(&hal, &TINY_EVAL_TAPSET);
+        prover.set_po2(3);
+
+        hal.reset_diagnostics();
+        prover
+            .commit_group_async_in_place(0, witness)
+            .await
+            .expect("in-place commit must succeed");
+        let diagnostics = hal.diagnostics();
+        assert_eq!(
+            diagnostics.device_copies, 0,
+            "in-place commit should not copy into coeffs: {diagnostics:?}"
+        );
+        assert!(
+            diagnostics.device_copy_sources.is_empty(),
+            "in-place commit should not record device-copy sources: {diagnostics:?}"
+        );
     }
 
     #[wasm_bindgen_test(async)]

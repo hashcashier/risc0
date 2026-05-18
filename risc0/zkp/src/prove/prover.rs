@@ -65,10 +65,38 @@ async fn make_coeffs_async(
         let _cpu_mirror_scope = hal.gpu_authoritative_scope(false);
         hal.eltwise_copy_elem(&coeffs, witness);
     }
-    hal.batch_interpolate_ntt_async(&coeffs, count).await?;
-    #[cfg(not(feature = "circuit_debug"))]
-    hal.zk_shift_async(&coeffs, count).await?;
+    finish_make_coeffs_async(hal, &coeffs, count).await?;
     Ok(coeffs)
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+async fn make_coeffs_in_place_async(
+    hal: &crate::hal::webgpu::WebGpuHal,
+    witness: crate::hal::webgpu::WebGpuBuffer<risc0_core::field::baby_bear::BabyBearElem>,
+    count: usize,
+) -> anyhow::Result<crate::hal::webgpu::WebGpuBuffer<risc0_core::field::baby_bear::BabyBearElem>> {
+    scope!("make_coeffs_in_place");
+    if hal.gpu_authoritative()
+        && hal.can_dispatch_batch_interpolate_ntt(&witness)
+        && hal.can_dispatch_zk_shift(&witness)
+    {
+        finish_make_coeffs_async(hal, &witness, count).await?;
+        Ok(witness)
+    } else {
+        make_coeffs_async(hal, &witness, count).await
+    }
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+async fn finish_make_coeffs_async(
+    hal: &crate::hal::webgpu::WebGpuHal,
+    coeffs: &crate::hal::webgpu::WebGpuBuffer<risc0_core::field::baby_bear::BabyBearElem>,
+    count: usize,
+) -> anyhow::Result<()> {
+    hal.batch_interpolate_ntt_async(coeffs, count).await?;
+    #[cfg(not(feature = "circuit_debug"))]
+    hal.zk_shift_async(coeffs, count).await?;
+    Ok(())
 }
 
 impl<'a, H: Hal> Prover<'a, H> {
@@ -464,6 +492,72 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
         let group = {
             let _gpu_scope = self.hal.gpu_authoritative_scope(poly_group_authoritative);
             PolyGroup::new_async(self.hal, coeffs, group_size, self.cycles, witness.name()).await?
+        };
+        let group_ref = self.groups[tap_group_index].insert(group);
+
+        {
+            let _gpu_scope = self.hal.gpu_authoritative_scope(merkle_authoritative);
+            group_ref
+                .merkle
+                .commit_async(self.hal, &mut self.iop)
+                .await?;
+        }
+
+        tracing::debug!(
+            "{} group root: {}",
+            self.taps.group_name(tap_group_index),
+            group_ref.merkle.root()
+        );
+        Ok(())
+    }
+
+    /// Async WebGPU commit variant that may transform the consumed witness
+    /// buffer in place. Callers must only use this for groups whose witness is
+    /// dead after commit.
+    pub async fn commit_group_async_in_place(
+        &mut self,
+        tap_group_index: usize,
+        witness: crate::hal::webgpu::WebGpuBuffer<risc0_core::field::baby_bear::BabyBearElem>,
+    ) -> anyhow::Result<()> {
+        let authoritative = self.hal.gpu_authoritative();
+        self.commit_group_async_in_place_scoped(
+            tap_group_index,
+            witness,
+            authoritative,
+            authoritative,
+            authoritative,
+        )
+        .await
+    }
+
+    /// Scoped form of [`Self::commit_group_async_in_place`].
+    #[doc(hidden)]
+    pub async fn commit_group_async_in_place_scoped(
+        &mut self,
+        tap_group_index: usize,
+        witness: crate::hal::webgpu::WebGpuBuffer<risc0_core::field::baby_bear::BabyBearElem>,
+        make_coeffs_authoritative: bool,
+        poly_group_authoritative: bool,
+        merkle_authoritative: bool,
+    ) -> anyhow::Result<()> {
+        let witness_name = witness.name();
+        scope_with!("commit_group_in_place({})", witness_name);
+        let group_size = self.taps.group_size(tap_group_index);
+        assert_eq!(witness.size() % group_size, 0);
+        assert_eq!(witness.size() / group_size, self.cycles);
+        assert!(
+            self.groups[tap_group_index].is_none(),
+            "Attempted to commit group {} more than once",
+            self.taps.group_name(tap_group_index)
+        );
+
+        let coeffs = {
+            let _gpu_scope = self.hal.gpu_authoritative_scope(make_coeffs_authoritative);
+            make_coeffs_in_place_async(self.hal, witness, group_size).await?
+        };
+        let group = {
+            let _gpu_scope = self.hal.gpu_authoritative_scope(poly_group_authoritative);
+            PolyGroup::new_async(self.hal, coeffs, group_size, self.cycles, witness_name).await?
         };
         let group_ref = self.groups[tap_group_index].insert(group);
 

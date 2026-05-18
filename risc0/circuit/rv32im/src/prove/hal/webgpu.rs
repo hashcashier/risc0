@@ -1524,7 +1524,9 @@ impl SegmentProver for WebGpuSegmentProver {
                 let _gpu_scope = hal.gpu_authoritative_scope(async_scopes.code_data);
                 {
                     let _t = WebGpuStageTimer::new_active_for("commit_group_async rv32im_code", hal);
-                    prover.commit_group_async(REGISTER_GROUP_CODE, code).await?;
+                    prover
+                        .commit_group_async_in_place(REGISTER_GROUP_CODE, code.clone())
+                        .await?;
                 }
                 {
                     let _t = WebGpuStageTimer::new_active_for("commit_group_async rv32im_data", hal);
@@ -1542,9 +1544,9 @@ impl SegmentProver for WebGpuSegmentProver {
             {
                 let _t = WebGpuStageTimer::new_active_for("commit_group_async rv32im_accum", hal);
                 prover
-                    .commit_group_async_scoped(
+                    .commit_group_async_in_place_scoped(
                         REGISTER_GROUP_ACCUM,
-                        &witgen.accum.buf,
+                        witgen.accum.buf.clone(),
                         async_scopes.accum_make_coeffs,
                         async_scopes.accum_poly_group,
                         async_scopes.accum_merkle,

@@ -255,13 +255,13 @@ impl KeccakProver for WebGpuKeccakProver {
                 {
                     let _t = WebGpuStageTimer::new_active_for("commit_group_async keccak_code", self.hal.as_ref());
                     prover
-                        .commit_group_async(REGISTER_GROUP_CODE, &code.buf)
+                        .commit_group_async_in_place(REGISTER_GROUP_CODE, code.buf.clone())
                         .await?;
                 }
                 {
                     let _t = WebGpuStageTimer::new_active_for("commit_group_async keccak_data", self.hal.as_ref());
                     prover
-                        .commit_group_async(REGISTER_GROUP_DATA, &data.buf)
+                        .commit_group_async_in_place(REGISTER_GROUP_DATA, data.buf.clone())
                         .await?;
                 }
             }
@@ -277,7 +277,7 @@ impl KeccakProver for WebGpuKeccakProver {
                 {
                     let _t = WebGpuStageTimer::new_active_for("commit_group_async keccak_accum", self.hal.as_ref());
                     prover
-                        .commit_group_async(REGISTER_GROUP_ACCUM, &accum)
+                        .commit_group_async_in_place(REGISTER_GROUP_ACCUM, accum.clone())
                         .await?;
                 }
                 prover

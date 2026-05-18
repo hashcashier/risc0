@@ -245,7 +245,7 @@ impl RecursionProver for WebGpuRecursionProver {
                 {
                     let _t = WebGpuStageTimer::new_active_for("commit_group_async recursion_accum", self.hal.as_ref());
                     prover
-                        .commit_group_async(REGISTER_GROUP_ACCUM, &witgen.accum)
+                        .commit_group_async_in_place(REGISTER_GROUP_ACCUM, witgen.accum.clone())
                         .await?;
                 }
                 prover
