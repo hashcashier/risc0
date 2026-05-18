@@ -609,6 +609,53 @@ mod tests {
     }
 
     #[wasm_bindgen_test(async)]
+    async fn webgpu_hal_scatter_does_not_upload_sparse_destination_in_mirror_mode() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        let into = hal.alloc_elem_init(
+            "webgpu_hal_scatter_sparse_into",
+            1024,
+            elem(17_500),
+        );
+        let values = (0..4)
+            .map(|idx| elem(idx + 18_000))
+            .collect::<Vec<_>>();
+
+        hal.reset_diagnostics();
+        hal.scatter(&into, &[0, 2, 4], &[3, 7, 11, 13], &values);
+
+        let diagnostics = hal.diagnostics();
+        let dest_upload_bytes = diagnostics
+            .upload_sources
+            .iter()
+            .find(|source| source.name == "webgpu_hal_scatter_sparse_into")
+            .map(|source| source.upload_bytes)
+            .unwrap_or(0);
+        assert_eq!(
+            dest_upload_bytes, 0,
+            "non-authoritative scatter should not upload the whole sparse destination"
+        );
+        let scatter = diagnostics
+            .ops
+            .iter()
+            .find(|op| op.name == "scatter")
+            .expect("scatter diagnostics should be present");
+        assert_eq!(scatter.gpu_dispatches, 1);
+        assert_eq!(scatter.cpu_mirrors, 1);
+        assert_eq!(scatter.cpu_fallbacks, 0);
+        assert!(
+            !into.gpu_is_current(),
+            "sparse scatter writes only touched cells on GPU, so future GPU readers must upload the CPU shadow first"
+        );
+
+        into.sync_cpu_to_gpu(&hal).unwrap();
+        assert_gpu_elem_buffer_matches_cpu(&hal, "scatter_sparse_destination", &into).await;
+    }
+
+    #[wasm_bindgen_test(async)]
     async fn webgpu_hal_reports_layout_and_bind_group_diagnostics() {
         console_error_panic_hook::set_once();
 

@@ -9156,6 +9156,7 @@ impl WebGpuHal {
         index: &[u32],
         offsets: &[u32],
         values: &[BabyBearElem],
+        sync_destination: bool,
     ) -> Result<bool> {
         if index.len() < 2 {
             return Ok(false);
@@ -9187,7 +9188,9 @@ impl WebGpuHal {
         let Some(into_gpu) = into.raw_buffer() else {
             return Ok(false);
         };
-        into.sync_cpu_to_gpu(self)?;
+        if sync_destination {
+            into.sync_cpu_to_gpu(self)?;
+        }
 
         let offsets = self.copy_from_u32("webgpu_scatter_offsets", offsets);
         let values = self.copy_from_elem("webgpu_scatter_values", values);
@@ -11993,8 +11996,18 @@ impl Hal for WebGpuHal {
             return;
         }
         let gpu_scattered = self
-            .dispatch_scatter(into, index, offsets, values)
+            .dispatch_scatter(into, index, offsets, values, self.gpu_authoritative())
             .unwrap_or_else(|err| panic!("failed to scatter WebGPU buffers: {err}"));
+        if gpu_scattered && !self.gpu_authoritative() {
+            self.cpu.scatter(into.cpu(), index, offsets, values);
+            self.record_gpu_result_with_cpu_mirror("scatter", true);
+            // The GPU dispatch only writes the sparse touched cells. Keep the
+            // CPU shadow authoritative so a later GPU reader performs one full
+            // upload of the mirrored sparse result instead of trusting partial
+            // GPU contents.
+            into.mark_cpu_result(false);
+            return;
+        }
         self.finish_hal_op("scatter", gpu_scattered, into, || {
             self.cpu.scatter(into.cpu(), index, offsets, values);
         });
