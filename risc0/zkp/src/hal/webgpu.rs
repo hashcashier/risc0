@@ -11995,17 +11995,22 @@ impl Hal for WebGpuHal {
         if !index.windows(2).any(|window| window[0] < window[1]) {
             return;
         }
+        let gpu_authoritative = self.gpu_authoritative();
+        // A sparse GPU scatter cannot make a stale destination fully current.
+        // In mirror mode, skip that unusable probe and keep CPU authoritative.
+        if !gpu_authoritative && into.raw_buffer().is_some() && !into.gpu_is_current() {
+            self.cpu.scatter(into.cpu(), index, offsets, values);
+            self.diagnostics.record_cpu_mirror("scatter");
+            into.mark_cpu_result(false);
+            return;
+        }
         let gpu_scattered = self
-            .dispatch_scatter(into, index, offsets, values, self.gpu_authoritative())
+            .dispatch_scatter(into, index, offsets, values, gpu_authoritative)
             .unwrap_or_else(|err| panic!("failed to scatter WebGPU buffers: {err}"));
-        if gpu_scattered && !self.gpu_authoritative() {
+        if gpu_scattered && !gpu_authoritative {
             self.cpu.scatter(into.cpu(), index, offsets, values);
             self.record_gpu_result_with_cpu_mirror("scatter", true);
-            // The GPU dispatch only writes the sparse touched cells. Keep the
-            // CPU shadow authoritative so a later GPU reader performs one full
-            // upload of the mirrored sparse result instead of trusting partial
-            // GPU contents.
-            into.mark_cpu_result(false);
+            into.mark_cpu_result(true);
             return;
         }
         self.finish_hal_op("scatter", gpu_scattered, into, || {

@@ -609,20 +609,14 @@ mod tests {
     }
 
     #[wasm_bindgen_test(async)]
-    async fn webgpu_hal_scatter_does_not_upload_sparse_destination_in_mirror_mode() {
+    async fn webgpu_hal_scatter_skips_gpu_probe_for_stale_sparse_destination_in_mirror_mode() {
         console_error_panic_hook::set_once();
 
         let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
             .await
             .unwrap();
-        let into = hal.alloc_elem_init(
-            "webgpu_hal_scatter_sparse_into",
-            1024,
-            elem(17_500),
-        );
-        let values = (0..4)
-            .map(|idx| elem(idx + 18_000))
-            .collect::<Vec<_>>();
+        let into = hal.alloc_elem_init("webgpu_hal_scatter_sparse_into", 1024, elem(17_500));
+        let values = (0..4).map(|idx| elem(idx + 18_000)).collect::<Vec<_>>();
 
         hal.reset_diagnostics();
         hal.scatter(&into, &[0, 2, 4], &[3, 7, 11, 13], &values);
@@ -638,12 +632,32 @@ mod tests {
             dest_upload_bytes, 0,
             "non-authoritative scatter should not upload the whole sparse destination"
         );
+        let offsets_upload_bytes = diagnostics
+            .upload_sources
+            .iter()
+            .find(|source| source.name == "webgpu_scatter_offsets")
+            .map(|source| source.upload_bytes)
+            .unwrap_or(0);
+        let values_upload_bytes = diagnostics
+            .upload_sources
+            .iter()
+            .find(|source| source.name == "webgpu_scatter_values")
+            .map(|source| source.upload_bytes)
+            .unwrap_or(0);
+        assert_eq!(
+            offsets_upload_bytes, 0,
+            "stale-destination mirror-mode scatter should not upload offsets for an unusable GPU probe"
+        );
+        assert_eq!(
+            values_upload_bytes, 0,
+            "stale-destination mirror-mode scatter should not upload values for an unusable GPU probe"
+        );
         let scatter = diagnostics
             .ops
             .iter()
             .find(|op| op.name == "scatter")
             .expect("scatter diagnostics should be present");
-        assert_eq!(scatter.gpu_dispatches, 1);
+        assert_eq!(scatter.gpu_dispatches, 0);
         assert_eq!(scatter.cpu_mirrors, 1);
         assert_eq!(scatter.cpu_fallbacks, 0);
         assert!(
