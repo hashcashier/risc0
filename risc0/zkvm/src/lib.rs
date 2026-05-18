@@ -151,7 +151,7 @@ pub use self::host::client::prove::webgpu::{webgpu_prover, WebGpuProver};
 #[cfg(not(target_os = "zkvm"))]
 #[cfg(feature = "client")]
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
-pub use self::host::client::prove::webgpu_pool::WebGpuProverPool;
+pub use self::host::client::prove::webgpu_pool::{webgpu_prover_pool, WebGpuProverPool};
 #[cfg(not(target_os = "zkvm"))]
 #[cfg(feature = "client")]
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]

@@ -1680,6 +1680,66 @@ mod tests {
         ));
     }
 
+    /// SP6d iter 10 — the pool's public async proving entrypoint should
+    /// use the dependency-graph scheduler by default. This test verifies
+    /// routing through the scheduler's early dev-mode rejection path so it
+    /// does not spend minutes on a full succinct proof.
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_pool_default_uses_scheduled_path_smoke() {
+        use risc0_zkvm::{ProverOpts, VerifierContext, WebGpuProverPool};
+        use risc0_zkvm_methods::MULTI_TEST_ELF;
+
+        console_error_panic_hook::set_once();
+
+        let pool = WebGpuProverPool::new(1).await.expect("pool construct");
+        let env = ExecutorEnv::builder().build().unwrap();
+        let ctx = VerifierContext::default();
+        let opts = ProverOpts::succinct().with_dev_mode(true);
+
+        let err = pool
+            .prove_with_ctx_async(env, &ctx, MULTI_TEST_ELF, &opts)
+            .await
+            .expect_err("dev-mode should be rejected before proving");
+        assert!(
+            err.to_string().contains("dev-mode"),
+            "expected dev-mode rejection, got {err:?}"
+        );
+        assert_eq!(
+            pool.last_prove_strategy_for_diagnostics(),
+            Some("scheduled"),
+            "WebGpuProverPool::prove_with_ctx_async must route through the scheduled path"
+        );
+    }
+
+    /// SP6d iter 10 — pooled browser users should get the same async
+    /// convenience shape as `WebGpuProver`, while still routing through
+    /// the scheduled pool path.
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_prover_pool_convenience_uses_scheduled_path_smoke() {
+        use risc0_zkvm::{webgpu_prover_pool, ProverOpts};
+        use risc0_zkvm_methods::MULTI_TEST_ELF;
+
+        console_error_panic_hook::set_once();
+
+        let pool = webgpu_prover_pool(1).await.expect("pool construct");
+        let env = ExecutorEnv::builder().build().unwrap();
+        let opts = ProverOpts::succinct().with_dev_mode(true);
+
+        let err = pool
+            .prove_with_opts_async(env, MULTI_TEST_ELF, &opts)
+            .await
+            .expect_err("dev-mode should be rejected before proving");
+        assert!(
+            err.to_string().contains("dev-mode"),
+            "expected dev-mode rejection, got {err:?}"
+        );
+        assert_eq!(
+            pool.last_prove_strategy_for_diagnostics(),
+            Some("scheduled"),
+            "WebGpuProverPool::prove_with_opts_async must route through the scheduled path"
+        );
+    }
+
     /// SP7 iter 1 — synthetic witgen-codegen scale test.
     ///
     /// SP7's user-directed approach is "codegen WGSL anyway", betting

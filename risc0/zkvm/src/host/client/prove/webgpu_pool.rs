@@ -30,7 +30,13 @@
 //! `prove_session_async` work-distribution layer that issues different
 //! segments / lifts / joins to different HALs is deferred to iter 2+.
 
-use std::{collections::HashMap, collections::VecDeque, future::Future, pin::Pin, rc::Rc};
+use std::{
+    cell::Cell,
+    collections::{HashMap, VecDeque},
+    future::Future,
+    pin::Pin,
+    rc::Rc,
+};
 
 use anyhow::{anyhow, bail, Context, Result};
 use risc0_zkp::{
@@ -65,12 +71,18 @@ use crate::{
 
 use super::webgpu::WebGpuProver;
 
+/// Construct a browser WebGPU prover pool with `slots` independent devices.
+pub async fn webgpu_prover_pool(slots: usize) -> Result<Rc<WebGpuProverPool>> {
+    Ok(Rc::new(WebGpuProverPool::new(slots).await?))
+}
+
 /// A pool of independent WebGPU provers. Each prover owns its own
 /// `web_sys::GpuDevice` and `WebGpuHal`. Concurrent prove calls across
 /// different pool slots execute on independent GPU queues.
 pub struct WebGpuProverPool {
     provers: Vec<Rc<WebGpuProver>>,
-    next: std::cell::Cell<usize>,
+    next: Cell<usize>,
+    last_prove_strategy: Cell<Option<&'static str>>,
 }
 
 impl WebGpuProverPool {
@@ -88,7 +100,8 @@ impl WebGpuProverPool {
         }
         Ok(Self {
             provers,
-            next: std::cell::Cell::new(0),
+            next: Cell::new(0),
+            last_prove_strategy: Cell::new(None),
         })
     }
 
@@ -114,6 +127,33 @@ impl WebGpuProverPool {
         let idx = self.next.get();
         self.next.set((idx + 1) % n);
         (idx, self.provers[idx].clone())
+    }
+
+    /// Returns the proving strategy used by the most recent pool-level
+    /// `prove_with_ctx*` call. This is intentionally diagnostics-only so
+    /// browser performance tests can assert that public entrypoints route
+    /// through the intended scheduler.
+    #[doc(hidden)]
+    pub fn last_prove_strategy_for_diagnostics(&self) -> Option<&'static str> {
+        self.last_prove_strategy.get()
+    }
+
+    /// Async browser WebGPU pool variant of `Prover::prove`.
+    pub async fn prove_async(&self, env: ExecutorEnv<'_>, elf: &[u8]) -> Result<ProveInfo> {
+        let opts = ProverOpts::default();
+        let ctx = VerifierContext::default();
+        self.prove_with_ctx_async(env, &ctx, elf, &opts).await
+    }
+
+    /// Async browser WebGPU pool variant of `Prover::prove_with_opts`.
+    pub async fn prove_with_opts_async(
+        &self,
+        env: ExecutorEnv<'_>,
+        elf: &[u8],
+        opts: &ProverOpts,
+    ) -> Result<ProveInfo> {
+        let ctx = VerifierContext::default().with_dev_mode(opts.dev_mode());
+        self.prove_with_ctx_async(env, &ctx, elf, opts).await
     }
 
     /// SP6d iter 5: distribute lifts + tree-joins across pool slots to
@@ -272,6 +312,22 @@ impl WebGpuProverPool {
         elf: &[u8],
         opts: &ProverOpts,
     ) -> Result<ProveInfo> {
+        self.prove_with_ctx_scheduled_async(env, ctx, elf, opts)
+            .await
+    }
+
+    /// SP6d iter 8 legacy phased pool prove. This is retained for A/B
+    /// comparisons and recovery, but the public pool entrypoint routes
+    /// through [`Self::prove_with_ctx_scheduled_async`] because the
+    /// dependency-graph scheduler is the measured positive SP6d path.
+    pub async fn prove_with_ctx_sequential_async(
+        &self,
+        env: ExecutorEnv<'_>,
+        ctx: &VerifierContext,
+        elf: &[u8],
+        opts: &ProverOpts,
+    ) -> Result<ProveInfo> {
+        self.last_prove_strategy.set(Some("sequential"));
         anyhow::ensure!(
             !opts.dev_mode(),
             "browser WebGPU pool proving does not support dev-mode"
@@ -575,6 +631,7 @@ impl WebGpuProverPool {
         elf: &[u8],
         opts: &ProverOpts,
     ) -> Result<ProveInfo> {
+        self.last_prove_strategy.set(Some("scheduled"));
         anyhow::ensure!(
             !opts.dev_mode(),
             "browser WebGPU pool proving does not support dev-mode"

@@ -64,9 +64,26 @@ use risc0_zkvm::{webgpu_prover, ExecutorEnv, ProverOpts};
 
 let prover = webgpu_prover().await?;
 let env = ExecutorEnv::builder().build()?;
-let receipt = prover.prove_with_opts(env, ELF, &ProverOpts::succinct())?;
+let receipt = prover.prove_with_opts_async(env, ELF, &ProverOpts::succinct()).await?;
 receipt.verify(IMAGE_ID)?;
 ```
+
+For mixed workloads that can benefit from the SP6d dependency scheduler, use
+the pooled constructor:
+
+```rust
+use risc0_zkvm::{webgpu_prover_pool, ExecutorEnv, ProverOpts};
+
+let pool = webgpu_prover_pool(2).await?;
+let env = ExecutorEnv::builder().build()?;
+let receipt = pool.prove_with_opts_async(env, ELF, &ProverOpts::succinct()).await?;
+receipt.verify(IMAGE_ID)?;
+```
+
+`webgpu_prover_pool(slots)` creates `slots` independent browser WebGPU devices
+and routes the pool's async proving entrypoints through the dependency-graph
+scheduler by default. The legacy phased pool route remains available as
+`WebGpuProverPool::prove_with_ctx_sequential_async` for A/B comparisons.
 
 `default_prover()` is intentionally unavailable for browser WebGPU builds
 because it cannot synchronously request a `GPUAdapter`/`GPUDevice`.
@@ -100,6 +117,9 @@ The implementation adds:
 - Browser `ProverImpl` and `WebGpuProver` plumbing that reuses the native
   prover server, recursion, assumptions, PoVW, receipt assembly, and verifier
   paths.
+- `WebGpuProverPool` plumbing for multi-device browser runs, including a
+  default dependency-graph scheduler path for heterogeneous segment, keccak,
+  lift, join, and resolve work.
 - A browser parity harness in `examples/browser-prove` covering public
   examples, native method guests, syscalls, precompiles, accelerators, and
   composite-to-succinct compression.
