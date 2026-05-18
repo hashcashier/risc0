@@ -767,6 +767,10 @@ fn run_accum_steps(
     let tables = LookupTables::default();
     let last_cycle = preflight.cycles.len();
 
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    let step_top_accum_timer = risc0_zkp::hal::webgpu::WebGpuStageTimer::new(format!(
+        "rv32im_accumulate step_top_accum cycles={last_cycle}"
+    ));
     for cycle in 0..last_cycle {
         let ctx = ExecContext::new(preflight, &tables, cycle);
         let major = preflight.cycles[cycle].major;
@@ -777,9 +781,15 @@ fn run_accum_steps(
             )
         })?;
     }
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    drop(step_top_accum_timer);
 
     let accum = accum.unchecked();
 
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    let terminal_ext_prefix_timer = risc0_zkp::hal::webgpu::WebGpuStageTimer::new(format!(
+        "rv32im_accumulate terminal_ext_prefix cycles={last_cycle}"
+    ));
     for elem_idx in 0..ExtVal::EXT_SIZE {
         let col = accum.cols - ExtVal::EXT_SIZE + elem_idx;
         let mut running = Val::ZERO;
@@ -789,9 +799,15 @@ fn run_accum_steps(
             accum.set_at(row, col, running);
         }
     }
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    drop(terminal_ext_prefix_timer);
 
     let split = LAYOUT_TOP_ACCUM.columns[0].offset;
     let machine_columns = (accum.cols - split) / ExtVal::EXT_SIZE;
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    let machine_column_carry_timer = risc0_zkp::hal::webgpu::WebGpuStageTimer::new(format!(
+        "rv32im_accumulate machine_column_carry cycles={last_cycle} machine_columns={machine_columns}"
+    ));
     for row in 0..last_cycle {
         let back = (row + last_cycle - 1) % last_cycle;
         let prev: [Val; ExtVal::EXT_SIZE] =
@@ -804,6 +820,8 @@ fn run_accum_steps(
             }
         }
     }
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    drop(machine_column_carry_timer);
 
     Ok(())
 }

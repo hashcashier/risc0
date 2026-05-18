@@ -43,6 +43,9 @@ SP6m then fused copy-preserving coefficient materialization into the first
 inverse NTT pass, reducing xgboost device copies to only `final_coeffs`
 traffic: 32 copies / 32,768 bytes. Wall stayed flat/noisy at 102.26 s, which
 closes device-copy cleanup as a material wall-time lever.
+SP7a profiling measured the current xgboost RV32IM accumulation surface at
+22.13 s across 11 segments: 20.55 s in generated `step_TopAccum`, 1.57 s in
+machine-column carry, and 0.01 s in terminal ExtVal prefix.
 
 ## Final per-fixture matrix (2026-05-15)
 
@@ -92,6 +95,7 @@ Every measured fixture remains above 1.0× CUDA. Reasons:
 | SP7 iter 6d-a/b/c (probe-mode GPU witgen) | infrastructure | **LANDED 2026-05-15** -- vendored exec_TopChunk0 WGSL, Tint-valid kernel, probe behind static flag |
 | SP7 iter 6d-g (replace rust_steps witgen) | -6 s of 103 s wall (~6%) | **BLOCKED**: generated WGSL is bit-exact for GPU-written cells, but only covers 8.15M of 33.36M CPU-written cells; whole-`step_Top` short-circuit leaves ~25.2M cpu_only cells invalid |
 | SP7 iter 6d-deeper (TopAccum split + GPU accumulate) | -22 s of 103 s wall (~21%) | Blocked: TopAccumChunk0 closure 1.7 MB is 4× over Chrome's 0.4 MB reachable-closure cliff; needs straight-line-arithmetic chunking pass MuxChunk doesn't provide |
+| SP7a RV32IM accumulation substage profile | identifies next safe subtarget | xgboost profile: 22.13 s RV32IM accumulation total; 20.55 s generated `step_TopAccum`, 1.57 s machine-column carry, 0.01 s terminal ExtVal prefix. Carry scan is the next small correctness-checkable target; full TopAccum offload remains the larger blocked lever |
 | SP8 iter 1 + iter 3 (parallel readbacks) | -wall on FRI | **LANDED 2026-05-15** -- noise on xgboost (FRI is small), larger fixtures TBD |
 | SP9 phase 1 + phase 2 take 3 (layout cache + min_binding_size collapse) | infrastructure | **LANDED 2026-05-15** -- layout identity is now stable enough for higher-level caches |
 | SP6e-SP6m object churn, upload trimming, and copy reduction | -2-3% smokes | Bind-group diagnostics showed 12,510 bind groups for 5,365 dispatches. Compute-pipeline cache landed with 1,592 hits on xgboost but wall stayed flat at 103.35 s. Poseidon2 fold-chain dynamic bind groups cut xgboost bind groups to 9,022 and buffers to 11,835, still flat at 102.86 s. NTT dynamic bind groups cut bind groups to 3,358 and buffers to 6,171; xgboost measured 102.25 s. Removing redundant hash_rows output uploads cut xgboost upload bytes from 15.28 GB to 10.91 GB and measured 101.93 s. Empty scatter cleanup removed the last reported xgboost CPU fallbacks but wall stayed flat/noisy. Device-copy attribution showed xgboost's 7.22 GB copy traffic was almost entirely `coeffs`; in-place dead commit groups reduced that to 5.76 GB and 85 copies; fused copy-preserving interpolate reduced remaining device-copy traffic to only `final_coeffs`, 32 copies / 32,768 bytes. Wall remained flat at 102.26 s, so this line is now treated as correctness/infrastructure cleanup rather than the next wall-time lever. Global bind-group caching remains deferred until buffer lifetime/invalidation is explicit |
