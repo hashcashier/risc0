@@ -261,6 +261,14 @@ mod tests {
                 source.upload_bytes,
             );
         }
+        for source in diagnostics.device_copy_sources {
+            console_log!(
+                "browser-prove:webgpu-device-copy {name}: source={} device_copies={} device_copy_bytes={}",
+                source.name,
+                source.device_copies,
+                source.device_copy_bytes,
+            );
+        }
         for source in diagnostics.readback_sources {
             console_log!(
                 "browser-prove:webgpu-readback {name}: source={} readbacks={} readback_bytes={}",
@@ -317,6 +325,14 @@ mod tests {
                 source.name,
                 source.uploads,
                 source.upload_bytes,
+            );
+        }
+        for source in diagnostics.device_copy_sources {
+            console_log!(
+                "browser-prove:webgpu-pool-device-copy {name}: source={} device_copies={} device_copy_bytes={}",
+                source.name,
+                source.device_copies,
+                source.device_copy_bytes,
             );
         }
         for source in diagnostics.readback_sources {
@@ -826,6 +842,29 @@ fn main() {
         let copy_output = hal.alloc_elem("webgpu_hal_copy_output", 16);
         hal.eltwise_copy_elem(&copy_output, &copy_input);
         assert_gpu_buffer_matches_cpu(&hal, "eltwise_copy_elem", &copy_output).await;
+
+        let copy_diag_input = hal.copy_from_elem(
+            "webgpu_hal_copy_diag_input",
+            &(0..16).map(|idx| elem(idx + 18_000)).collect::<Vec<_>>(),
+        );
+        let copy_diag_output = hal.alloc_elem("webgpu_hal_copy_diag_output", 16);
+        hal.reset_diagnostics();
+        hal.eltwise_copy_elem(&copy_diag_output, &copy_diag_input);
+        assert_gpu_buffer_matches_cpu(&hal, "eltwise_copy_elem_diagnostics", &copy_diag_output)
+            .await;
+        let diagnostics = hal.diagnostics();
+        assert_eq!(diagnostics.device_copies, 1);
+        let copy_source = diagnostics
+            .device_copy_sources
+            .iter()
+            .find(|source| source.name == "webgpu_hal_copy_diag_output")
+            .expect("expected device copy diagnostics for destination buffer");
+        assert_eq!(copy_source.device_copies, 1);
+        assert_eq!(copy_source.device_copy_bytes, 64);
+        assert!(
+            format!("{diagnostics:?}").contains("webgpu_hal_copy_diag_output"),
+            "device copy diagnostics should include the destination buffer name: {diagnostics:?}"
+        );
 
         let copy_slice_into = hal.copy_from_elem(
             "webgpu_hal_copy_slice_into",

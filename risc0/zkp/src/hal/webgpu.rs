@@ -2411,6 +2411,7 @@ pub struct WebGpuDiagnostics {
     pub cpu_only_ops: u64,
     pub ops: Vec<WebGpuOpDiagnostics>,
     pub upload_sources: Vec<WebGpuUploadDiagnostics>,
+    pub device_copy_sources: Vec<WebGpuDeviceCopyDiagnostics>,
     pub readback_sources: Vec<WebGpuReadbackDiagnostics>,
 }
 
@@ -2430,6 +2431,14 @@ pub struct WebGpuUploadDiagnostics {
     pub name: &'static str,
     pub uploads: u64,
     pub upload_bytes: u64,
+}
+
+/// Per-buffer WebGPU device-to-device copy usage.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WebGpuDeviceCopyDiagnostics {
+    pub name: &'static str,
+    pub device_copies: u64,
+    pub device_copy_bytes: u64,
 }
 
 /// Per-buffer WebGPU readback usage.
@@ -2452,6 +2461,12 @@ struct WebGpuOpStats {
 struct WebGpuUploadStats {
     uploads: u64,
     upload_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct WebGpuDeviceCopyStats {
+    device_copies: u64,
+    device_copy_bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -2481,6 +2496,7 @@ struct WebGpuDiagnosticsState {
     cpu_only_ops: Cell<u64>,
     ops: RefCell<BTreeMap<&'static str, WebGpuOpStats>>,
     upload_sources: RefCell<BTreeMap<&'static str, WebGpuUploadStats>>,
+    device_copy_sources: RefCell<BTreeMap<&'static str, WebGpuDeviceCopyStats>>,
     readback_sources: RefCell<BTreeMap<&'static str, WebGpuReadbackStats>>,
 }
 
@@ -2526,6 +2542,16 @@ impl WebGpuDiagnosticsState {
                     upload_bytes: stats.upload_bytes,
                 })
                 .collect(),
+            device_copy_sources: self
+                .device_copy_sources
+                .borrow()
+                .iter()
+                .map(|(&name, stats)| WebGpuDeviceCopyDiagnostics {
+                    name,
+                    device_copies: stats.device_copies,
+                    device_copy_bytes: stats.device_copy_bytes,
+                })
+                .collect(),
             readback_sources: self
                 .readback_sources
                 .borrow()
@@ -2559,6 +2585,7 @@ impl WebGpuDiagnosticsState {
         self.cpu_only_ops.set(0);
         self.ops.borrow_mut().clear();
         self.upload_sources.borrow_mut().clear();
+        self.device_copy_sources.borrow_mut().clear();
         self.readback_sources.borrow_mut().clear();
     }
 
@@ -2585,9 +2612,13 @@ impl WebGpuDiagnosticsState {
         stats.upload_bytes = stats.upload_bytes.saturating_add(byte_len);
     }
 
-    fn record_device_copy(&self, byte_len: u64) {
+    fn record_device_copy(&self, name: &'static str, byte_len: u64) {
         Self::add(&self.device_copies, 1);
         Self::add(&self.device_copy_bytes, byte_len);
+        let mut copies = self.device_copy_sources.borrow_mut();
+        let stats = copies.entry(name).or_default();
+        stats.device_copies = stats.device_copies.saturating_add(1);
+        stats.device_copy_bytes = stats.device_copy_bytes.saturating_add(byte_len);
     }
 
     fn record_readback(&self, name: &'static str, byte_len: u64) {
@@ -8383,6 +8414,26 @@ impl WebGpuHal {
         destination_offset: u64,
         byte_len: u64,
     ) -> Result<()> {
+        self.copy_gpu_buffer_named(
+            "unattributed",
+            source,
+            source_offset,
+            destination,
+            destination_offset,
+            byte_len,
+        )
+    }
+
+    /// Copy a byte range between WebGPU buffers and attribute diagnostics to `name`.
+    pub fn copy_gpu_buffer_named(
+        &self,
+        name: &'static str,
+        source: &web_sys::GpuBuffer,
+        source_offset: u64,
+        destination: &web_sys::GpuBuffer,
+        destination_offset: u64,
+        byte_len: u64,
+    ) -> Result<()> {
         let encoder = self.device.create_command_encoder();
         encoder
             .copy_buffer_to_buffer_with_f64_and_f64_and_f64(
@@ -8394,7 +8445,7 @@ impl WebGpuHal {
             )
             .map_err(js_error)?;
         self.submit(encoder.finish());
-        self.diagnostics.record_device_copy(byte_len);
+        self.diagnostics.record_device_copy(name, byte_len);
         Ok(())
     }
 
@@ -11382,7 +11433,8 @@ impl Hal for WebGpuHal {
                 if input_gpu == output_gpu {
                     false
                 } else {
-                    self.copy_gpu_buffer(
+                    self.copy_gpu_buffer_named(
+                        output.name(),
                         input_gpu,
                         input.byte_offset(),
                         output_gpu,

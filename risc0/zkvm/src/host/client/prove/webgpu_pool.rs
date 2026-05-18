@@ -42,8 +42,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use risc0_zkp::{
     core::hash::poseidon2::Poseidon2HashSuite,
     hal::webgpu::{
-        WebGpuDiagnostics, WebGpuHal, WebGpuOpDiagnostics, WebGpuReadbackDiagnostics,
-        WebGpuUploadDiagnostics,
+        WebGpuDeviceCopyDiagnostics, WebGpuDiagnostics, WebGpuHal, WebGpuOpDiagnostics,
+        WebGpuReadbackDiagnostics, WebGpuUploadDiagnostics,
     },
 };
 
@@ -1149,6 +1149,9 @@ fn merge_webgpu_diagnostics(aggregate: &mut WebGpuDiagnostics, diagnostics: WebG
     for source in diagnostics.upload_sources {
         merge_webgpu_upload_diagnostics(&mut aggregate.upload_sources, source);
     }
+    for source in diagnostics.device_copy_sources {
+        merge_webgpu_device_copy_diagnostics(&mut aggregate.device_copy_sources, source);
+    }
     for source in diagnostics.readback_sources {
         merge_webgpu_readback_diagnostics(&mut aggregate.readback_sources, source);
     }
@@ -1204,6 +1207,25 @@ fn merge_webgpu_readback_diagnostics(
         existing.readback_bytes = existing
             .readback_bytes
             .saturating_add(diagnostics.readback_bytes);
+    } else {
+        aggregate.push(diagnostics);
+    }
+}
+
+fn merge_webgpu_device_copy_diagnostics(
+    aggregate: &mut Vec<WebGpuDeviceCopyDiagnostics>,
+    diagnostics: WebGpuDeviceCopyDiagnostics,
+) {
+    if let Some(existing) = aggregate
+        .iter_mut()
+        .find(|existing| existing.name == diagnostics.name)
+    {
+        existing.device_copies = existing
+            .device_copies
+            .saturating_add(diagnostics.device_copies);
+        existing.device_copy_bytes = existing
+            .device_copy_bytes
+            .saturating_add(diagnostics.device_copy_bytes);
     } else {
         aggregate.push(diagnostics);
     }

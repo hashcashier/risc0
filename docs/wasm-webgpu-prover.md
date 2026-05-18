@@ -107,6 +107,12 @@ wall measured 101.93 s in the same diagnostic run.
 Empty RV32IM scatter ranges are also treated as true no-ops before fallback
 accounting, so xgboost now reports `cpu_fallbacks=0`; the change is a
 diagnostic cleanup and wall time stayed noisy/flat.
+Device-to-device copy diagnostics now attribute copies by destination buffer.
+The xgboost pool smoke still reports 7.22 GB of device-copy traffic, but
+7,222,591,488 bytes of that total are copies into `coeffs`; only 32,768 bytes
+come from `final_coeffs`. The next high-value target is coefficient
+materialization in the `make_coeffs` / `eltwise_copy_elem` path, subject to
+per-group ownership/lifecycle checks before any in-place mutation.
 
 `default_prover()` is intentionally unavailable for browser WebGPU builds
 because it cannot synchronously request a `GPUAdapter`/`GPUDevice`.
