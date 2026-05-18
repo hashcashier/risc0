@@ -517,6 +517,7 @@ mod tests {
         let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
             .await
             .unwrap();
+        hal.reset_diagnostics();
         let count = 3;
         let in_size = 16;
         let expand_bits = 2;
@@ -533,6 +534,9 @@ mod tests {
         let io = hal.copy_from_elem("webgpu_hal_intt_io", &io);
         hal.batch_interpolate_ntt(&io, count);
         assert_gpu_buffer_matches_cpu(&hal, "batch_interpolate_ntt", &io).await;
+
+        let diagnostics = hal.diagnostics();
+        assert_eq!(diagnostics.bind_group_creations, 4);
     }
 
     #[wasm_bindgen_test(async)]

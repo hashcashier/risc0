@@ -96,6 +96,10 @@ The Poseidon2 fold-chain path also packs per-layer parameters into one
 dynamic-offset uniform buffer and reuses one bind group per chain. On xgboost
 this reduced bind-group creations from 12,510 to 9,022 and buffer allocations
 from 15,323 to 11,835, while wall time stayed flat at 102.86 s.
+The NTT step path uses the same dynamic-offset pattern for forward and inverse
+NTT levels, reducing xgboost bind-group creations further to 3,358 and buffer
+allocations to 6,171. The measured xgboost wall was 102.25 s, a small/noisy
+improvement over the prior 102.82-103.35 s band.
 
 `default_prover()` is intentionally unavailable for browser WebGPU builds
 because it cannot synchronously request a `GPUAdapter`/`GPUDevice`.

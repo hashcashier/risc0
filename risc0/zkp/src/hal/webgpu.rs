@@ -10169,15 +10169,15 @@ impl WebGpuHal {
             return Ok(false);
         };
         let ntt_layout = self.create_bind_group_layout(
-            "webgpu_ntt_step_layout",
+            "webgpu_ntt_step_dynamic_layout",
             &[
                 WebGpuBindingLayout::storage(0, 0),
                 WebGpuBindingLayout::read_only_storage(1, 0),
-                WebGpuBindingLayout::uniform(2, 32),
+                WebGpuBindingLayout::uniform_dynamic(2, 32),
             ],
         )?;
         let ntt_kernel = self.create_compute_kernel(
-            "webgpu_ntt_step",
+            "webgpu_ntt_step_dynamic",
             NTT_STEP_WGSL,
             "main",
             &[ntt_layout.clone()],
@@ -10199,14 +10199,13 @@ impl WebGpuHal {
         // into 1. NTT runs many times per segment, so the cumulative
         // submission-overhead savings stack.
         //
-        // Param + bind-group buffers are allocated up-front and held
-        // for the duration of the pass; the pass borrows them via the
-        // bind groups, and the JS GC keeps them alive while the pass
-        // is encoded.
-        let mut params_bufs: Vec<web_sys::GpuBuffer> =
-            Vec::with_capacity((n_bits - expand_bits) as usize);
-        let mut bind_groups: Vec<web_sys::GpuBindGroup> =
-            Vec::with_capacity((n_bits - expand_bits) as usize);
+        let params_len = mem::size_of::<[u32; 8]>();
+        let params_stride = align_up(
+            params_len,
+            self.min_uniform_buffer_offset_alignment as usize,
+        );
+        let mut params_bytes = Vec::new();
+        let mut params_offsets: Vec<u32> = Vec::with_capacity((n_bits - expand_bits) as usize);
         for s_bits in 1 + expand_bits..=n_bits {
             let params = [
                 u32::try_from(n_bits).expect("WebGPU NTT n_bits exceeds u32"),
@@ -10218,27 +10217,35 @@ impl WebGpuHal {
                 0,
                 0,
             ];
-            let params_buf = self
-                .create_uniform_buffer("webgpu_ntt_step_params", bytemuck::cast_slice(&params))?;
-            params_bufs.push(params_buf);
+            let params_offset = params_bytes.len();
+            params_bytes.resize(params_offset + params_stride, 0);
+            params_bytes[params_offset..params_offset + params_len]
+                .copy_from_slice(bytemuck::cast_slice(&params));
+            params_offsets.push(
+                u32::try_from(params_offset)
+                    .map_err(|_| anyhow!("WebGPU NTT params offset exceeds u32"))?,
+            );
         }
-        for params_buf in &params_bufs {
-            let bind_group = self.create_bind_group(
-                "webgpu_ntt_step_bind_group",
-                &ntt_layout,
-                &[
-                    WebGpuBufferBinding::new(0, output_gpu),
-                    WebGpuBufferBinding::new(1, roots_gpu),
-                    WebGpuBufferBinding {
-                        binding: 2,
-                        buffer: params_buf,
-                        offset: 0,
-                        size: Some(32),
-                    },
-                ],
-            )?;
-            bind_groups.push(bind_group);
-        }
+        let params_buf = self.create_buffer(
+            "webgpu_ntt_step_params",
+            params_bytes.len() as u64,
+            WEBGPU_BUFFER_USAGE_UNIFORM | WEBGPU_BUFFER_USAGE_COPY_DST,
+        )?;
+        self.write_buffer_named(&params_buf, "webgpu_ntt_step_params", 0, params_bytes.as_slice())?;
+        let bind_group = self.create_bind_group(
+            "webgpu_ntt_step_bind_group",
+            &ntt_layout,
+            &[
+                WebGpuBufferBinding::new(0, output_gpu),
+                WebGpuBufferBinding::new(1, roots_gpu),
+                WebGpuBufferBinding {
+                    binding: 2,
+                    buffer: &params_buf,
+                    offset: 0,
+                    size: Some(params_len as u64),
+                },
+            ],
+        )?;
         let (workgroups_x, workgroups_y) = if workgroups <= WEBGPU_MAX_WORKGROUPS_PER_DIMENSION {
             (workgroups, 1)
         } else {
@@ -10252,8 +10259,16 @@ impl WebGpuHal {
         let encoder = self.device.create_command_encoder();
         let pass = encoder.begin_compute_pass();
         pass.set_pipeline(&ntt_kernel.pipeline);
-        for bind_group in &bind_groups {
-            pass.set_bind_group(0, Some(bind_group));
+        for params_offset in &params_offsets {
+            let dynamic_offsets = [*params_offset];
+            pass.set_bind_group_with_u32_slice_and_u32_and_dynamic_offsets_data_length(
+                0,
+                Some(&bind_group),
+                &dynamic_offsets,
+                0,
+                1,
+            )
+            .map_err(js_error)?;
             pass.dispatch_workgroups_with_workgroup_count_y_and_workgroup_count_z(
                 workgroups_x,
                 workgroups_y,
@@ -10302,15 +10317,15 @@ impl WebGpuHal {
                 return Ok(false);
             };
             let ntt_layout = self.create_bind_group_layout(
-                "webgpu_ntt_step_layout",
+                "webgpu_ntt_step_dynamic_layout",
                 &[
                     WebGpuBindingLayout::storage(0, 0),
                     WebGpuBindingLayout::read_only_storage(1, 0),
-                    WebGpuBindingLayout::uniform(2, 32),
+                    WebGpuBindingLayout::uniform_dynamic(2, 32),
                 ],
             )?;
             let ntt_kernel = self.create_compute_kernel(
-                "webgpu_ntt_step",
+                "webgpu_ntt_step_dynamic",
                 NTT_STEP_WGSL,
                 "main",
                 &[ntt_layout.clone()],
@@ -10322,6 +10337,13 @@ impl WebGpuHal {
             let workgroups = u32::try_from(total_pairs)
                 .expect("WebGPU inverse NTT total pairs exceeds u32")
                 .div_ceil(256);
+            let params_len = mem::size_of::<[u32; 8]>();
+            let params_stride = align_up(
+                params_len,
+                self.min_uniform_buffer_offset_alignment as usize,
+            );
+            let mut params_bytes = Vec::new();
+            let mut params_offsets: Vec<u32> = Vec::with_capacity(n_bits as usize);
             for s_bits in (1..=n_bits).rev() {
                 let params = [
                     u32::try_from(n_bits).expect("WebGPU inverse NTT n_bits exceeds u32"),
@@ -10335,26 +10357,72 @@ impl WebGpuHal {
                     1,
                     0,
                 ];
-                let params = self.create_uniform_buffer(
-                    "webgpu_ntt_step_params",
-                    bytemuck::cast_slice(&params),
-                )?;
-                let bind_group = self.create_bind_group(
-                    "webgpu_ntt_step_bind_group",
-                    &ntt_layout,
-                    &[
-                        WebGpuBufferBinding::new(0, io_gpu),
-                        WebGpuBufferBinding::new(1, roots_gpu),
-                        WebGpuBufferBinding {
-                            binding: 2,
-                            buffer: &params,
-                            offset: 0,
-                            size: Some(32),
-                        },
-                    ],
-                )?;
-                self.dispatch_compute_1d(&ntt_kernel, &bind_group, workgroups);
+                let params_offset = params_bytes.len();
+                params_bytes.resize(params_offset + params_stride, 0);
+                params_bytes[params_offset..params_offset + params_len]
+                    .copy_from_slice(bytemuck::cast_slice(&params));
+                params_offsets.push(
+                    u32::try_from(params_offset)
+                        .map_err(|_| anyhow!("WebGPU inverse NTT params offset exceeds u32"))?,
+                );
             }
+            let params_buf = self.create_buffer(
+                "webgpu_ntt_step_params",
+                params_bytes.len() as u64,
+                WEBGPU_BUFFER_USAGE_UNIFORM | WEBGPU_BUFFER_USAGE_COPY_DST,
+            )?;
+            self.write_buffer_named(
+                &params_buf,
+                "webgpu_ntt_step_params",
+                0,
+                params_bytes.as_slice(),
+            )?;
+            let bind_group = self.create_bind_group(
+                "webgpu_ntt_step_bind_group",
+                &ntt_layout,
+                &[
+                    WebGpuBufferBinding::new(0, io_gpu),
+                    WebGpuBufferBinding::new(1, roots_gpu),
+                    WebGpuBufferBinding {
+                        binding: 2,
+                        buffer: &params_buf,
+                        offset: 0,
+                        size: Some(params_len as u64),
+                    },
+                ],
+            )?;
+            let (workgroups_x, workgroups_y) = if workgroups <= WEBGPU_MAX_WORKGROUPS_PER_DIMENSION
+            {
+                (workgroups, 1)
+            } else {
+                let workgroups_y = workgroups.div_ceil(WEBGPU_MAX_WORKGROUPS_PER_DIMENSION);
+                assert!(
+                    workgroups_y <= WEBGPU_MAX_WORKGROUPS_PER_DIMENSION,
+                    "WebGPU inverse NTT 1D dispatch exceeds portable 2D workgroup capacity"
+                );
+                (WEBGPU_MAX_WORKGROUPS_PER_DIMENSION, workgroups_y)
+            };
+            let encoder = self.device.create_command_encoder();
+            let pass = encoder.begin_compute_pass();
+            pass.set_pipeline(&ntt_kernel.pipeline);
+            for params_offset in &params_offsets {
+                let dynamic_offsets = [*params_offset];
+                pass.set_bind_group_with_u32_slice_and_u32_and_dynamic_offsets_data_length(
+                    0,
+                    Some(&bind_group),
+                    &dynamic_offsets,
+                    0,
+                    1,
+                )
+                .map_err(js_error)?;
+                pass.dispatch_workgroups_with_workgroup_count_y_and_workgroup_count_z(
+                    workgroups_x,
+                    workgroups_y,
+                    1,
+                );
+            }
+            pass.end();
+            self.submit(encoder.finish());
         }
 
         let norm = BabyBearElem::new(row_size as u32).inv().as_u32_montgomery();
