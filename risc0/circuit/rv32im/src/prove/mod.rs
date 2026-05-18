@@ -30,7 +30,7 @@ use anyhow::Result;
 use cfg_if::cfg_if;
 use risc0_core::scope;
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
-use risc0_zkp::hal::webgpu::WebGpuHal;
+use risc0_zkp::hal::webgpu::{WebGpuBuffer, WebGpuHal};
 
 use crate::execute::segment::Segment;
 
@@ -44,6 +44,17 @@ pub use hal::webgpu::set_witgen_gpu_replace_enabled;
 
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 pub use hal::webgpu::set_witgen_gpu_diff_enabled;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn dispatch_webgpu_accum_machine_column_carry_for_test(
+    hal: &WebGpuHal,
+    accum: &WebGpuBuffer<crate::zirgen::circuit::Val>,
+    rows: usize,
+    cols: usize,
+    split: usize,
+) -> Result<bool> {
+    hal::webgpu::dispatch_accum_machine_column_carry(hal, accum, rows, cols, split)
+}
 
 const GLOBAL_MIX: usize = 0;
 const GLOBAL_OUT: usize = 1;

@@ -20,7 +20,7 @@ use anyhow::{Context as _, Result};
 use risc0_core::scope;
 use risc0_zkp::{
     adapter::{CircuitInfo as _, PROOF_SYSTEM_INFO},
-    field::Elem as _,
+    field::{Elem as _, ExtElem as _},
     hal::{
         webgpu::{
             WebGpuBindingLayout, WebGpuBuffer, WebGpuBufferBinding, WebGpuCircuitEvalCheck,
@@ -39,8 +39,8 @@ use crate::{
     prove::witgen::preflight::PreflightTrace,
     zirgen::{
         circuit::{
-            ExtVal, Val, REGCOUNT_MIX, REGISTER_GROUP_ACCUM, REGISTER_GROUP_CODE,
-            REGISTER_GROUP_DATA,
+            ExtVal, Val, LAYOUT_TOP_ACCUM, REGCOUNT_MIX, REGISTER_GROUP_ACCUM,
+            REGISTER_GROUP_CODE, REGISTER_GROUP_DATA,
         },
         taps::TAPSET,
         CircuitImpl,
@@ -389,6 +389,131 @@ const WITGEN_TOP_CHUNK1_WGSL: &str = concat!(
     "  let _result = exec_TopChunk1(bound, buf_global);\n",
     "}\n",
 );
+
+const ACCUM_MACHINE_COLUMN_CARRY_WGSL: &str = r#"
+const P: u32 = 2013265921u;
+
+struct ElemBuffer {
+    data: array<u32>,
+};
+
+struct Params {
+    rows: u32,
+    cols: u32,
+    split: u32,
+    carry_cols: u32,
+    base: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read_write> accum: ElemBuffer;
+@group(0) @binding(1) var<uniform> params: Params;
+
+fn add(lhs: u32, rhs: u32) -> u32 {
+    let sum = lhs + rhs;
+    if (sum >= P) {
+        return sum - P;
+    }
+    return sum;
+}
+
+@compute @workgroup_size(128)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let carry_col = gid.x;
+    if (carry_col >= params.carry_cols) {
+        return;
+    }
+    let lane = carry_col & 3u;
+    let col = params.split + carry_col;
+    let terminal_col = params.cols - 4u + lane;
+    var row = 0u;
+    loop {
+        if (row >= params.rows) {
+            break;
+        }
+        let back = select(row - 1u, params.rows - 1u, row == 0u);
+        let prev_idx = params.base + terminal_col * params.rows + back;
+        let out_idx = params.base + col * params.rows + row;
+        accum.data[out_idx] = add(accum.data[out_idx], accum.data[prev_idx]);
+        row = row + 1u;
+    }
+}
+"#;
+
+pub fn dispatch_accum_machine_column_carry(
+    hal: &WebGpuHal,
+    accum: &WebGpuBuffer<Val>,
+    rows: usize,
+    cols: usize,
+    split: usize,
+) -> Result<bool> {
+    if rows == 0 || accum.size() == 0 {
+        return Ok(true);
+    }
+    if accum.size() != rows * cols || cols <= split || (cols - split) % ExtVal::EXT_SIZE != 0 {
+        return Ok(false);
+    }
+    let machine_columns = (cols - split) / ExtVal::EXT_SIZE;
+    if machine_columns <= 1 {
+        return Ok(true);
+    }
+
+    let Some(accum_gpu) = accum.raw_buffer() else {
+        return Ok(false);
+    };
+    accum.sync_cpu_to_gpu(hal)?;
+
+    let carry_cols = (machine_columns - 1) * ExtVal::EXT_SIZE;
+    let params = [
+        u32::try_from(rows).context("RV32IM accum carry rows exceeds u32")?,
+        u32::try_from(cols).context("RV32IM accum carry cols exceeds u32")?,
+        u32::try_from(split).context("RV32IM accum carry split exceeds u32")?,
+        u32::try_from(carry_cols).context("RV32IM accum carry columns exceeds u32")?,
+        u32::try_from(accum.byte_offset() / std::mem::size_of::<Val>() as u64)
+            .context("RV32IM accum carry buffer offset exceeds u32")?,
+        0,
+        0,
+        0,
+    ];
+    let params = hal.create_uniform_buffer(
+        "rv32im_accum_machine_column_carry_params",
+        bytemuck::cast_slice(&params),
+    )?;
+    let layout = hal.create_bind_group_layout(
+        "rv32im_accum_machine_column_carry_layout",
+        &[
+            WebGpuBindingLayout::storage(0, 0),
+            WebGpuBindingLayout::uniform(1, 32),
+        ],
+    )?;
+    let kernel = hal.create_compute_kernel(
+        "rv32im_accum_machine_column_carry",
+        ACCUM_MACHINE_COLUMN_CARRY_WGSL,
+        "main",
+        &[layout.clone()],
+    )?;
+    let bind_group = hal.create_bind_group(
+        "rv32im_accum_machine_column_carry_bind_group",
+        &layout,
+        &[
+            WebGpuBufferBinding::new(0, accum_gpu),
+            WebGpuBufferBinding {
+                binding: 1,
+                buffer: &params,
+                offset: 0,
+                size: Some(32),
+            },
+        ],
+    )?;
+    let workgroups = u32::try_from(carry_cols)
+        .context("RV32IM accum carry dispatch columns exceeds u32")?
+        .div_ceil(128);
+    hal.dispatch_compute_1d(&kernel, &bind_group, workgroups);
+    accum.mark_gpu_dirty();
+    Ok(true)
+}
 
 impl WebGpuCircuitHal {
     pub(crate) fn new(hal: Rc<WebGpuHal>) -> Self {
@@ -1269,6 +1394,33 @@ impl CircuitAccumulator<WebGpuHal> for WebGpuCircuitHal {
             data.rows,
             accum.rows
         ));
+        let scopes = crate::prove::webgpu_async_authoritative_scopes();
+        if scopes.accum_make_coeffs
+            && scopes.accum_poly_group
+            && scopes.accum_merkle
+        {
+            super::rust_steps::step_accum_without_machine_column_carry(
+                preflight, data, accum, global, mix,
+            )?;
+            let split = LAYOUT_TOP_ACCUM.columns[0].offset;
+            {
+                let _timer = WebGpuStageTimer::new_active_for(
+                    "rv32im_accumulate machine_column_carry_gpu",
+                    self.hal.as_ref(),
+                );
+                if dispatch_accum_machine_column_carry(
+                    self.hal.as_ref(),
+                    &accum.buf,
+                    accum.rows,
+                    accum.cols,
+                    split,
+                )? {
+                    return Ok(());
+                }
+            }
+            super::rust_steps::finish_accum_machine_column_carry(accum);
+            return Ok(());
+        }
         super::rust_steps::step_accum(preflight, data, accum, global, mix)
     }
 }

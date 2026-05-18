@@ -124,6 +124,13 @@ large `coeffs` copy. Xgboost now reports only `final_coeffs` device copies:
 at 102.26 s and uploads stayed near 10.91 GB, so device-copy cleanup is closed
 as a wall-time lever; the next material target is CPU-originated
 RV32IM witness/accumulation work and its upload path.
+SP7a split RV32IM accumulation timing and found xgboost spends about
+22.13 s there across 11 segments: 20.55 s in generated `step_TopAccum`,
+1.57 s in machine-column carry, and 0.01 s in terminal ExtVal prefix.
+SP7b moved the isolated machine-column carry scan to WebGPU. The focused
+GPU/CPU test and xgboost e2e proof both pass; xgboost wall measured
+101.38 s, RV32IM accumulation fell to 21.03 s, and the remaining large
+target is still generated `step_TopAccum`.
 
 `default_prover()` is intentionally unavailable for browser WebGPU builds
 because it cannot synchronously request a `GPUAdapter`/`GPUDevice`.

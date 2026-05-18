@@ -977,6 +977,53 @@ fn main() {
     }
 
     #[wasm_bindgen_test(async)]
+    async fn webgpu_rv32im_accum_machine_carry_matches_cpu() {
+        use risc0_circuit_rv32im::prove::dispatch_webgpu_accum_machine_column_carry_for_test;
+
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        let rows = 8;
+        let cols = 103;
+        let split = 23;
+        let machine_columns = (cols - split) / BabyBearExtElem::EXT_SIZE;
+        let values = (0..rows * cols)
+            .map(|idx| elem(idx + 30_000))
+            .collect::<Vec<_>>();
+        let mut expected = values.clone();
+        for row in 0..rows {
+            let back = (row + rows - 1) % rows;
+            let prev: [BabyBearElem; BabyBearExtElem::EXT_SIZE] = std::array::from_fn(|idx| {
+                expected[(cols - BabyBearExtElem::EXT_SIZE + idx) * rows + back]
+            });
+            for j in 0..machine_columns - 1 {
+                for (k, prev) in prev.iter().copied().enumerate() {
+                    let col = split + j * BabyBearExtElem::EXT_SIZE + k;
+                    let idx = col * rows + row;
+                    expected[idx] += prev;
+                }
+            }
+        }
+
+        let accum = hal.copy_from_elem("rv32im_accum_machine_carry", &values);
+        dispatch_webgpu_accum_machine_column_carry_for_test(&hal, &accum, rows, cols, split)
+            .expect("machine-column carry dispatch should succeed");
+
+        let gpu_bytes = hal
+            .read_buffer(
+                accum.raw_buffer().expect("non-empty accum GPU buffer"),
+                (values.len() * std::mem::size_of::<BabyBearElem>()) as u64,
+            )
+            .await
+            .expect("read machine-column carry GPU output");
+        let gpu = bytemuck::checked::try_cast_slice::<u8, BabyBearElem>(gpu_bytes.as_slice())
+            .expect("cast machine-column carry GPU output");
+        assert_eq!(gpu, expected.as_slice());
+    }
+
+    #[wasm_bindgen_test(async)]
     async fn webgpu_hal_eval_check_poly_ext_matches_cpu() {
         console_error_panic_hook::set_once();
 

@@ -705,6 +705,45 @@ pub(crate) fn step_accum<H>(
 where
     H: risc0_zkp::hal::Hal<Field = CircuitField, Elem = Val, ExtElem = ExtVal>,
 {
+    step_accum_inner(preflight, data, accum, global, mix, true)
+}
+
+pub(crate) fn step_accum_without_machine_column_carry<H>(
+    preflight: &PreflightTrace,
+    data: &MetaBuffer<H>,
+    accum: &MetaBuffer<H>,
+    global: &MetaBuffer<H>,
+    mix: &MetaBuffer<H>,
+) -> Result<()>
+where
+    H: risc0_zkp::hal::Hal<Field = CircuitField, Elem = Val, ExtElem = ExtVal>,
+{
+    step_accum_inner(preflight, data, accum, global, mix, false)
+}
+
+pub(crate) fn finish_accum_machine_column_carry<H>(accum: &MetaBuffer<H>)
+where
+    H: risc0_zkp::hal::Hal<Field = CircuitField, Elem = Val, ExtElem = ExtVal>,
+{
+    let last_cycle = accum.rows;
+    accum.buf.view_mut(|accum_view| {
+        let accum = BufferRow::mutable(accum_view, accum.rows, accum.cols, accum.checked)
+            .unchecked();
+        apply_machine_column_carry(accum, last_cycle);
+    });
+}
+
+fn step_accum_inner<H>(
+    preflight: &PreflightTrace,
+    data: &MetaBuffer<H>,
+    accum: &MetaBuffer<H>,
+    global: &MetaBuffer<H>,
+    mix: &MetaBuffer<H>,
+    run_machine_column_carry: bool,
+) -> Result<()>
+where
+    H: risc0_zkp::hal::Hal<Field = CircuitField, Elem = Val, ExtElem = ExtVal>,
+{
     let mut result = Ok(());
     accum.buf.view_mut(|accum_view| {
         data.buf.view(|data_view| {
@@ -718,7 +757,14 @@ where
                     let global =
                         BufferRow::global(global_view, global.rows, global.cols, global.checked);
                     let mix = BufferRow::global(mix_view, mix.rows, mix.cols, mix.checked);
-                    result = run_accum_steps(preflight, data, accum, global, mix);
+                    result = run_accum_steps(
+                        preflight,
+                        data,
+                        accum,
+                        global,
+                        mix,
+                        run_machine_column_carry,
+                    );
                 });
             });
         });
@@ -763,6 +809,7 @@ fn run_accum_steps(
     accum: BufferRow<Val>,
     global: BufferRow<Val>,
     mix: BufferRow<Val>,
+    run_machine_column_carry: bool,
 ) -> Result<()> {
     let tables = LookupTables::default();
     let last_cycle = preflight.cycles.len();
@@ -804,6 +851,16 @@ fn run_accum_steps(
 
     let split = LAYOUT_TOP_ACCUM.columns[0].offset;
     let machine_columns = (accum.cols - split) / ExtVal::EXT_SIZE;
+    if run_machine_column_carry {
+        apply_machine_column_carry(accum, last_cycle);
+    }
+
+    Ok(())
+}
+
+fn apply_machine_column_carry(accum: BufferRow<Val>, last_cycle: usize) {
+    let split = LAYOUT_TOP_ACCUM.columns[0].offset;
+    let machine_columns = (accum.cols - split) / ExtVal::EXT_SIZE;
     #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
     let machine_column_carry_timer = risc0_zkp::hal::webgpu::WebGpuStageTimer::new(format!(
         "rv32im_accumulate machine_column_carry cycles={last_cycle} machine_columns={machine_columns}"
@@ -822,8 +879,6 @@ fn run_accum_steps(
     }
     #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
     drop(machine_column_carry_timer);
-
-    Ok(())
 }
 
 // SP7 iter-6d-g step 6.2.3: per-segment arm mask. Bit k set => major
