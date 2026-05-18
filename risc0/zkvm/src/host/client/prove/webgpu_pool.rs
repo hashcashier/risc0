@@ -41,7 +41,10 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use risc0_zkp::{
     core::hash::poseidon2::Poseidon2HashSuite,
-    hal::webgpu::WebGpuHal,
+    hal::webgpu::{
+        WebGpuDiagnostics, WebGpuHal, WebGpuOpDiagnostics, WebGpuReadbackDiagnostics,
+        WebGpuUploadDiagnostics,
+    },
 };
 
 use crate::{
@@ -127,6 +130,22 @@ impl WebGpuProverPool {
         let idx = self.next.get();
         self.next.set((idx + 1) % n);
         (idx, self.provers[idx].clone())
+    }
+
+    /// Return aggregate backend usage diagnostics across all pool slots.
+    pub fn diagnostics(&self) -> WebGpuDiagnostics {
+        let mut aggregate = WebGpuDiagnostics::default();
+        for prover in &self.provers {
+            merge_webgpu_diagnostics(&mut aggregate, prover.diagnostics());
+        }
+        aggregate
+    }
+
+    /// Reset backend usage diagnostics across all pool slots.
+    pub fn reset_diagnostics(&self) {
+        for prover in &self.provers {
+            prover.reset_diagnostics();
+        }
     }
 
     /// Returns the proving strategy used by the most recent pool-level
@@ -1072,6 +1091,106 @@ impl WebGpuProverPool {
             work_receipt: None,
             stats: session.stats(),
         })
+    }
+}
+
+fn merge_webgpu_diagnostics(aggregate: &mut WebGpuDiagnostics, diagnostics: WebGpuDiagnostics) {
+    aggregate.buffers_allocated = aggregate
+        .buffers_allocated
+        .saturating_add(diagnostics.buffers_allocated);
+    aggregate.bytes_allocated = aggregate
+        .bytes_allocated
+        .saturating_add(diagnostics.bytes_allocated);
+    aggregate.host_to_gpu_uploads = aggregate
+        .host_to_gpu_uploads
+        .saturating_add(diagnostics.host_to_gpu_uploads);
+    aggregate.host_to_gpu_bytes = aggregate
+        .host_to_gpu_bytes
+        .saturating_add(diagnostics.host_to_gpu_bytes);
+    aggregate.device_copies = aggregate
+        .device_copies
+        .saturating_add(diagnostics.device_copies);
+    aggregate.device_copy_bytes = aggregate
+        .device_copy_bytes
+        .saturating_add(diagnostics.device_copy_bytes);
+    aggregate.readbacks = aggregate.readbacks.saturating_add(diagnostics.readbacks);
+    aggregate.readback_bytes = aggregate
+        .readback_bytes
+        .saturating_add(diagnostics.readback_bytes);
+    aggregate.gpu_dispatches = aggregate
+        .gpu_dispatches
+        .saturating_add(diagnostics.gpu_dispatches);
+    aggregate.cpu_mirrors = aggregate.cpu_mirrors.saturating_add(diagnostics.cpu_mirrors);
+    aggregate.cpu_fallbacks = aggregate
+        .cpu_fallbacks
+        .saturating_add(diagnostics.cpu_fallbacks);
+    aggregate.cpu_only_ops = aggregate
+        .cpu_only_ops
+        .saturating_add(diagnostics.cpu_only_ops);
+
+    for op in diagnostics.ops {
+        merge_webgpu_op_diagnostics(&mut aggregate.ops, op);
+    }
+    for source in diagnostics.upload_sources {
+        merge_webgpu_upload_diagnostics(&mut aggregate.upload_sources, source);
+    }
+    for source in diagnostics.readback_sources {
+        merge_webgpu_readback_diagnostics(&mut aggregate.readback_sources, source);
+    }
+}
+
+fn merge_webgpu_op_diagnostics(
+    aggregate: &mut Vec<WebGpuOpDiagnostics>,
+    diagnostics: WebGpuOpDiagnostics,
+) {
+    if let Some(existing) = aggregate
+        .iter_mut()
+        .find(|existing| existing.name == diagnostics.name)
+    {
+        existing.gpu_dispatches = existing
+            .gpu_dispatches
+            .saturating_add(diagnostics.gpu_dispatches);
+        existing.cpu_mirrors = existing.cpu_mirrors.saturating_add(diagnostics.cpu_mirrors);
+        existing.cpu_fallbacks = existing
+            .cpu_fallbacks
+            .saturating_add(diagnostics.cpu_fallbacks);
+        existing.cpu_only_ops = existing.cpu_only_ops.saturating_add(diagnostics.cpu_only_ops);
+    } else {
+        aggregate.push(diagnostics);
+    }
+}
+
+fn merge_webgpu_upload_diagnostics(
+    aggregate: &mut Vec<WebGpuUploadDiagnostics>,
+    diagnostics: WebGpuUploadDiagnostics,
+) {
+    if let Some(existing) = aggregate
+        .iter_mut()
+        .find(|existing| existing.name == diagnostics.name)
+    {
+        existing.uploads = existing.uploads.saturating_add(diagnostics.uploads);
+        existing.upload_bytes = existing
+            .upload_bytes
+            .saturating_add(diagnostics.upload_bytes);
+    } else {
+        aggregate.push(diagnostics);
+    }
+}
+
+fn merge_webgpu_readback_diagnostics(
+    aggregate: &mut Vec<WebGpuReadbackDiagnostics>,
+    diagnostics: WebGpuReadbackDiagnostics,
+) {
+    if let Some(existing) = aggregate
+        .iter_mut()
+        .find(|existing| existing.name == diagnostics.name)
+    {
+        existing.readbacks = existing.readbacks.saturating_add(diagnostics.readbacks);
+        existing.readback_bytes = existing
+            .readback_bytes
+            .saturating_add(diagnostics.readback_bytes);
+    } else {
+        aggregate.push(diagnostics);
     }
 }
 

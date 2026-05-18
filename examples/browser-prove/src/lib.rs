@@ -33,7 +33,7 @@ mod tests {
     use risc0_zkvm::{
         serde::{from_slice, to_vec},
         webgpu_prover, Assumption, Executor, ExecutorEnv, ExitCode, ProveInfo, Prover, ProverOpts,
-        Receipt, WebGpuProver, ALLOWED_CONTROL_ROOT,
+        Receipt, WebGpuProver, WebGpuProverPool, ALLOWED_CONTROL_ROOT,
     };
     use wasm_bindgen_test::{console_log, wasm_bindgen_test, wasm_bindgen_test_configure};
 
@@ -259,6 +259,59 @@ mod tests {
         for source in diagnostics.readback_sources {
             console_log!(
                 "browser-prove:webgpu-readback {name}: source={} readbacks={} readback_bytes={}",
+                source.name,
+                source.readbacks,
+                source.readback_bytes,
+            );
+        }
+    }
+
+    fn log_webgpu_pool_diagnostics(pool: &WebGpuProverPool, name: &str) {
+        let diagnostics = pool.diagnostics();
+        assert!(
+            diagnostics.gpu_dispatches > 0,
+            "{name}: WebGPU pool proof path did not dispatch any GPU work"
+        );
+        assert_eq!(
+            diagnostics.cpu_only_ops, 0,
+            "{name}: WebGPU pool proof path used CPU-only HAL operations"
+        );
+        console_log!(
+            "browser-prove:webgpu-pool {name}: gpu_dispatches={} cpu_mirrors={} cpu_fallbacks={} cpu_only_ops={} uploads={} upload_bytes={} device_copies={} device_copy_bytes={} readbacks={} readback_bytes={} buffers={} buffer_bytes={}",
+            diagnostics.gpu_dispatches,
+            diagnostics.cpu_mirrors,
+            diagnostics.cpu_fallbacks,
+            diagnostics.cpu_only_ops,
+            diagnostics.host_to_gpu_uploads,
+            diagnostics.host_to_gpu_bytes,
+            diagnostics.device_copies,
+            diagnostics.device_copy_bytes,
+            diagnostics.readbacks,
+            diagnostics.readback_bytes,
+            diagnostics.buffers_allocated,
+            diagnostics.bytes_allocated,
+        );
+        for op in diagnostics.ops {
+            console_log!(
+                "browser-prove:webgpu-pool-op {name}: op={} gpu_dispatches={} cpu_mirrors={} cpu_fallbacks={} cpu_only_ops={}",
+                op.name,
+                op.gpu_dispatches,
+                op.cpu_mirrors,
+                op.cpu_fallbacks,
+                op.cpu_only_ops,
+            );
+        }
+        for source in diagnostics.upload_sources {
+            console_log!(
+                "browser-prove:webgpu-pool-upload {name}: source={} uploads={} upload_bytes={}",
+                source.name,
+                source.uploads,
+                source.upload_bytes,
+            );
+        }
+        for source in diagnostics.readback_sources {
+            console_log!(
+                "browser-prove:webgpu-pool-readback {name}: source={} readbacks={} readback_bytes={}",
                 source.name,
                 source.readbacks,
                 source.readback_bytes,
@@ -1722,6 +1775,7 @@ mod tests {
         console_error_panic_hook::set_once();
 
         let pool = webgpu_prover_pool(1).await.expect("pool construct");
+        pool.reset_diagnostics();
         let env = ExecutorEnv::builder().build().unwrap();
         let opts = ProverOpts::succinct().with_dev_mode(true);
 
@@ -1737,6 +1791,11 @@ mod tests {
             pool.last_prove_strategy_for_diagnostics(),
             Some("scheduled"),
             "WebGpuProverPool::prove_with_opts_async must route through the scheduled path"
+        );
+        let diagnostics = pool.diagnostics();
+        assert_eq!(
+            diagnostics.gpu_dispatches, 0,
+            "dev-mode rejection should happen before pool GPU dispatches"
         );
     }
 
@@ -3483,20 +3542,18 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
         ));
     }
 
-    /// SP6d iter 8 — end-to-end pool prove with pending keccaks +
-    /// assumption resolve. KeccakUnion(2) emits 2 keccak proof requests
-    /// and 1 unresolved assumption (the keccak union root). The pool
-    /// distributes per-segment proves AND per-keccak proves across
-    /// slots, then unions the keccak receipts and resolves the
-    /// assumption to produce a verifying succinct receipt.
+    /// SP6d iter 11 — end-to-end public pool prove with pending keccaks +
+    /// assumption resolve. The default pool entrypoint routes through the
+    /// dependency-graph scheduler, which keeps independent keccak proofs,
+    /// union nodes, lifts, joins, and resolves ready across the pool.
     #[wasm_bindgen_test(async)]
     async fn webgpu_pool_prove_session_keccak_union_smoke() {
-        use risc0_zkvm::{ProverOpts, VerifierContext, WebGpuProverPool};
+        use risc0_zkvm::{webgpu_prover_pool, ProverOpts};
         use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
 
         console_error_panic_hook::set_once();
 
-        let pool = WebGpuProverPool::new(2).await.expect("pool construct");
+        let pool = webgpu_prover_pool(2).await.expect("pool construct");
 
         let env = ExecutorEnv::builder()
             .keccak_max_po2(14)
@@ -3506,14 +3563,14 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
             .build()
             .unwrap();
 
-        let ctx = VerifierContext::default();
         let opts = ProverOpts::succinct();
 
+        pool.reset_diagnostics();
         let t0 = js_sys::Date::now();
         let info = pool
-            .prove_with_ctx_async(env, &ctx, MULTI_TEST_ELF, &opts)
+            .prove_with_opts_async(env, MULTI_TEST_ELF, &opts)
             .await
-            .expect("pool prove_with_ctx keccak union");
+            .expect("public pool prove_with_opts keccak union");
         let wall_ms = js_sys::Date::now() - t0;
 
         info.receipt
@@ -3523,6 +3580,7 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
             "pool_prove_session_keccak_union_smoke wall_ms={wall_ms:.0}"
         ));
+        log_webgpu_pool_diagnostics(pool.as_ref(), "pool_prove_session_keccak_union_smoke");
     }
 
     /// SP6d iter 8 — end-to-end pool prove on the xgboost R9 fixture.
