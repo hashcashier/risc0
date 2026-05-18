@@ -17,7 +17,10 @@ bit-exact for every cell they touch (`8,150,063` matches,
 path leaves `25,213,024` CPU-written cells uncovered. SP6d iter 10
 made the dependency-graph scheduler the default pool route; iter 12
 measured xgboost through that path at 102.82 s, effectively flat
-against the single-slot anchor.
+against the single-slot anchor. SP6f then cached HAL-created compute
+pipelines and measured xgboost at 103.35 s with 36 pipeline creations
+and 1,592 cache hits, so pipeline construction is not a material
+xgboost wall-time lever in Chrome.
 
 ## Final per-fixture matrix (2026-05-15)
 
@@ -29,7 +32,7 @@ Hardware: RTX 5090 (32 GB, SM120/Blackwell, CUDA 13.0), Chrome 148.
 | libm succinct | 510 ms | 3178 ms | 6.2× | 0.35 | refreshed 2026-05-15 (SP10) |
 | keccak_union_small succinct (4 seg + 9 keccak) | 7.7 s | 106.1 s | 13.7× | 0.35 | SP6 closed: `op=eval_check cpu_fallbacks=0` |
 | keccak_union succinct (KeccakUnion(3), 11 seg + 25 keccak) | 20.7 s | 303.2 s | 14.7× | 0.37 | SP6 closed (was SIGKILL > 3600 s) |
-| **xgboost succinct (multi-segment)** | **5.7 s** | **102.7 s** | **18.0×** | **0.44** | refreshed 2026-05-15; 2-slot default scheduled pool smoke 102.82 s on 2026-05-18 |
+| **xgboost succinct (multi-segment)** | **5.7 s** | **102.7 s** | **18.0×** | **0.44** | refreshed 2026-05-15; 2-slot default scheduled pool smoke 102.82 s; SP6f pipeline cache smoke 103.35 s |
 
 The xgboost ratio 18.0× is the closest current proxy for real-world
 workloads. R1 single-segment fixtures sit at 6.2-7.2× because their
@@ -68,8 +71,8 @@ Every measured fixture remains above 1.0× CUDA. Reasons:
 | SP7 iter 6d-g (replace rust_steps witgen) | -6 s of 103 s wall (~6%) | **BLOCKED**: generated WGSL is bit-exact for GPU-written cells, but only covers 8.15M of 33.36M CPU-written cells; whole-`step_Top` short-circuit leaves ~25.2M cpu_only cells invalid |
 | SP7 iter 6d-deeper (TopAccum split + GPU accumulate) | -22 s of 103 s wall (~21%) | Blocked: TopAccumChunk0 closure 1.7 MB is 4× over Chrome's 0.4 MB reachable-closure cliff; needs straight-line-arithmetic chunking pass MuxChunk doesn't provide |
 | SP8 iter 1 + iter 3 (parallel readbacks) | -wall on FRI | **LANDED 2026-05-15** -- noise on xgboost (FRI is small), larger fixtures TBD |
-| SP9 phase 1 + phase 2 take 3 (layout cache + min_binding_size collapse) | infrastructure | **LANDED 2026-05-15** -- pipeline-cache itself showed +1.2% regression (Chrome already dedupes); cache infrastructure is the foundation for SP6e |
-| SP6e bind-group cache (62 sites) | -2-3% smokes | Not started |
+| SP9 phase 1 + phase 2 take 3 (layout cache + min_binding_size collapse) | infrastructure | **LANDED 2026-05-15** -- layout identity is now stable enough for higher-level caches |
+| SP6e/SP6f object churn caches | -2-3% smokes | Bind-group diagnostics show 12,510 bind groups for 5,365 dispatches, but global bind-group caching is deferred until buffer lifetime/invalidation is explicit. Compute-pipeline cache landed with 1,592 hits on xgboost but wall stayed flat at 103.35 s |
 | Per-kernel WGSL improvements (SP3/SP6a revisits) | -5% per kernel | Parked (low priority per SP6c submission-bound diagnosis) |
 
 Composed expectation (per `project_sp7_witgen_savings_ceiling`):
@@ -77,7 +80,8 @@ Composed expectation (per `project_sp7_witgen_savings_ceiling`):
 - + SP7 iter 6d-d/e (rv32im witgen GPU): **17.0× CUDA** (-6 s)
 - + SP7 iter 6d-deeper (rv32im accum GPU): **13.5× CUDA** (-22 s)
 - + recursion circuit witgen+accum on GPU: **12.0× CUDA** (-12 s)
-- + SP6e bind-group cache + SP8 readback coalescing: **11× CUDA** (~3 s)
+- + safe bind-group cache + readback coalescing: **11× CUDA** remains
+  speculative; SP6f showed compute-pipeline caching alone is flat on xgboost
 - Floor estimate (single-tab single-GPU Chrome, per SP6c
   submission-bound diagnosis): **5-8× CUDA**
 

@@ -1126,6 +1126,12 @@ fn merge_webgpu_diagnostics(aggregate: &mut WebGpuDiagnostics, diagnostics: WebG
     aggregate.bind_group_creations = aggregate
         .bind_group_creations
         .saturating_add(diagnostics.bind_group_creations);
+    aggregate.compute_pipeline_creations = aggregate
+        .compute_pipeline_creations
+        .saturating_add(diagnostics.compute_pipeline_creations);
+    aggregate.compute_pipeline_cache_hits = aggregate
+        .compute_pipeline_cache_hits
+        .saturating_add(diagnostics.compute_pipeline_cache_hits);
     aggregate.gpu_dispatches = aggregate
         .gpu_dispatches
         .saturating_add(diagnostics.gpu_dispatches);

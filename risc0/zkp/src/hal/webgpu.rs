@@ -2403,6 +2403,8 @@ pub struct WebGpuDiagnostics {
     pub bind_group_layout_creations: u64,
     pub bind_group_layout_cache_hits: u64,
     pub bind_group_creations: u64,
+    pub compute_pipeline_creations: u64,
+    pub compute_pipeline_cache_hits: u64,
     pub gpu_dispatches: u64,
     pub cpu_mirrors: u64,
     pub cpu_fallbacks: u64,
@@ -2471,6 +2473,8 @@ struct WebGpuDiagnosticsState {
     bind_group_layout_creations: Cell<u64>,
     bind_group_layout_cache_hits: Cell<u64>,
     bind_group_creations: Cell<u64>,
+    compute_pipeline_creations: Cell<u64>,
+    compute_pipeline_cache_hits: Cell<u64>,
     gpu_dispatches: Cell<u64>,
     cpu_mirrors: Cell<u64>,
     cpu_fallbacks: Cell<u64>,
@@ -2494,6 +2498,8 @@ impl WebGpuDiagnosticsState {
             bind_group_layout_creations: self.bind_group_layout_creations.get(),
             bind_group_layout_cache_hits: self.bind_group_layout_cache_hits.get(),
             bind_group_creations: self.bind_group_creations.get(),
+            compute_pipeline_creations: self.compute_pipeline_creations.get(),
+            compute_pipeline_cache_hits: self.compute_pipeline_cache_hits.get(),
             gpu_dispatches: self.gpu_dispatches.get(),
             cpu_mirrors: self.cpu_mirrors.get(),
             cpu_fallbacks: self.cpu_fallbacks.get(),
@@ -2545,6 +2551,8 @@ impl WebGpuDiagnosticsState {
         self.bind_group_layout_creations.set(0);
         self.bind_group_layout_cache_hits.set(0);
         self.bind_group_creations.set(0);
+        self.compute_pipeline_creations.set(0);
+        self.compute_pipeline_cache_hits.set(0);
         self.gpu_dispatches.set(0);
         self.cpu_mirrors.set(0);
         self.cpu_fallbacks.set(0);
@@ -2601,6 +2609,14 @@ impl WebGpuDiagnosticsState {
 
     fn record_bind_group_creation(&self) {
         Self::add(&self.bind_group_creations, 1);
+    }
+
+    fn record_compute_pipeline_creation(&self) {
+        Self::add(&self.compute_pipeline_creations, 1);
+    }
+
+    fn record_compute_pipeline_cache_hit(&self) {
+        Self::add(&self.compute_pipeline_cache_hits, 1);
     }
 
     fn record_gpu_dispatch(&self, name: &'static str) {
@@ -4759,6 +4775,26 @@ fn compute_bind_group_layout_cache_key(
     h.finish()
 }
 
+fn compute_compute_pipeline_cache_key(
+    label: &'static str,
+    wgsl: &str,
+    entry_point: &str,
+    layout_keys: &[String],
+) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::Hasher;
+    let mut h = DefaultHasher::new();
+    h.write_usize(label.as_ptr() as usize);
+    h.write_usize(label.len());
+    h.write(wgsl.as_bytes());
+    h.write(entry_point.as_bytes());
+    h.write_usize(layout_keys.len());
+    for layout_key in layout_keys {
+        h.write(layout_key.as_bytes());
+    }
+    h.finish()
+}
+
 /// A concrete buffer binding used to create a WebGPU bind group.
 pub struct WebGpuBufferBinding<'a> {
     /// The WGSL binding number.
@@ -5126,6 +5162,15 @@ pub struct WebGpuHal {
     // the SAME layout INSTANCE as the bind groups dispatched against
     // them -- see 61d3163c9 failed-experiment ledger).
     bind_group_layout_cache: RefCell<BTreeMap<u64, web_sys::GpuBindGroupLayout>>,
+    // SP6f (2026-05-18): map HAL-created bind-group-layout JS objects
+    // back to their structural cache keys. Compute pipeline caching is only
+    // enabled when every supplied layout comes from this HAL, so cache hits
+    // cannot accidentally reuse a pipeline with an unrelated layout instance.
+    bind_group_layout_key_map: js_sys::WeakMap,
+    // SP6f (2026-05-18): cache compute pipelines after layout identity is
+    // stable. Pipelines depend only on WGSL, entry point, and bind-group
+    // layouts; unlike bind groups they do not retain per-proof buffers.
+    compute_kernel_cache: RefCell<BTreeMap<u64, WebGpuKernel>>,
 }
 
 /// Restores the previous GPU-authoritative mode when dropped.
@@ -5210,6 +5255,8 @@ impl WebGpuHal {
             ntt_roots_fwd: None,
             ntt_roots_rev: None,
             bind_group_layout_cache: RefCell::new(BTreeMap::new()),
+            bind_group_layout_key_map: js_sys::WeakMap::new(),
+            compute_kernel_cache: RefCell::new(BTreeMap::new()),
         };
         // SP-CR D15 (2026-05-12): allocate the NTT roots-of-unity tables once
         // at HAL init instead of per-dispatch. See struct field comment.
@@ -8038,6 +8085,10 @@ impl WebGpuHal {
         self.bind_group_layout_cache
             .borrow_mut()
             .insert(cache_key, layout.clone());
+        self.bind_group_layout_key_map.set(
+            layout.as_ref(),
+            &JsValue::from_str(&cache_key.to_string()),
+        );
         Ok(layout)
     }
 
@@ -8077,10 +8128,27 @@ impl WebGpuHal {
         entry_point: &str,
         bind_group_layouts: &[web_sys::GpuBindGroupLayout],
     ) -> Result<WebGpuKernel> {
-        let pipeline_desc = self.build_compute_pipeline_desc(label, wgsl, entry_point, bind_group_layouts);
-        Ok(WebGpuKernel {
+        let cache_key =
+            self.compute_kernel_cache_key(label, wgsl, entry_point, bind_group_layouts);
+        if let Some(cache_key) = cache_key {
+            if let Some(cached) = self.compute_kernel_cache.borrow().get(&cache_key).cloned() {
+                self.diagnostics.record_compute_pipeline_cache_hit();
+                return Ok(cached);
+            }
+        }
+
+        let pipeline_desc =
+            self.build_compute_pipeline_desc(label, wgsl, entry_point, bind_group_layouts);
+        let kernel = WebGpuKernel {
             pipeline: self.device.create_compute_pipeline(&pipeline_desc),
-        })
+        };
+        self.diagnostics.record_compute_pipeline_creation();
+        if let Some(cache_key) = cache_key {
+            self.compute_kernel_cache
+                .borrow_mut()
+                .insert(cache_key, kernel.clone());
+        }
+        Ok(kernel)
     }
 
     /// SP7 iter 6d-d (2026-05-15): async-compile the same kernel via
@@ -8098,7 +8166,17 @@ impl WebGpuHal {
         entry_point: &str,
         bind_group_layouts: &[web_sys::GpuBindGroupLayout],
     ) -> Result<WebGpuKernel> {
-        let pipeline_desc = self.build_compute_pipeline_desc(label, wgsl, entry_point, bind_group_layouts);
+        let cache_key =
+            self.compute_kernel_cache_key(label, wgsl, entry_point, bind_group_layouts);
+        if let Some(cache_key) = cache_key {
+            if let Some(cached) = self.compute_kernel_cache.borrow().get(&cache_key).cloned() {
+                self.diagnostics.record_compute_pipeline_cache_hit();
+                return Ok(cached);
+            }
+        }
+
+        let pipeline_desc =
+            self.build_compute_pipeline_desc(label, wgsl, entry_point, bind_group_layouts);
         let promise = self.device.create_compute_pipeline_async(&pipeline_desc);
         let future = wasm_bindgen_futures::JsFuture::from(promise);
         let pipeline_value = future
@@ -8107,7 +8185,33 @@ impl WebGpuHal {
         let pipeline: web_sys::GpuComputePipeline = pipeline_value
             .dyn_into()
             .map_err(|_| anyhow::anyhow!("createComputePipelineAsync resolved to non-pipeline value"))?;
-        Ok(WebGpuKernel { pipeline })
+        let kernel = WebGpuKernel { pipeline };
+        self.diagnostics.record_compute_pipeline_creation();
+        if let Some(cache_key) = cache_key {
+            self.compute_kernel_cache
+                .borrow_mut()
+                .insert(cache_key, kernel.clone());
+        }
+        Ok(kernel)
+    }
+
+    fn compute_kernel_cache_key(
+        &self,
+        label: &'static str,
+        wgsl: &str,
+        entry_point: &str,
+        bind_group_layouts: &[web_sys::GpuBindGroupLayout],
+    ) -> Option<u64> {
+        let layout_keys = bind_group_layouts
+            .iter()
+            .map(|layout| self.bind_group_layout_key_map.get(layout.as_ref()).as_string())
+            .collect::<Option<Vec<_>>>()?;
+        Some(compute_compute_pipeline_cache_key(
+            label,
+            wgsl,
+            entry_point,
+            layout_keys.as_slice(),
+        ))
     }
 
     fn build_compute_pipeline_desc(

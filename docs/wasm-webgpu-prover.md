@@ -86,6 +86,12 @@ scheduler by default. The legacy phased pool route remains available as
 `WebGpuProverPool::prove_with_ctx_sequential_async` for A/B comparisons.
 `WebGpuProverPool::diagnostics()` and `reset_diagnostics()` aggregate backend
 usage across all pool slots, matching the single-prover diagnostics workflow.
+Diagnostics include bind-group layout creations/cache hits, bind-group
+creations, and compute-pipeline creations/cache hits. The HAL caches compute
+pipelines when their bind-group layouts were created by the same HAL; this is
+safe because pipelines do not retain per-proof buffers. On the xgboost pooled
+smoke, the cache reduced repeated compute-pipeline creation to 36 creations
+and 1,592 hits, but wall time remained flat at 103.35 s.
 
 `default_prover()` is intentionally unavailable for browser WebGPU builds
 because it cannot synchronously request a `GPUAdapter`/`GPUDevice`.

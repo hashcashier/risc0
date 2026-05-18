@@ -224,7 +224,7 @@ mod tests {
             "{name}: WebGPU proof path used CPU-only HAL operations"
         );
         console_log!(
-            "browser-prove:webgpu {name}: gpu_dispatches={} cpu_mirrors={} cpu_fallbacks={} cpu_only_ops={} uploads={} upload_bytes={} device_copies={} device_copy_bytes={} readbacks={} readback_bytes={} bind_group_layout_creations={} bind_group_layout_cache_hits={} bind_group_creations={} buffers={} buffer_bytes={}",
+            "browser-prove:webgpu {name}: gpu_dispatches={} cpu_mirrors={} cpu_fallbacks={} cpu_only_ops={} uploads={} upload_bytes={} device_copies={} device_copy_bytes={} readbacks={} readback_bytes={} bind_group_layout_creations={} bind_group_layout_cache_hits={} bind_group_creations={} compute_pipeline_creations={} compute_pipeline_cache_hits={} buffers={} buffer_bytes={}",
             diagnostics.gpu_dispatches,
             diagnostics.cpu_mirrors,
             diagnostics.cpu_fallbacks,
@@ -238,6 +238,8 @@ mod tests {
             diagnostics.bind_group_layout_creations,
             diagnostics.bind_group_layout_cache_hits,
             diagnostics.bind_group_creations,
+            diagnostics.compute_pipeline_creations,
+            diagnostics.compute_pipeline_cache_hits,
             diagnostics.buffers_allocated,
             diagnostics.bytes_allocated,
         );
@@ -280,7 +282,7 @@ mod tests {
             "{name}: WebGPU pool proof path used CPU-only HAL operations"
         );
         console_log!(
-            "browser-prove:webgpu-pool {name}: gpu_dispatches={} cpu_mirrors={} cpu_fallbacks={} cpu_only_ops={} uploads={} upload_bytes={} device_copies={} device_copy_bytes={} readbacks={} readback_bytes={} bind_group_layout_creations={} bind_group_layout_cache_hits={} bind_group_creations={} buffers={} buffer_bytes={}",
+            "browser-prove:webgpu-pool {name}: gpu_dispatches={} cpu_mirrors={} cpu_fallbacks={} cpu_only_ops={} uploads={} upload_bytes={} device_copies={} device_copy_bytes={} readbacks={} readback_bytes={} bind_group_layout_creations={} bind_group_layout_cache_hits={} bind_group_creations={} compute_pipeline_creations={} compute_pipeline_cache_hits={} buffers={} buffer_bytes={}",
             diagnostics.gpu_dispatches,
             diagnostics.cpu_mirrors,
             diagnostics.cpu_fallbacks,
@@ -294,6 +296,8 @@ mod tests {
             diagnostics.bind_group_layout_creations,
             diagnostics.bind_group_layout_cache_hits,
             diagnostics.bind_group_creations,
+            diagnostics.compute_pipeline_creations,
+            diagnostics.compute_pipeline_cache_hits,
             diagnostics.buffers_allocated,
             diagnostics.bytes_allocated,
         );
@@ -570,10 +574,42 @@ mod tests {
             )
             .expect("second bind group");
 
+        const DIAGNOSTIC_COMPUTE_WGSL: &str = r#"
+struct Data {
+    words: array<u32>,
+};
+
+@group(0) @binding(0) var<storage, read_write> data: Data;
+
+@compute @workgroup_size(1)
+fn main() {
+    data.words[0u] = data.words[0u];
+}
+"#;
+
+        let _kernel_a = hal
+            .create_compute_kernel(
+                "diagnostic_compute_kernel",
+                DIAGNOSTIC_COMPUTE_WGSL,
+                "main",
+                &[layout.clone()],
+            )
+            .expect("first compute kernel");
+        let _kernel_b = hal
+            .create_compute_kernel(
+                "diagnostic_compute_kernel",
+                DIAGNOSTIC_COMPUTE_WGSL,
+                "main",
+                &[layout.clone()],
+            )
+            .expect("cached compute kernel");
+
         let diagnostics = hal.diagnostics();
         assert_eq!(diagnostics.bind_group_layout_creations, 1);
         assert_eq!(diagnostics.bind_group_layout_cache_hits, 1);
         assert_eq!(diagnostics.bind_group_creations, 2);
+        assert_eq!(diagnostics.compute_pipeline_creations, 1);
+        assert_eq!(diagnostics.compute_pipeline_cache_hits, 1);
     }
 
     #[wasm_bindgen_test(async)]
@@ -3684,6 +3720,7 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
             "pool_xgboost_smoke wall_ms={wall_ms:.0}"
         ));
+        log_webgpu_pool_diagnostics(&pool, "pool_xgboost_smoke");
     }
 
     #[wasm_bindgen_test(async)]
