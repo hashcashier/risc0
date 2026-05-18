@@ -943,6 +943,40 @@ fn main() {
     }
 
     #[wasm_bindgen_test(async)]
+    async fn webgpu_prover_commit_group_fuses_copy_into_interpolate() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        let witness_values = (0..8).map(|idx| elem(idx + 20_000)).collect::<Vec<_>>();
+        let witness = hal.copy_from_elem("webgpu_fused_commit_witness", &witness_values);
+        let _gpu_scope = hal.gpu_authoritative_scope(true);
+        let mut prover = ZkpProver::new(&hal, &TINY_EVAL_TAPSET);
+        prover.set_po2(3);
+
+        hal.reset_diagnostics();
+        prover
+            .commit_group_async(0, &witness)
+            .await
+            .expect("fused copy/interpolate commit must succeed");
+        assert_eq!(
+            witness.to_vec(),
+            witness_values,
+            "copy-preserving commit must not mutate the witness"
+        );
+        let diagnostics = hal.diagnostics();
+        assert_eq!(
+            diagnostics.device_copies, 0,
+            "fused copy/interpolate commit should not record a coeffs device copy: {diagnostics:?}"
+        );
+        assert!(
+            diagnostics.device_copy_sources.is_empty(),
+            "fused copy/interpolate commit should not record device-copy sources: {diagnostics:?}"
+        );
+    }
+
+    #[wasm_bindgen_test(async)]
     async fn webgpu_hal_eval_check_poly_ext_matches_cpu() {
         console_error_panic_hook::set_once();
 

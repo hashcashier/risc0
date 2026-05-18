@@ -108,18 +108,22 @@ Empty RV32IM scatter ranges are also treated as true no-ops before fallback
 accounting, so xgboost now reports `cpu_fallbacks=0`; the change is a
 diagnostic cleanup and wall time stayed noisy/flat.
 Device-to-device copy diagnostics now attribute copies by destination buffer.
-The xgboost pool smoke still reports 7.22 GB of device-copy traffic, but
-7,222,591,488 bytes of that total are copies into `coeffs`; only 32,768 bytes
-come from `final_coeffs`. The next high-value target is coefficient
-materialization in the `make_coeffs` / `eltwise_copy_elem` path, subject to
-per-group ownership/lifecycle checks before any in-place mutation.
-Dead-after-commit groups now use an explicit in-place WebGPU commit path:
+The xgboost pool smoke reported 7.22 GB of device-copy traffic before SP6l,
+with 7,222,591,488 bytes of that total copied into `coeffs`; only 32,768 bytes
+came from `final_coeffs`. Dead-after-commit groups now use an explicit
+in-place WebGPU commit path:
 RV32IM `code`/`accum`, recursion `accum`, and Keccak `code`/`data`/`accum`.
 On xgboost this reduced device copies from 128 to 85 and device-copy bytes
 from 7.22 GB to 5.76 GB, while wall time stayed flat at 101.97 s. RV32IM
 `data` and recursion `ctrl`/`data` still use the copy-preserving path because
 later accumulation reads those witnesses after their Merkle roots have seeded
-the transcript.
+the transcript. The copy-preserving path now fuses coefficient materialization
+into the first inverse NTT pass, leaving the witness readable while avoiding the
+large `coeffs` copy. Xgboost now reports only `final_coeffs` device copies:
+32 copies / 32,768 bytes, with no `coeffs` copies. Wall time stayed flat/noisy
+at 102.26 s and uploads stayed near 10.91 GB, so device-copy cleanup is closed
+as a wall-time lever; the next material target is CPU-originated
+RV32IM witness/accumulation work and its upload path.
 
 `default_prover()` is intentionally unavailable for browser WebGPU builds
 because it cannot synchronously request a `GPUAdapter`/`GPUDevice`.

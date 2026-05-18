@@ -3913,6 +3913,129 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+const BATCH_INTERPOLATE_NTT_FROM_WGSL: &str = r#"
+const P: u32 = 2013265921u;
+const M: u32 = 2281701377u;
+const MONT_ONE: u32 = 268435454u;
+const LINEAR_DISPATCH_STRIDE: u32 = 16776960u;
+
+struct ElemBuffer {
+    data: array<u32>,
+};
+
+struct Params {
+    n_bits: u32,
+    row_count: u32,
+    total_pairs: u32,
+    output_base: u32,
+    input_base: u32,
+    roots_base: u32,
+    _pad0: u32,
+    _pad1: u32,
+};
+
+@group(0) @binding(0) var<storage, read_write> output: ElemBuffer;
+@group(0) @binding(1) var<storage, read> input: ElemBuffer;
+@group(0) @binding(2) var<storage, read> roots: ElemBuffer;
+@group(0) @binding(3) var<uniform> params: Params;
+
+fn add(lhs: u32, rhs: u32) -> u32 {
+    let sum = lhs + rhs;
+    if (sum >= P) {
+        return sum - P;
+    }
+    return sum;
+}
+
+fn sub(lhs: u32, rhs: u32) -> u32 {
+    if (lhs >= rhs) {
+        return lhs - rhs;
+    }
+    return lhs + P - rhs;
+}
+
+fn mul_wide(lhs: u32, rhs: u32) -> vec2<u32> {
+    let lhs_lo = lhs & 0xffffu;
+    let lhs_hi = lhs >> 16u;
+    let rhs_lo = rhs & 0xffffu;
+    let rhs_hi = rhs >> 16u;
+
+    let p0 = lhs_lo * rhs_lo;
+    let p1 = lhs_hi * rhs_lo;
+    let p2 = lhs_lo * rhs_hi;
+    let p3 = lhs_hi * rhs_hi;
+
+    let carry = (p0 >> 16u) + (p1 & 0xffffu) + (p2 & 0xffffu);
+    let lo = (p0 & 0xffffu) | ((carry & 0xffffu) << 16u);
+    let hi = p3 + (p1 >> 16u) + (p2 >> 16u) + (carry >> 16u);
+    return vec2<u32>(lo, hi);
+}
+
+fn mul(lhs: u32, rhs: u32) -> u32 {
+    let product = mul_wide(lhs, rhs);
+    let low = 0u - product.x;
+    let red = M * low;
+    let red_product = mul_wide(red, P);
+    var ret = product.y + red_product.y;
+    if (product.x + red_product.x < product.x) {
+        ret = ret + 1u;
+    }
+    if (ret >= P) {
+        return ret - P;
+    }
+    return ret;
+}
+
+fn pow_elem(base: u32, exponent: u32) -> u32 {
+    var x = base;
+    var n = exponent;
+    var total = MONT_ONE;
+    while (n != 0u) {
+        if ((n & 1u) == 1u) {
+            total = mul(total, x);
+        }
+        n = n >> 1u;
+        x = mul(x, x);
+    }
+    return total;
+}
+
+fn linear_global_id(gid: vec3<u32>) -> u32 {
+    return gid.x + gid.y * LINEAR_DISPATCH_STRIDE;
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = linear_global_id(gid);
+    if (idx >= params.total_pairs) {
+        return;
+    }
+
+    let row_size = 1u << params.n_bits;
+    let pairs_per_row = row_size >> 1u;
+    let row = idx / pairs_per_row;
+    if (row >= params.row_count) {
+        return;
+    }
+    let pair = idx - row * pairs_per_row;
+    let s_size = 1u << (params.n_bits - 1u);
+    let g = pair / s_size;
+    let s = pair - g * s_size;
+    let input_row_base = params.input_base + row * row_size;
+    let output_row_base = params.output_base + row * row_size;
+    let input_idx1 = input_row_base + g * 2u * s_size + s;
+    let input_idx2 = input_idx1 + s_size;
+    let output_idx1 = output_row_base + g * 2u * s_size + s;
+    let output_idx2 = output_idx1 + s_size;
+    let cur_mul = pow_elem(roots.data[params.roots_base + params.n_bits], s);
+    let a = input.data[input_idx1];
+    let b = input.data[input_idx2];
+
+    output.data[output_idx1] = add(a, b);
+    output.data[output_idx2] = mul(sub(a, b), cur_mul);
+}
+"#;
+
 const NTT_NORMALIZE_WGSL: &str = r#"
 const P: u32 = 2013265921u;
 const M: u32 = 2281701377u;
@@ -7128,6 +7251,25 @@ impl WebGpuHal {
             && (io.size() == 0 || (io.raw_buffer().is_some() && self.storage_binding_fits(io)))
     }
 
+    pub(crate) fn can_dispatch_batch_interpolate_ntt_from(
+        &self,
+        output: &WebGpuBuffer<BabyBearElem>,
+        input: &WebGpuBuffer<BabyBearElem>,
+    ) -> bool {
+        if !self.batch_interpolate_ntt_gpu_enabled.get() || output.size() != input.size() {
+            return false;
+        }
+        if output.size() == 0 {
+            return true;
+        }
+        let (Some(output_gpu), Some(input_gpu)) = (output.raw_buffer(), input.raw_buffer()) else {
+            return false;
+        };
+        output_gpu != input_gpu
+            && self.storage_binding_fits(output)
+            && self.storage_binding_fits(input)
+    }
+
     pub(crate) fn can_dispatch_zk_shift(&self, io: &WebGpuBuffer<BabyBearElem>) -> bool {
         self.zk_shift_gpu_enabled.get()
             && (io.size() == 0 || (io.raw_buffer().is_some() && self.storage_binding_fits(io)))
@@ -7318,6 +7460,23 @@ impl WebGpuHal {
         }
         self.batch_interpolate_ntt(io, count);
         Ok(())
+    }
+
+    /// Copy-preserving inverse NTT used by WebGPU `make_coeffs`: reads the
+    /// witness from `input` and writes the first inverse-NTT stage directly to
+    /// `output`, avoiding a standalone device-to-device copy into coeffs.
+    pub(crate) async fn batch_interpolate_ntt_from_async(
+        &self,
+        output: &WebGpuBuffer<BabyBearElem>,
+        input: &WebGpuBuffer<BabyBearElem>,
+        count: usize,
+    ) -> Result<bool> {
+        if !self.gpu_authoritative()
+            || !self.can_dispatch_batch_interpolate_ntt_from(output, input)
+        {
+            return Ok(false);
+        }
+        self.dispatch_batch_interpolate_ntt_from(output, input, count)
     }
 
     /// Async-safe variant of [`Hal::zk_shift`].
@@ -10515,6 +10674,270 @@ impl WebGpuHal {
             .expect("WebGPU inverse NTT size exceeds u32")
             .div_ceil(256);
         self.dispatch_compute_1d(&kernel, &bind_group, workgroups);
+        Ok(true)
+    }
+
+    fn dispatch_batch_interpolate_ntt_from(
+        &self,
+        output: &WebGpuBuffer<BabyBearElem>,
+        input: &WebGpuBuffer<BabyBearElem>,
+        count: usize,
+    ) -> Result<bool> {
+        if !self.batch_interpolate_ntt_gpu_enabled.get() {
+            return Ok(false);
+        }
+        if output.size() == 0 {
+            output.mark_gpu_dirty();
+            self.record_gpu_result_authoritative("batch_interpolate_ntt", true);
+            return Ok(true);
+        }
+
+        let (Some(output_gpu), Some(input_gpu)) = (output.raw_buffer(), input.raw_buffer()) else {
+            return Ok(false);
+        };
+        if output_gpu == input_gpu
+            || output.size() != input.size()
+            || !self.storage_binding_fits(output)
+            || !self.storage_binding_fits(input)
+        {
+            return Ok(false);
+        }
+
+        let row_size = output.size() / count;
+        assert_eq!(row_size * count, output.size());
+        let n_bits = crate::core::log2_ceil(row_size);
+        assert_eq!(row_size, 1 << n_bits);
+        assert!(n_bits < BabyBearElem::MAX_ROU_PO2);
+        if n_bits == 0 {
+            return Ok(false);
+        }
+
+        input.sync_cpu_to_gpu(self)?;
+
+        let roots = self
+            .ntt_roots_rev
+            .as_ref()
+            .ok_or_else(|| anyhow!("WebGPU NTT roots_rev not initialized"))?;
+        let Some(roots_gpu) = roots.raw_buffer() else {
+            return Ok(false);
+        };
+
+        let pairs_per_row = row_size / 2;
+        let total_pairs = pairs_per_row
+            .checked_mul(count)
+            .ok_or_else(|| anyhow!("WebGPU fused inverse NTT total pair count overflow"))?;
+        let workgroups = u32::try_from(total_pairs)
+            .expect("WebGPU fused inverse NTT total pairs exceeds u32")
+            .div_ceil(256);
+        let (workgroups_x, workgroups_y) = if workgroups <= WEBGPU_MAX_WORKGROUPS_PER_DIMENSION {
+            (workgroups, 1)
+        } else {
+            let workgroups_y = workgroups.div_ceil(WEBGPU_MAX_WORKGROUPS_PER_DIMENSION);
+            assert!(
+                workgroups_y <= WEBGPU_MAX_WORKGROUPS_PER_DIMENSION,
+                "WebGPU fused inverse NTT 1D dispatch exceeds portable 2D workgroup capacity"
+            );
+            (WEBGPU_MAX_WORKGROUPS_PER_DIMENSION, workgroups_y)
+        };
+
+        let first_params = [
+            u32::try_from(n_bits).expect("WebGPU fused inverse NTT n_bits exceeds u32"),
+            u32::try_from(count).expect("WebGPU fused inverse NTT row count exceeds u32"),
+            u32::try_from(total_pairs)
+                .expect("WebGPU fused inverse NTT total pairs exceeds u32"),
+            u32::try_from(output.elem_offset)
+                .expect("WebGPU fused inverse NTT output offset exceeds u32"),
+            u32::try_from(input.elem_offset)
+                .expect("WebGPU fused inverse NTT input offset exceeds u32"),
+            u32::try_from(roots.elem_offset)
+                .expect("WebGPU fused inverse NTT roots offset exceeds u32"),
+            0,
+            0,
+        ];
+        let first_params = self.create_uniform_buffer(
+            "webgpu_ntt_interpolate_from_params",
+            bytemuck::cast_slice(&first_params),
+        )?;
+        let first_layout = self.create_bind_group_layout(
+            "webgpu_ntt_interpolate_from_layout",
+            &[
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::read_only_storage(1, 0),
+                WebGpuBindingLayout::read_only_storage(2, 0),
+                WebGpuBindingLayout::uniform(3, 32),
+            ],
+        )?;
+        let first_kernel = self.create_compute_kernel(
+            "webgpu_ntt_interpolate_from",
+            BATCH_INTERPOLATE_NTT_FROM_WGSL,
+            "main",
+            &[first_layout.clone()],
+        )?;
+        let first_bind_group = self.create_bind_group(
+            "webgpu_ntt_interpolate_from_bind_group",
+            &first_layout,
+            &[
+                WebGpuBufferBinding::new(0, output_gpu),
+                WebGpuBufferBinding::new(1, input_gpu),
+                WebGpuBufferBinding::new(2, roots_gpu),
+                WebGpuBufferBinding {
+                    binding: 3,
+                    buffer: &first_params,
+                    offset: 0,
+                    size: Some(32),
+                },
+            ],
+        )?;
+
+        let ntt_layout = self.create_bind_group_layout(
+            "webgpu_ntt_step_dynamic_layout",
+            &[
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::read_only_storage(1, 0),
+                WebGpuBindingLayout::uniform_dynamic(2, 32),
+            ],
+        )?;
+        let ntt_kernel = self.create_compute_kernel(
+            "webgpu_ntt_step_dynamic",
+            NTT_STEP_WGSL,
+            "main",
+            &[ntt_layout.clone()],
+        )?;
+        let params_len = mem::size_of::<[u32; 8]>();
+        let params_stride = align_up(
+            params_len,
+            self.min_uniform_buffer_offset_alignment as usize,
+        );
+        let mut params_bytes = Vec::new();
+        let mut params_offsets: Vec<u32> = Vec::with_capacity(n_bits.saturating_sub(1) as usize);
+        for s_bits in (1..n_bits).rev() {
+            let params = [
+                u32::try_from(n_bits).expect("WebGPU fused inverse NTT n_bits exceeds u32"),
+                u32::try_from(s_bits).expect("WebGPU fused inverse NTT s_bits exceeds u32"),
+                u32::try_from(count).expect("WebGPU fused inverse NTT row count exceeds u32"),
+                u32::try_from(total_pairs)
+                    .expect("WebGPU fused inverse NTT total pairs exceeds u32"),
+                u32::try_from(output.elem_offset)
+                    .expect("WebGPU fused inverse NTT output offset exceeds u32"),
+                u32::try_from(roots.elem_offset)
+                    .expect("WebGPU fused inverse NTT roots offset exceeds u32"),
+                1,
+                0,
+            ];
+            let params_offset = params_bytes.len();
+            params_bytes.resize(params_offset + params_stride, 0);
+            params_bytes[params_offset..params_offset + params_len]
+                .copy_from_slice(bytemuck::cast_slice(&params));
+            params_offsets.push(
+                u32::try_from(params_offset).map_err(|_| {
+                    anyhow!("WebGPU fused inverse NTT params offset exceeds u32")
+                })?,
+            );
+        }
+        let ntt_bind_group = if params_offsets.is_empty() {
+            None
+        } else {
+            let params_buf = self.create_buffer(
+                "webgpu_ntt_step_params",
+                params_bytes.len() as u64,
+                WEBGPU_BUFFER_USAGE_UNIFORM | WEBGPU_BUFFER_USAGE_COPY_DST,
+            )?;
+            self.write_buffer_named(
+                &params_buf,
+                "webgpu_ntt_step_params",
+                0,
+                params_bytes.as_slice(),
+            )?;
+            Some(self.create_bind_group(
+                "webgpu_ntt_step_bind_group",
+                &ntt_layout,
+                &[
+                    WebGpuBufferBinding::new(0, output_gpu),
+                    WebGpuBufferBinding::new(1, roots_gpu),
+                    WebGpuBufferBinding {
+                        binding: 2,
+                        buffer: &params_buf,
+                        offset: 0,
+                        size: Some(params_len as u64),
+                    },
+                ],
+            )?)
+        };
+
+        let encoder = self.device.create_command_encoder();
+        let pass = encoder.begin_compute_pass();
+        pass.set_pipeline(&first_kernel.pipeline);
+        pass.set_bind_group(0, Some(&first_bind_group));
+        pass.dispatch_workgroups_with_workgroup_count_y_and_workgroup_count_z(
+            workgroups_x,
+            workgroups_y,
+            1,
+        );
+        if let Some(bind_group) = ntt_bind_group.as_ref() {
+            pass.set_pipeline(&ntt_kernel.pipeline);
+            for params_offset in &params_offsets {
+                let dynamic_offsets = [*params_offset];
+                pass.set_bind_group_with_u32_slice_and_u32_and_dynamic_offsets_data_length(
+                    0,
+                    Some(bind_group),
+                    &dynamic_offsets,
+                    0,
+                    1,
+                )
+                .map_err(js_error)?;
+                pass.dispatch_workgroups_with_workgroup_count_y_and_workgroup_count_z(
+                    workgroups_x,
+                    workgroups_y,
+                    1,
+                );
+            }
+        }
+        pass.end();
+        self.submit(encoder.finish());
+
+        let norm = BabyBearElem::new(row_size as u32).inv().as_u32_montgomery();
+        let params = [
+            u32::try_from(output.size()).expect("WebGPU inverse NTT size exceeds u32"),
+            u32::try_from(output.elem_offset).expect("WebGPU inverse NTT output offset exceeds u32"),
+            norm,
+            0,
+        ];
+        let params = self.create_uniform_buffer(
+            "webgpu_ntt_normalize_params",
+            bytemuck::cast_slice(&params),
+        )?;
+        let layout = self.create_bind_group_layout(
+            "webgpu_ntt_normalize_layout",
+            &[
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::uniform(1, 16),
+            ],
+        )?;
+        let kernel = self.create_compute_kernel(
+            "webgpu_ntt_normalize",
+            NTT_NORMALIZE_WGSL,
+            "main",
+            &[layout.clone()],
+        )?;
+        let bind_group = self.create_bind_group(
+            "webgpu_ntt_normalize_bind_group",
+            &layout,
+            &[
+                WebGpuBufferBinding::new(0, output_gpu),
+                WebGpuBufferBinding {
+                    binding: 1,
+                    buffer: &params,
+                    offset: 0,
+                    size: Some(16),
+                },
+            ],
+        )?;
+        let workgroups = u32::try_from(output.size())
+            .expect("WebGPU inverse NTT size exceeds u32")
+            .div_ceil(256);
+        self.dispatch_compute_1d(&kernel, &bind_group, workgroups);
+        self.record_gpu_result_authoritative("batch_interpolate_ntt", true);
+        output.mark_gpu_dirty();
         Ok(true)
     }
 

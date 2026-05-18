@@ -55,8 +55,20 @@ async fn make_coeffs_async(
 ) -> anyhow::Result<crate::hal::webgpu::WebGpuBuffer<risc0_core::field::baby_bear::BabyBearElem>> {
     scope!("make_coeffs");
     let coeffs = hal.alloc_elem("coeffs", witness.size());
-    if hal.can_dispatch_batch_interpolate_ntt(&coeffs) && hal.can_dispatch_zk_shift(&coeffs) {
+    if hal.gpu_authoritative()
+        && hal.can_dispatch_batch_interpolate_ntt_from(&coeffs, witness)
+        && hal.can_dispatch_zk_shift(&coeffs)
+        && hal
+            .batch_interpolate_ntt_from_async(&coeffs, witness, count)
+            .await?
+    {
+        #[cfg(not(feature = "circuit_debug"))]
+        hal.zk_shift_async(&coeffs, count).await?;
+    } else if hal.can_dispatch_batch_interpolate_ntt(&coeffs)
+        && hal.can_dispatch_zk_shift(&coeffs)
+    {
         hal.eltwise_copy_elem(&coeffs, witness);
+        finish_make_coeffs_async(hal, &coeffs, count).await?;
     } else {
         // Large recursion groups can exceed WebGPU's safe storage binding
         // size. Keep the CPU mirror current for the initial witness copy so
@@ -64,8 +76,8 @@ async fn make_coeffs_async(
         // which may still contain invalid sentinels before interpolation.
         let _cpu_mirror_scope = hal.gpu_authoritative_scope(false);
         hal.eltwise_copy_elem(&coeffs, witness);
+        finish_make_coeffs_async(hal, &coeffs, count).await?;
     }
-    finish_make_coeffs_async(hal, &coeffs, count).await?;
     Ok(coeffs)
 }
 
