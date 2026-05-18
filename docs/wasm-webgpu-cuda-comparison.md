@@ -1,6 +1,7 @@
 # Browser WebGPU vs Native CUDA Proving
 
-Status: **SP11 closeout 2026-05-15.** Cumulative phase work
+Status: **SP11 closeout 2026-05-15, with follow-on evidence through
+2026-05-18.** Cumulative phase work
 (SP3–SP9) brings xgboost wall to 102.7 s (18.0× CUDA). SP6 closed
 2026-05-15: KeccakUnion(3) eval_check fully on GPU
 (`gpu_dispatches=107 cpu_fallbacks=0`) and completes in 303 s vs
@@ -10,9 +11,13 @@ SP8 iter 3 (parallel FRI prove_batch_async via try_join_all,
 `e2540dcc5`) landed. SP7 iter 6d-a/b/c (`5d4a37d7c`, `332972022`,
 `9de42bdd1`, `3e154206e`) landed: vendored exec_TopChunk0 WGSL,
 Tint-validated kernel, probe-mode dispatch behind a process-global
-flag. iter-6d-c full deployment is gated on the ~60 s Tint compile
-cost (see `project_sp7_witgen_savings_ceiling`) and is iter-6d-d/e
-follow-on work.
+flag. Later SP7 iter 6d-g proved the generated WGSL writes are
+bit-exact for every cell they touch (`8,150,063` matches,
+`mismatches=0`), but replacement remains blocked because the GPU
+path leaves `25,213,024` CPU-written cells uncovered. SP6d iter 10
+made the dependency-graph scheduler the default pool route; iter 12
+measured xgboost through that path at 102.82 s, effectively flat
+against the single-slot anchor.
 
 ## Final per-fixture matrix (2026-05-15)
 
@@ -24,7 +29,7 @@ Hardware: RTX 5090 (32 GB, SM120/Blackwell, CUDA 13.0), Chrome 148.
 | libm succinct | 510 ms | 3178 ms | 6.2× | 0.35 | refreshed 2026-05-15 (SP10) |
 | keccak_union_small succinct (4 seg + 9 keccak) | 7.7 s | 106.1 s | 13.7× | 0.35 | SP6 closed: `op=eval_check cpu_fallbacks=0` |
 | keccak_union succinct (KeccakUnion(3), 11 seg + 25 keccak) | 20.7 s | 303.2 s | 14.7× | 0.37 | SP6 closed (was SIGKILL > 3600 s) |
-| **xgboost succinct (multi-segment)** | **5.7 s** | **102.7 s** | **18.0×** | **0.44** | refreshed 2026-05-15 |
+| **xgboost succinct (multi-segment)** | **5.7 s** | **102.7 s** | **18.0×** | **0.44** | refreshed 2026-05-15; 2-slot default scheduled pool smoke 102.82 s on 2026-05-18 |
 
 The xgboost ratio 18.0× is the closest current proxy for real-world
 workloads. R1 single-segment fixtures sit at 6.2-7.2× because their
@@ -43,7 +48,7 @@ Smoke `webgpu_pool_two_concurrent_succinct_proves_smoke` runs two independent su
 | Per-prove throughput | 3231 ms | 2935 ms (1.10× faster) |
 | Per-slot gpu_idle_ratio | 0.34 | 0.15-0.19 |
 
-This confirms the multi-device concurrency hypothesis: two `web_sys::GpuDevice` instances run dispatches in parallel through independent command queues. The 7× compute headroom is exploitable.
+This confirms that two `web_sys::GpuDevice` instances can feed independent command queues and raise utilization. Follow-on SP6d evidence narrows the performance claim: homogeneous same-GPU work and lift/join-heavy xgboost stay flat, while heterogeneous KeccakUnion-style dependency graphs can see a modest scheduler win (~8% in iter 9).
 
 ## Structural residuals (still > 1.0× CUDA)
 
@@ -58,9 +63,9 @@ Every measured fixture remains above 1.0× CUDA. Reasons:
 | Phase | Target win | Status |
 |---|---:|---|
 | SP6 KeccakUnion eval_check GPU | -keccak fallback | **CLOSED 2026-05-15**: KU(1) 13.7×, KU(3) 14.7× |
-| SP6d multi-device pool | -25% on segment∥anything | Hit po2_18 wasm32 ceiling; dependency-graph scheduler iter 9 lands a ~8% heterogeneous win |
+| SP6d multi-device pool | -25% on segment∥anything | Hit po2_18 wasm32 ceiling; dependency-graph scheduler iter 9 lands a ~8% heterogeneous win; iter 10 makes the scheduler the default pool route; iter 12 xgboost pool smoke is flat at 102.82 s |
 | SP7 iter 6d-a/b/c (probe-mode GPU witgen) | infrastructure | **LANDED 2026-05-15** -- vendored exec_TopChunk0 WGSL, Tint-valid kernel, probe behind static flag |
-| SP7 iter 6d-d/e (replace rust_steps witgen) | -6 s of 103 s wall (~6%) | Gated on solving the ~60 s Tint compile cost (one-time per session) |
+| SP7 iter 6d-g (replace rust_steps witgen) | -6 s of 103 s wall (~6%) | **BLOCKED**: generated WGSL is bit-exact for GPU-written cells, but only covers 8.15M of 33.36M CPU-written cells; whole-`step_Top` short-circuit leaves ~25.2M cpu_only cells invalid |
 | SP7 iter 6d-deeper (TopAccum split + GPU accumulate) | -22 s of 103 s wall (~21%) | Blocked: TopAccumChunk0 closure 1.7 MB is 4× over Chrome's 0.4 MB reachable-closure cliff; needs straight-line-arithmetic chunking pass MuxChunk doesn't provide |
 | SP8 iter 1 + iter 3 (parallel readbacks) | -wall on FRI | **LANDED 2026-05-15** -- noise on xgboost (FRI is small), larger fixtures TBD |
 | SP9 phase 1 + phase 2 take 3 (layout cache + min_binding_size collapse) | infrastructure | **LANDED 2026-05-15** -- pipeline-cache itself showed +1.2% regression (Chrome already dedupes); cache infrastructure is the foundation for SP6e |

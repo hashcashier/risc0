@@ -84,6 +84,8 @@ receipt.verify(IMAGE_ID)?;
 and routes the pool's async proving entrypoints through the dependency-graph
 scheduler by default. The legacy phased pool route remains available as
 `WebGpuProverPool::prove_with_ctx_sequential_async` for A/B comparisons.
+`WebGpuProverPool::diagnostics()` and `reset_diagnostics()` aggregate backend
+usage across all pool slots, matching the single-prover diagnostics workflow.
 
 `default_prover()` is intentionally unavailable for browser WebGPU builds
 because it cannot synchronously request a `GPUAdapter`/`GPUDevice`.
