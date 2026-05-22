@@ -1,6 +1,6 @@
 # WASM/WebGPU Prover Learnings, Methods, And Results
 
-Status: paused at user request on 2026-05-11.
+Status: paused 2026-05-11; performance follow-up run `wasm-webgpu-prover-perf` resumed 2026-05-12. R1 smoke matrix refreshed (ratios 7-9× small, 15.7× KeccakUnion(1)) — see `docs/wasm-webgpu-cuda-comparison.md` and `.recursive/run/wasm-webgpu-prover-perf/evidence/perf/r1-baselines/`. SP2 generator seed landed. xgboost SP-CR resolved via D14+D15+D16 GPU-only fix (explicit `GPUBuffer.destroy()` via Rc-owned wrapper releases cumulative VRAM between lifts; xgboost verifies in 117.92 s on full GPU path / ~21× native CUDA). Governed by the Correctness-First Discipline below.
 
 This document records what we built, how we validated it, what we learned, and
 where the implementation still differs from native CUDA/Metal proving. It is
@@ -9,6 +9,18 @@ browser prover is capable of producing standard succinct STARK receipts through
 the existing verifier path for the proof shapes we exercised, and the design is
 now aligned with native local proving. The remaining work is mostly exhaustive
 coverage, browser portability, and performance.
+
+## Correctness-First Discipline (added 2026-05-12)
+
+Any correctness regression detected during performance work — verifier
+rejection, proof panic before receipt, cycle drift, new `cpu_only_ops` or
+`cpu_fallbacks` sites beyond the documented ledger, or Chrome WebGPU device
+loss — **IMMEDIATELY halts all performance work** until the regression is
+fixed under the `SP-CR` (Correctness Regression triage) sub-phase. SP-CR
+preempts whichever performance sub-phase is in flight, runs reproduce →
+root-cause → fix → verify, and only then does the preempted sub-phase resume.
+xgboost SP-CR resolved 2026-05-12 via D14+D15+D16 GPU-only fix in `risc0/zkp/src/hal/webgpu.rs` (`onuncapturederror` listener, cached NTT roots, `Rc<WebGpuBufferOwner>` with Drop-destroy for explicit GPU memory release between lifts). xgboost succinct receipt verifies in 117.92 s on the full GPU path (~21× native CUDA). The earlier D12 cpu_mirror workaround was rejected by user directive and reverted.
+Full text: `.recursive/run/wasm-webgpu-prover-perf/addenda/02-to-be-plan.addendum-01.md`.
 
 ## Executive Summary
 

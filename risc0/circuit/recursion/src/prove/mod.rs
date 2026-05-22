@@ -53,6 +53,91 @@ use crate::{
 
 pub use self::program::Program;
 
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn recursion_accum_wgsl_modules_for_test() -> (String, String) {
+    self::hal::webgpu::recursion_accum_wgsl_modules_for_test()
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn recursion_exec_poseidon2_chain_wgsl_module_for_test() -> String {
+    self::hal::webgpu::recursion_exec_poseidon2_chain_wgsl_module_for_test()
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn recursion_exec_poseidon2_chain_wom_probe_wgsl_module_for_test() -> String {
+    self::hal::webgpu::recursion_exec_poseidon2_chain_wom_probe_wgsl_module_for_test()
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn recursion_exec_poseidon2_chain_wom_scatter_probe_wgsl_module_for_test() -> String {
+    self::hal::webgpu::recursion_exec_poseidon2_chain_wom_scatter_probe_wgsl_module_for_test()
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn recursion_exec_micro_ops_wom_scatter_probe_wgsl_module_for_test() -> String {
+    self::hal::webgpu::recursion_exec_micro_ops_wom_scatter_probe_wgsl_module_for_test()
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn recursion_exec_macro_ops_wom_scatter_probe_wgsl_module_for_test() -> String {
+    self::hal::webgpu::recursion_exec_macro_ops_wom_scatter_probe_wgsl_module_for_test()
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn recursion_verify_mem_wom_probe_wgsl_module_for_test() -> String {
+    self::hal::webgpu::recursion_verify_mem_wom_probe_wgsl_module_for_test()
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn recursion_checked_bytes_wom_scatter_probe_wgsl_module_for_test() -> String {
+    self::hal::webgpu::recursion_checked_bytes_wom_scatter_probe_wgsl_module_for_test()
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn recursion_wom_generated_row_coverage_for_test() -> Vec<(String, usize, usize)> {
+    self::hal::webgpu::recursion_wom_generated_row_coverage_for_test()
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn set_recursion_wom_sort_profile_enabled(enabled: bool) {
+    self::hal::webgpu::set_recursion_wom_sort_profile_enabled(enabled)
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn recursion_wom_sort_profile_snapshot() -> [u64; 7] {
+    self::hal::webgpu::recursion_wom_sort_profile_snapshot()
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn set_recursion_witgen_post_zeroize_hook_probe_enabled(enabled: bool) {
+    self::hal::webgpu::set_recursion_witgen_post_zeroize_hook_probe_enabled(enabled)
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn recursion_witgen_post_zeroize_hook_calls() -> u64 {
+    self::hal::webgpu::recursion_witgen_post_zeroize_hook_calls()
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn set_recursion_witgen_gpu_verify_mem_candidate_enabled(enabled: bool) {
+    self::hal::webgpu::set_recursion_witgen_gpu_verify_mem_candidate_enabled(enabled)
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn recursion_witgen_gpu_verify_mem_candidate_dispatches() -> u64 {
+    self::hal::webgpu::recursion_witgen_gpu_verify_mem_candidate_dispatches()
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn set_recursion_accum_gpu_enabled(enabled: bool) {
+    self::hal::webgpu::set_recursion_accum_gpu_enabled(enabled)
+}
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn recursion_accum_gpu_dispatches() -> u64 {
+    self::hal::webgpu::recursion_accum_gpu_dispatches()
+}
+
 // TODO: Automatically generate this constant from the circuit somehow without
 // messing up bootstrap dependencies.
 /// Size of the code group in the taps of the recursion circuit.
@@ -82,6 +167,16 @@ impl RecursionReceipt {
 pub trait RecursionProver {
     fn prove(&self, program: Program, input: VecDeque<u32>) -> Result<RecursionReceipt>;
 
+    fn prove_with_control_id(
+        &self,
+        program: Program,
+        input: VecDeque<u32>,
+        control_id: Option<Digest>,
+    ) -> Result<RecursionReceipt> {
+        let _ = control_id;
+        self.prove(program, input)
+    }
+
     #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
     fn prove_async<'a>(
         &'a self,
@@ -89,6 +184,17 @@ pub trait RecursionProver {
         input: VecDeque<u32>,
     ) -> Pin<Box<dyn Future<Output = Result<RecursionReceipt>> + 'a>> {
         Box::pin(async move { self.prove(program, input) })
+    }
+
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    fn prove_async_with_control_id<'a>(
+        &'a self,
+        program: Program,
+        input: VecDeque<u32>,
+        control_id: Option<Digest>,
+    ) -> Pin<Box<dyn Future<Output = Result<RecursionReceipt>> + 'a>> {
+        let _ = control_id;
+        self.prove_async(program, input)
     }
 }
 
@@ -152,6 +258,7 @@ fn current_webgpu_hal() -> Option<Rc<risc0_zkp::hal::webgpu::WebGpuHal>> {
 pub struct Prover {
     program: Program,
     hashfn: String,
+    control_id: Option<Digest>,
     input: VecDeque<u32>,
 }
 
@@ -170,6 +277,17 @@ impl Prover {
         Self {
             program,
             hashfn: hashfn.to_string(),
+            control_id: None,
+            input: VecDeque::new(),
+        }
+    }
+
+    /// Creates a new prover with the given recursion program and known control ID.
+    pub fn new_with_control_id(program: Program, hashfn: &str, control_id: Digest) -> Self {
+        Self {
+            program,
+            hashfn: hashfn.to_string(),
+            control_id: Some(control_id),
             input: VecDeque::new(),
         }
     }
@@ -201,7 +319,7 @@ impl Prover {
     /// program and input.
     pub fn run(&mut self) -> Result<RecursionReceipt> {
         let prover = recursion_prover(&self.hashfn)?;
-        prover.prove(self.program.clone(), self.input.clone())
+        prover.prove_with_control_id(self.program.clone(), self.input.clone(), self.control_id)
     }
 
     /// Browser WebGPU async variant of [`Self::run`] using a caller-supplied HAL.
@@ -212,7 +330,7 @@ impl Prover {
     ) -> Result<RecursionReceipt> {
         let prover = recursion_prover_with_hal(hal)?;
         prover
-            .prove_async(self.program.clone(), self.input.clone())
+            .prove_async_with_control_id(self.program.clone(), self.input.clone(), self.control_id)
             .await
     }
 }
@@ -232,6 +350,30 @@ where
     C: CircuitHal<H> + CircuitWitnessGenerator<H> + CircuitAccumulator<H>,
 {
     fn prove(&self, program: Program, input: VecDeque<u32>) -> Result<RecursionReceipt> {
+        self.prove_inner(program, input, None)
+    }
+
+    fn prove_with_control_id(
+        &self,
+        program: Program,
+        input: VecDeque<u32>,
+        control_id: Option<Digest>,
+    ) -> Result<RecursionReceipt> {
+        self.prove_inner(program, input, control_id)
+    }
+}
+
+impl<H, C> RecursionProverImpl<H, C>
+where
+    H: Hal<Field = BabyBear, Elem = BabyBearElem, ExtElem = BabyBearExtElem>,
+    C: CircuitHal<H> + CircuitWitnessGenerator<H> + CircuitAccumulator<H>,
+{
+    fn prove_inner(
+        &self,
+        program: Program,
+        input: VecDeque<u32>,
+        control_id: Option<Digest>,
+    ) -> Result<RecursionReceipt> {
         scope!("prove");
 
         let preflight = self.preflight(&program, input)?;
@@ -241,6 +383,7 @@ where
             self.circuit_hal.as_ref(),
             &program,
             &preflight,
+            control_id,
         )?;
 
         let global = &witgen.global;

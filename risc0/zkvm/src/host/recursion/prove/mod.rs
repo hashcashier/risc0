@@ -719,7 +719,11 @@ macro_rules! ensure_poseidon2 {
 impl Prover {
     pub(crate) fn new(program: Program, control_id: Digest, opts: ProverOpts) -> Self {
         Self {
-            prover: risc0_circuit_recursion::prove::Prover::new(program, &opts.hashfn),
+            prover: risc0_circuit_recursion::prove::Prover::new_with_control_id(
+                program,
+                &opts.hashfn,
+                control_id,
+            ),
             control_id,
             opts,
         }

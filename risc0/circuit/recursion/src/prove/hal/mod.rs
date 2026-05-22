@@ -22,7 +22,7 @@ pub(crate) mod cpu;
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda;
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
-mod rust_kernels;
+pub(crate) mod rust_kernels;
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 pub(crate) mod webgpu;
 // #[cfg(all(
@@ -42,12 +42,34 @@ pub(crate) trait CircuitWitnessGenerator<H: Hal> {
         data: &H::Buffer<H::Elem>,
         global: &H::Buffer<H::Elem>,
     ) -> Result<()>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn post_witness_zeroize(
+        &self,
+        _hal: &H,
+        _mode: StepMode,
+        _total_cycles: u32,
+        _preflight: &RawPreflightTrace,
+        _byte_reads: &BTreeMap<usize, Vec<u32>>,
+        _ctrl: &H::Buffer<H::Elem>,
+        _data: &H::Buffer<H::Elem>,
+        _global: &H::Buffer<H::Elem>,
+    ) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CircuitAccumulationMode {
+    Default,
+    GpuAuthoritative,
 }
 
 pub(crate) trait CircuitAccumulator<H: Hal> {
     #[allow(clippy::too_many_arguments)]
     fn accumulate(
         &self,
+        hal: &H,
         work_cycles: u32,
         total_cycles: u32,
         ctrl: &H::Buffer<H::Elem>,
@@ -55,5 +77,16 @@ pub(crate) trait CircuitAccumulator<H: Hal> {
         data: &H::Buffer<H::Elem>,
         mix: &H::Buffer<H::Elem>,
         accum: &H::Buffer<H::Elem>,
-    ) -> Result<()>;
+    ) -> Result<CircuitAccumulationMode>;
+
+    fn zeroize_after_accumulate(
+        &self,
+        hal: &H,
+        _mode: CircuitAccumulationMode,
+        accum: &H::Buffer<H::Elem>,
+        global: &H::Buffer<H::Elem>,
+    ) {
+        hal.eltwise_zeroize_elem(accum);
+        hal.eltwise_zeroize_elem(global);
+    }
 }

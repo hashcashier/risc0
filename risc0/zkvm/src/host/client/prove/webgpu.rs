@@ -45,11 +45,14 @@ impl WebGpuProver {
     /// Request a WebGPU device from the browser and construct a prover.
     pub async fn new() -> Result<Self> {
         let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite()).await?;
-        Ok(Self::from_hal("webgpu", Rc::new(hal)))
+        let hal = Rc::new(hal);
+        risc0_circuit_rv32im::prove::enable_webgpu_witgen_accum_acceleration_for_hal(hal.clone());
+        Ok(Self::from_hal("webgpu", hal))
     }
 
     /// Construct a prover from a caller-supplied WebGPU HAL.
     pub fn from_hal(name: &str, hal: Rc<WebGpuHal>) -> Self {
+        risc0_circuit_rv32im::prove::prewarm_witgen_kernel_for_hal(hal.clone());
         Self {
             name: name.to_string(),
             hal,
@@ -61,6 +64,21 @@ impl WebGpuProver {
         self.hal.diagnostics()
     }
 
+    /// Return the negotiated WebGPU device limits used by representative
+    /// browser performance gates.
+    #[doc(hidden)]
+    pub fn webgpu_limits(&self) -> (u64, u64, u32) {
+        self.hal.performance_limits()
+    }
+
+    /// SP6d iter 5: exposes the underlying HAL so a pool orchestrator
+    /// can hand work to this prover's GPUDevice via the public
+    /// `lift_webgpu` / `join_webgpu` entry points in
+    /// `risc0_zkvm::host::recursion::prove`.
+    pub fn hal_handle(&self) -> Rc<WebGpuHal> {
+        self.hal.clone()
+    }
+
     /// Reset backend usage diagnostics accumulated by the underlying WebGPU HAL.
     pub fn reset_diagnostics(&self) {
         self.hal.reset_diagnostics();
@@ -70,6 +88,14 @@ impl WebGpuProver {
     #[doc(hidden)]
     pub fn set_eval_check_gpu_enabled(&self, enabled: bool) {
         self.hal.set_eval_check_gpu_enabled(enabled);
+    }
+
+    /// Enable or disable the SP3 staged-WGSL `eval_check` fast path.
+    /// Default `false` — browser parity tests opt in per fixture once
+    /// runtime parity against the interpreter is established.
+    #[doc(hidden)]
+    pub fn set_staged_eval_check_enabled(&self, enabled: bool) {
+        self.hal.set_staged_eval_check_enabled(enabled);
     }
 
     /// Enable or disable a specific WebGPU HAL kernel for diagnostics.

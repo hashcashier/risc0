@@ -138,26 +138,73 @@ impl WebGpuProveRoundInfo {
         hal: &crate::hal::webgpu::WebGpuHal,
         iop: &mut WriteIOP<risc0_core::field::baby_bear::BabyBear>,
         coeffs: &crate::hal::webgpu::WebGpuBuffer<risc0_core::field::baby_bear::BabyBearElem>,
+        round_idx: usize,
     ) -> anyhow::Result<Self> {
         debug!("Doing FRI folding");
+        let _round_timer = crate::hal::webgpu::WebGpuStageTimer::new(format!(
+            "fri_prove round={round_idx} domain_in={}",
+            coeffs.size() / <crate::hal::webgpu::WebGpuHal as Hal>::ExtElem::EXT_SIZE * INV_RATE
+        ));
         let ext_size = <crate::hal::webgpu::WebGpuHal as Hal>::ExtElem::EXT_SIZE;
         let size = coeffs.size() / ext_size;
         let domain = size * INV_RATE;
         let evaluated = hal.alloc_elem("evaluated", domain * ext_size);
-        hal.batch_expand_into_evaluate_ntt_async(&evaluated, coeffs, ext_size, log2_ceil(INV_RATE))
+        {
+            let _t = crate::hal::webgpu::WebGpuStageTimer::new(format!(
+                "fri_prove round={round_idx} expand_evaluate_ntt domain={domain}"
+            ));
+            hal.batch_expand_into_evaluate_ntt_async(
+                &evaluated,
+                coeffs,
+                ext_size,
+                log2_ceil(INV_RATE),
+            )
             .await?;
-        let merkle = MerkleTreeProver::new_async(
-            hal,
-            &evaluated,
-            domain / FRI_FOLD,
-            FRI_FOLD * ext_size,
-            QUERIES,
-        )
-        .await?;
-        merkle.commit_async(hal, iop).await?;
+            if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
+                let _t = crate::hal::webgpu::WebGpuStageTimer::new_for(
+                    format!("fri_prove round={round_idx} drain_after_expand_evaluate_ntt domain={domain}"),
+                    hal,
+                );
+                hal.wait_idle().await?;
+            }
+        }
+        let merkle = {
+            let _t = crate::hal::webgpu::WebGpuStageTimer::new(format!(
+                "fri_prove round={round_idx} merkle_new rows={} cols={}",
+                domain / FRI_FOLD,
+                FRI_FOLD * ext_size
+            ));
+            let merkle_name = format!("fri_round{round_idx}");
+            MerkleTreeProver::new_committed_async(
+                hal,
+                &evaluated,
+                domain / FRI_FOLD,
+                FRI_FOLD * ext_size,
+                QUERIES,
+                iop,
+                &merkle_name,
+            )
+            .await?
+        };
         let fold_mix = iop.random_ext_elem();
-        let out_coeffs = hal.alloc_elem("out_coeffs", size / FRI_FOLD * ext_size);
-        hal.fri_fold_async(&out_coeffs, coeffs, &fold_mix).await?;
+        let count_out = size / FRI_FOLD;
+        let out_coeffs = hal.alloc_elem("out_coeffs", count_out * ext_size);
+        {
+            let _t = crate::hal::webgpu::WebGpuStageTimer::new(format!(
+                "fri_prove round={round_idx} fri_fold count_out={}",
+                count_out
+            ));
+            hal.fri_fold_async(&out_coeffs, coeffs, &fold_mix).await?;
+            if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
+                let _t = crate::hal::webgpu::WebGpuStageTimer::new_for(
+                    format!(
+                        "fri_prove round={round_idx} drain_after_fri_fold count_out={count_out}"
+                    ),
+                    hal,
+                );
+                hal.wait_idle().await?;
+            }
+        }
         Ok(WebGpuProveRoundInfo {
             domain,
             coeffs: out_coeffs,
@@ -178,21 +225,29 @@ pub async fn fri_prove_async(
     let orig_domain = coeffs.size() / ext_size * INV_RATE;
     let mut rounds = Vec::new();
     let mut coeffs = coeffs.clone();
+    let mut round_idx = 0usize;
     while coeffs.size() / ext_size > FRI_MIN_DEGREE {
-        let round = WebGpuProveRoundInfo::new(hal, iop, &coeffs).await?;
+        let round = WebGpuProveRoundInfo::new(hal, iop, &coeffs, round_idx).await?;
         coeffs = round.coeffs.clone();
         rounds.push(round);
+        round_idx += 1;
     }
 
     let final_coeffs = hal.alloc_elem("final_coeffs", coeffs.size());
-    hal.eltwise_copy_elem(&final_coeffs, &coeffs);
-    hal.batch_bit_reverse_async(&final_coeffs, ext_size).await?;
-    final_coeffs.sync_gpu_to_cpu(hal).await?;
-    final_coeffs.view(|view| {
-        iop.write_field_elem_slice::<risc0_core::field::baby_bear::BabyBearElem>(view);
-        let digest = hal.get_hash_suite().hashfn.hash_elem_slice(view);
-        iop.commit(&digest);
-    });
+    {
+        let _t = crate::hal::webgpu::WebGpuStageTimer::new(format!(
+            "fri_prove final size={}",
+            final_coeffs.size()
+        ));
+        hal.eltwise_copy_elem(&final_coeffs, &coeffs);
+        hal.batch_bit_reverse_async(&final_coeffs, ext_size).await?;
+        final_coeffs.sync_gpu_to_cpu(hal).await?;
+        final_coeffs.view(|view| {
+            iop.write_field_elem_slice::<risc0_core::field::baby_bear::BabyBearElem>(view);
+            let digest = hal.get_hash_suite().hashfn.hash_elem_slice(view);
+            iop.commit(&digest);
+        });
+    }
 
     debug!("Doing Queries");
     let mut query_positions = Vec::with_capacity(QUERIES);
@@ -210,28 +265,35 @@ pub async fn fri_prove_async(
         round_positions.push(per_round);
     }
 
-    let mut inner_proofs = Vec::with_capacity(inner_merkles.len());
-    for merkle in inner_merkles {
-        inner_proofs.push(
-            merkle
-                .prove_batch_async(hal, query_positions.as_slice())
-                .await?,
-        );
-    }
+    // Coalesce query openings across Merkle trees. Each proof still writes the
+    // same tree/query order below, but the browser sees one indexed readback
+    // for inner trees and one for FRI-round trees instead of one map per tree.
+    let inner_positions_by_tree = inner_merkles
+        .iter()
+        .map(|_| query_positions.clone())
+        .collect::<Vec<_>>();
+    let inner_proofs = crate::prove::merkle::prove_batch_for_trees_async(
+        hal,
+        inner_merkles,
+        inner_positions_by_tree.as_slice(),
+    )
+    .await?;
 
-    let mut round_proofs = Vec::with_capacity(rounds.len());
-    for (round_idx, round) in rounds.iter().enumerate() {
-        let positions = round_positions
-            .iter()
-            .map(|per_round| per_round[round_idx])
-            .collect::<Vec<_>>();
-        round_proofs.push(
-            round
-                .merkle
-                .prove_batch_async(hal, positions.as_slice())
-                .await?,
-        );
-    }
+    let round_positions_per_round: Vec<Vec<usize>> = (0..rounds.len())
+        .map(|round_idx| {
+            round_positions
+                .iter()
+                .map(|per_round| per_round[round_idx])
+                .collect()
+        })
+        .collect();
+    let round_merkles = rounds.iter().map(|round| &round.merkle).collect::<Vec<_>>();
+    let round_proofs = crate::prove::merkle::prove_batch_for_trees_async(
+        hal,
+        round_merkles.as_slice(),
+        round_positions_per_round.as_slice(),
+    )
+    .await?;
 
     for query_idx in 0..QUERIES {
         for proofs in &inner_proofs {

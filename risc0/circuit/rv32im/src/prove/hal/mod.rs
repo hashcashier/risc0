@@ -69,6 +69,22 @@ where
         }
     }
 
+    pub fn new_zeroed(
+        name: &'static str,
+        hal: &H,
+        rows: usize,
+        cols: usize,
+        checked: bool,
+    ) -> Self {
+        let buf = hal.alloc_elem_init(name, rows * cols, Val::ZERO);
+        Self {
+            buf,
+            rows,
+            cols,
+            checked,
+        }
+    }
+
     #[cfg(test)]
     pub fn to_vec(&self) -> Vec<Val> {
         self.buf.to_vec()

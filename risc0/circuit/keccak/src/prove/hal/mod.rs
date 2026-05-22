@@ -48,6 +48,22 @@ where
             checked_reads,
         }
     }
+
+    pub fn new_zeroed(
+        name: &'static str,
+        hal: &H,
+        rows: usize,
+        cols: usize,
+        checked_reads: bool,
+    ) -> Self {
+        let buf = hal.alloc_elem_init(name, rows * cols, H::Elem::ZERO);
+        Self {
+            buf,
+            rows,
+            cols,
+            checked_reads,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]

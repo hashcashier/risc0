@@ -67,6 +67,7 @@ tracing = { version = "0.1", default-features = false, features = [
 ] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+futures = { version = "0.3", default-features = false, features = ["alloc"], optional = true }
 js-sys = { version = "0.3.77", optional = true }
 wasm-bindgen = { version = "0.2.100", optional = true }
 web-sys = { version = "0.3.77", optional = true, features = ["console"] }
@@ -224,6 +225,7 @@ std = [
 ]
 unstable = ["risc0-zkvm-platform/unstable"]
 webgpu = [
+  "dep:futures",
   "dep:js-sys",
   "prove",
   "risc0-circuit-keccak/webgpu",

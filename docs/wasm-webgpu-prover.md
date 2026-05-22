@@ -1,11 +1,37 @@
 # WASM/WebGPU Prover
 
-Status: implementation paused at user request; Chrome/WebGPU parity validation
-was in progress when paused.
+Status: performance follow-up run `wasm-webgpu-prover-perf` underway (Phase 0–8 LOCKED 2026-05-12). SP1 baselines captured, SP2 seed landed, SP10 partial hit a multi-segment correctness regression — see Plan Addendum 01.
 
 See `docs/wasm-webgpu-prover-learnings.md` for the pause handoff, current
 implementation summary, validation evidence, performance findings, and resume
-plan.
+plan. See `.recursive/run/wasm-webgpu-prover-perf/02-to-be-plan.md` for the
+locked ExecPlan and `.recursive/run/wasm-webgpu-prover-perf/addenda/02-to-be-plan.addendum-01.md`
+for the **Correctness-First Discipline** that now governs every sub-phase.
+
+## Correctness-First Discipline (binding rule, 2026-05-12)
+
+Per `.recursive/run/wasm-webgpu-prover-perf/addenda/02-to-be-plan.addendum-01.md`:
+
+Any correctness regression detected during performance work — verifier rejection,
+proof panic before receipt, cycle drift, new `cpu_only_ops`/`cpu_fallbacks`
+sites beyond the documented ledger, or Chrome WebGPU device loss — **IMMEDIATELY
+halts all performance work** and invokes the `SP-CR` (Correctness Regression
+triage) sub-phase. SP-CR preempts whichever SP is in flight, runs to completion
+(reproduce → root-cause → fix → verify), and only then does the preempted SP
+resume.
+
+xgboost SP-CR **RESOLVED 2026-05-12 via D14+D15+D16 GPU-only fix** in
+`risc0/zkp/src/hal/webgpu.rs`. D12 (cpu_mirror) was rejected by user and
+reverted. Root cause: `WebGpuBuffer` had no `Drop` impl calling
+`.destroy()`, so cumulative GPU memory across multi-segment recursion lifts
+exceeded Chrome Dawn's per-context budget and the next allocation returned
+an invalid buffer that silently failed validation (`VK_ERROR_OUT_OF_DEVICE_MEMORY`
+captured by D14's `onuncapturederror` listener). D14 attaches the listener;
+D15 caches `BabyBearElem::ROU_FWD` / `ROU_REV` once at HAL init; D16 wraps
+`GpuBuffer` in `Rc<WebGpuBufferOwner>` whose `Drop::drop` calls
+`buffer.destroy()` to release VRAM deterministically. xgboost succinct
+receipt now verifies in 117.92 s on the full GPU path (~21× native CUDA).
+xgboost reclassified to `verified` (full GPU path). SP10 unblocked.
 
 The browser WebGPU prover is intended to run local proving in a
 `wasm32-unknown-unknown` browser build while reusing the native zkVM proving
@@ -38,9 +64,77 @@ use risc0_zkvm::{webgpu_prover, ExecutorEnv, ProverOpts};
 
 let prover = webgpu_prover().await?;
 let env = ExecutorEnv::builder().build()?;
-let receipt = prover.prove_with_opts(env, ELF, &ProverOpts::succinct())?;
+let receipt = prover.prove_with_opts_async(env, ELF, &ProverOpts::succinct()).await?;
 receipt.verify(IMAGE_ID)?;
 ```
+
+For mixed workloads that can benefit from the SP6d dependency scheduler, use
+the pooled constructor:
+
+```rust
+use risc0_zkvm::{webgpu_prover_pool, ExecutorEnv, ProverOpts};
+
+let pool = webgpu_prover_pool(2).await?;
+let env = ExecutorEnv::builder().build()?;
+let receipt = pool.prove_with_opts_async(env, ELF, &ProverOpts::succinct()).await?;
+receipt.verify(IMAGE_ID)?;
+```
+
+`webgpu_prover_pool(slots)` creates `slots` independent browser WebGPU devices
+and routes the pool's async proving entrypoints through the dependency-graph
+scheduler by default. The legacy phased pool route remains available as
+`WebGpuProverPool::prove_with_ctx_sequential_async` for A/B comparisons.
+`WebGpuProverPool::diagnostics()` and `reset_diagnostics()` aggregate backend
+usage across all pool slots, matching the single-prover diagnostics workflow.
+Diagnostics include bind-group layout creations/cache hits, bind-group
+creations, and compute-pipeline creations/cache hits. The HAL caches compute
+pipelines when their bind-group layouts were created by the same HAL; this is
+safe because pipelines do not retain per-proof buffers. On the xgboost pooled
+smoke, the cache reduced repeated compute-pipeline creation to 36 creations
+and 1,592 hits, but wall time remained flat at 103.35 s.
+The Poseidon2 fold-chain path also packs per-layer parameters into one
+dynamic-offset uniform buffer and reuses one bind group per chain. On xgboost
+this reduced bind-group creations from 12,510 to 9,022 and buffer allocations
+from 15,323 to 11,835, while wall time stayed flat at 102.86 s.
+The NTT step path uses the same dynamic-offset pattern for forward and inverse
+NTT levels, reducing xgboost bind-group creations further to 3,358 and buffer
+allocations to 6,171. The measured xgboost wall was 102.25 s, a small/noisy
+improvement over the prior 102.82-103.35 s band.
+The hash_rows Merkle path no longer uploads its output node buffer before
+overwriting every digest. On xgboost this removed the 4.37 GB `nodes` upload
+source, reducing total host-to-GPU upload bytes from 15.28 GB to 10.91 GB;
+wall measured 101.93 s in the same diagnostic run.
+Empty RV32IM scatter ranges are also treated as true no-ops before fallback
+accounting, so xgboost now reports `cpu_fallbacks=0`; the change is a
+diagnostic cleanup and wall time stayed noisy/flat.
+Device-to-device copy diagnostics now attribute copies by destination buffer.
+The xgboost pool smoke reported 7.22 GB of device-copy traffic before SP6l,
+with 7,222,591,488 bytes of that total copied into `coeffs`; only 32,768 bytes
+came from `final_coeffs`. Dead-after-commit groups now use an explicit
+in-place WebGPU commit path:
+RV32IM `code`/`accum`, recursion `accum`, and Keccak `code`/`data`/`accum`.
+On xgboost this reduced device copies from 128 to 85 and device-copy bytes
+from 7.22 GB to 5.76 GB, while wall time stayed flat at 101.97 s. RV32IM
+`data` and recursion `ctrl`/`data` still use the copy-preserving path because
+later accumulation reads those witnesses after their Merkle roots have seeded
+the transcript. The copy-preserving path now fuses coefficient materialization
+into the first inverse NTT pass, leaving the witness readable while avoiding the
+large `coeffs` copy. Xgboost now reports only `final_coeffs` device copies:
+32 copies / 32,768 bytes, with no `coeffs` copies. Wall time stayed flat/noisy
+at 102.26 s and uploads stayed near 10.91 GB, so device-copy cleanup is closed
+as a wall-time lever; the next material target is CPU-originated
+RV32IM witness/accumulation work and its upload path.
+SP7a split RV32IM accumulation timing and found xgboost spends about
+22.13 s there across 11 segments: 20.55 s in generated `step_TopAccum`,
+1.57 s in machine-column carry, and 0.01 s in terminal ExtVal prefix.
+SP7b moved the isolated machine-column carry scan to WebGPU. The focused
+GPU/CPU test and xgboost e2e proof both pass; xgboost wall measured
+101.38 s, RV32IM accumulation fell to 21.03 s, and the remaining large
+target is still generated `step_TopAccum`.
+SP7c profiled recursion accumulation and found no equivalent cheap scan:
+prefix products are only 59 ms across xgboost, while generated
+`compute_accum` and `verify_accum` account for 5.66 s. The next material
+recursion win also requires generated circuit execution on GPU.
 
 `default_prover()` is intentionally unavailable for browser WebGPU builds
 because it cannot synchronously request a `GPUAdapter`/`GPUDevice`.
@@ -74,6 +168,9 @@ The implementation adds:
 - Browser `ProverImpl` and `WebGpuProver` plumbing that reuses the native
   prover server, recursion, assumptions, PoVW, receipt assembly, and verifier
   paths.
+- `WebGpuProverPool` plumbing for multi-device browser runs, including a
+  default dependency-graph scheduler path for heterogeneous segment, keccak,
+  lift, join, and resolve work.
 - A browser parity harness in `examples/browser-prove` covering public
   examples, native method guests, syscalls, precompiles, accelerators, and
   composite-to-succinct compression.
@@ -177,14 +274,15 @@ but the group is not complete: `multi_test/rsa_compat` and the full
 proof path before producing succinct receipts. A smaller `KeccakUnion(1)`
 diagnostic now passes as a standalone Chrome/WebGPU succinct proof after the
 async Keccak receipt union fix and async WebGPU Keccak subproof path:
-native CUDA completed the latest focused run in 7.46676192s with 4 segments,
-while Chrome/WebGPU completed the same 4-segment proof in 441.14s after
-negotiating 1 GiB WebGPU buffer and storage-binding limits. The run had 9
-pending Keccak proofs, 1 assumption, and `cpu_only_ops=0`. All ZKP bulk ops
-except `scatter` had 0 CPU fallbacks; the remaining blocker is Keccak circuit
-`eval_check`, which still falls back 9 times because the generic interpreter
-needs 6741 FP slots. The full `KeccakUnion(3)` fixture remains a focused
-performance blocker.
+native CUDA completed the latest focused run in 7.748s with 4 segments
+(refreshed 2026-05-12 RTX 5090), while Chrome/WebGPU completed the same
+4-segment proof in 121.99s — a 15.7× ratio, dramatically improved from the
+prior 441.14s figure. The run had `cpu_only_ops=0`. All ZKP bulk ops except
+`scatter` had 0 CPU fallbacks; the remaining blocker is Keccak circuit
+`eval_check`, which still falls back 3 times in the refreshed run because the
+generic interpreter needs 6741 FP slots > the 1536 cap. The full
+`KeccakUnion(3)` fixture remains a focused performance blocker; native CUDA
+baseline refreshed at 20.676s for SP6 target.
 
 ## GPU-Authoritative Work
 

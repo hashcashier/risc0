@@ -7116,6 +7116,7 @@ dependencies = [
  "derive_more",
  "enum-map",
  "flate2",
+ "futures",
  "gdbstub",
  "gdbstub_arch",
  "malachite",
@@ -7137,6 +7138,7 @@ dependencies = [
  "test-log",
  "tracing",
  "tracing-subscriber 0.3.19",
+ "wasm-bindgen-futures",
  "wide",
 ]
 
@@ -7322,6 +7324,7 @@ dependencies = [
  "cust",
  "digest 0.10.7",
  "ff",
+ "futures",
  "getrandom 0.2.16",
  "getrandom 0.3.3",
  "hex",
@@ -7368,6 +7371,7 @@ dependencies = [
  "enum-iterator",
  "enum-map",
  "flate2",
+ "futures",
  "gdbstub",
  "gdbstub_arch",
  "gimli",

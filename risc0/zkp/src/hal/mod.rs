@@ -23,6 +23,12 @@ pub mod metal;
 pub mod portable;
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 pub mod webgpu;
+// `webgpu_codegen` produces WGSL source strings; the codegen itself has no
+// WebGPU runtime dependency so it builds (and its unit tests run) on native
+// targets too. The actual WebGPU integration that consumes its output lives
+// in `webgpu.rs` and stays wasm32-gated.
+#[cfg(feature = "webgpu")]
+pub mod webgpu_codegen;
 
 use std::{
     fmt::Debug,
@@ -95,6 +101,39 @@ pub trait Hal {
 
     fn copy_from_digest(&self, name: &'static str, slice: &[Digest]) -> Self::Buffer<Digest>;
     fn copy_from_elem(&self, name: &'static str, slice: &[Self::Elem]) -> Self::Buffer<Self::Elem>;
+    fn copy_from_elem_transpose_zero_pad(
+        &self,
+        name: &'static str,
+        _compact_name: &'static str,
+        row_major: &[Self::Elem],
+        rows: usize,
+        cols: usize,
+        total_rows: usize,
+        _cache_key: Option<Digest>,
+    ) -> anyhow::Result<Self::Buffer<Self::Elem>> {
+        anyhow::ensure!(
+            rows <= total_rows,
+            "transpose-zero-pad rows {rows} exceeds total_rows {total_rows}"
+        );
+        let compact_len = rows
+            .checked_mul(cols)
+            .ok_or_else(|| anyhow::anyhow!("transpose-zero-pad compact length overflow"))?;
+        anyhow::ensure!(
+            row_major.len() == compact_len,
+            "transpose-zero-pad source length mismatch: got {}, expected {compact_len}",
+            row_major.len()
+        );
+        let padded_len = total_rows
+            .checked_mul(cols)
+            .ok_or_else(|| anyhow::anyhow!("transpose-zero-pad padded length overflow"))?;
+        let mut column_major = vec![Self::Elem::ZERO; padded_len];
+        for row in 0..rows {
+            for col in 0..cols {
+                column_major[col * total_rows + row] = row_major[row * cols + col];
+            }
+        }
+        Ok(self.copy_from_elem(name, &column_major))
+    }
     fn copy_from_extelem(
         &self,
         name: &'static str,

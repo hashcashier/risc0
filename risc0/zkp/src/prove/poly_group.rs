@@ -97,10 +97,114 @@ impl PolyGroup<crate::hal::webgpu::WebGpuHal> {
         assert_eq!(coeffs.size(), count * size);
         let domain = size * INV_RATE;
         let evaluated = hal.alloc_elem("evaluated", count * domain);
-        hal.batch_expand_into_evaluate_ntt_async(&evaluated, &coeffs, count, log2_ceil(INV_RATE))
+        {
+            let _timer = crate::hal::webgpu::WebGpuStageTimer::new_for(
+                format!(
+                    "poly_group {name} batch_expand_into_evaluate_ntt count={count} size={size} domain={domain}"
+                ),
+                hal,
+            );
+            hal.batch_expand_into_evaluate_ntt_async(
+                &evaluated,
+                &coeffs,
+                count,
+                log2_ceil(INV_RATE),
+            )
             .await?;
-        hal.batch_bit_reverse_async(&coeffs, count).await?;
-        let merkle = MerkleTreeProver::new_async(hal, &evaluated, domain, count, QUERIES).await?;
+            if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
+                let _timer = crate::hal::webgpu::WebGpuStageTimer::new_for(
+                    format!(
+                        "poly_group {name} drain_after_batch_expand_into_evaluate_ntt count={count} size={size} domain={domain}"
+                    ),
+                    hal,
+                );
+                hal.wait_idle().await?;
+            }
+        }
+        {
+            let _timer = crate::hal::webgpu::WebGpuStageTimer::new_for(
+                format!("poly_group {name} batch_bit_reverse count={count} size={size}"),
+                hal,
+            );
+            hal.batch_bit_reverse_async(&coeffs, count).await?;
+            if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
+                let _timer = crate::hal::webgpu::WebGpuStageTimer::new_for(
+                    format!(
+                        "poly_group {name} drain_after_batch_bit_reverse count={count} size={size}"
+                    ),
+                    hal,
+                );
+                hal.wait_idle().await?;
+            }
+        }
+        let merkle =
+            MerkleTreeProver::new_async(hal, &evaluated, domain, count, QUERIES, name).await?;
+        Ok(PolyGroup {
+            coeffs,
+            count,
+            evaluated,
+            merkle,
+        })
+    }
+
+    /// Async WebGPU constructor for callers that commit the Merkle tree
+    /// immediately after construction.
+    pub async fn new_committed_async(
+        hal: &crate::hal::webgpu::WebGpuHal,
+        iop: &mut crate::prove::write_iop::WriteIOP<risc0_core::field::baby_bear::BabyBear>,
+        coeffs: crate::hal::webgpu::WebGpuBuffer<risc0_core::field::baby_bear::BabyBearElem>,
+        count: usize,
+        size: usize,
+        name: &'static str,
+    ) -> anyhow::Result<Self> {
+        scope_with!("poly_group({})", name);
+        assert_eq!(coeffs.size(), count * size);
+        let domain = size * INV_RATE;
+        let evaluated = hal.alloc_elem("evaluated", count * domain);
+        {
+            let _timer = crate::hal::webgpu::WebGpuStageTimer::new_for(
+                format!(
+                    "poly_group {name} batch_expand_into_evaluate_ntt count={count} size={size} domain={domain}"
+                ),
+                hal,
+            );
+            hal.batch_expand_into_evaluate_ntt_async(
+                &evaluated,
+                &coeffs,
+                count,
+                log2_ceil(INV_RATE),
+            )
+            .await?;
+            if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
+                let _timer = crate::hal::webgpu::WebGpuStageTimer::new_for(
+                    format!(
+                        "poly_group {name} drain_after_batch_expand_into_evaluate_ntt count={count} size={size} domain={domain}"
+                    ),
+                    hal,
+                );
+                hal.wait_idle().await?;
+            }
+        }
+        {
+            let _timer = crate::hal::webgpu::WebGpuStageTimer::new_for(
+                format!("poly_group {name} batch_bit_reverse count={count} size={size}"),
+                hal,
+            );
+            hal.batch_bit_reverse_async(&coeffs, count).await?;
+            if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
+                let _timer = crate::hal::webgpu::WebGpuStageTimer::new_for(
+                    format!(
+                        "poly_group {name} drain_after_batch_bit_reverse count={count} size={size}"
+                    ),
+                    hal,
+                );
+                hal.wait_idle().await?;
+            }
+        }
+        let merkle = MerkleTreeProver::new_committed_async(
+            hal, &evaluated, domain, count, QUERIES, iop, name,
+        )
+        .await?;
         Ok(PolyGroup {
             coeffs,
             count,

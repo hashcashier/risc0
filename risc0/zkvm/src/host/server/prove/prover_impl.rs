@@ -48,9 +48,9 @@ use crate::{
 };
 
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
-const WEBGPU_DEFAULT_SEGMENT_LIMIT_PO2: u32 = 18;
+pub(crate) const WEBGPU_DEFAULT_SEGMENT_LIMIT_PO2: u32 = 18;
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
-const WEBGPU_DEFAULT_KECCAK_MAX_PO2: u32 = 14;
+pub(crate) const WEBGPU_DEFAULT_KECCAK_MAX_PO2: u32 = 14;
 
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 struct WebGpuStageTimer {
@@ -207,6 +207,13 @@ impl ProverImpl {
             session.pending_keccaks.len(),
             session.assumptions.len()
         ));
+        let prove_session_wall_start = js_sys::Date::now();
+        // SP6d iter 4: use the HAL's per-instance counter so a multi-HAL
+        // pool doesn't over-count by other slots' GPU work.
+        let prove_session_active_start = self
+            .webgpu_hal()
+            .map(|hal| hal.gpu_active_ms())
+            .unwrap_or(0.0);
 
         ensure!(
             self.opts.hashfn == "poseidon2",
@@ -339,6 +346,21 @@ impl ProverImpl {
 
         let _timer = WebGpuStageTimer::new("composite_to_succinct_async");
         let succinct_receipt = self.composite_to_succinct_async(&composite_receipt).await?;
+        drop(_timer);
+        let wall_ms: f64 = js_sys::Date::now() - prove_session_wall_start;
+        let active_ms: f64 = self
+            .webgpu_hal()
+            .map(|hal| hal.gpu_active_ms())
+            .unwrap_or(0.0)
+            - prove_session_active_start;
+        let idle_ratio: f64 = if wall_ms > 0.0 {
+            (1.0_f64 - active_ms / wall_ms).max(0.0)
+        } else {
+            0.0
+        };
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "prove_session_async wall_ms={wall_ms:.1} gpu_active_ms={active_ms:.1} gpu_idle_ratio={idle_ratio:.3}",
+        ));
         let receipt = Receipt::new(
             InnerReceipt::Succinct(succinct_receipt),
             session.journal.clone().unwrap_or_default().bytes,
@@ -350,7 +372,7 @@ impl ProverImpl {
         })
     }
 
-    async fn prove_segment_core_async(
+    pub(crate) async fn prove_segment_core_async(
         &self,
         ctx: &VerifierContext,
         preflight_results: PreflightResults,
@@ -398,7 +420,7 @@ impl ProverImpl {
             let _timer = WebGpuStageTimer::new(format!("verify_segment index={}", receipt.index));
             receipt
                 .verify_integrity_with_context(ctx)
-                .context("verify segment")?;
+                .with_context(|| format!("verify segment index={}", receipt.index))?;
         }
 
         Ok(receipt)
@@ -435,7 +457,7 @@ impl ProverImpl {
         Ok(receipt)
     }
 
-    async fn resolve_async(
+    pub(crate) async fn resolve_async(
         &self,
         conditional: &SuccinctReceipt<ReceiptClaim>,
         assumption: &SuccinctReceipt<Unknown>,
@@ -476,7 +498,7 @@ impl ProverImpl {
     }
 
     #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
-    async fn insert_union_receipt_async(
+    pub(crate) async fn insert_union_receipt_async(
         &self,
         peaks: &mut VecDeque<(u32, SuccinctReceipt<Unknown>)>,
         item: SuccinctReceipt<Unknown>,
@@ -496,7 +518,7 @@ impl ProverImpl {
     }
 
     #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
-    async fn union_receipts_root_async(
+    pub(crate) async fn union_receipts_root_async(
         &self,
         mut peaks: VecDeque<(u32, SuccinctReceipt<Unknown>)>,
     ) -> Result<Option<SuccinctReceipt<Unknown>>> {
@@ -509,7 +531,7 @@ impl ProverImpl {
         Ok(Some(item))
     }
 
-    async fn composite_to_succinct_async(
+    pub(crate) async fn composite_to_succinct_async(
         &self,
         composite_receipt: &CompositeReceipt,
     ) -> Result<SuccinctReceipt<ReceiptClaim>> {
@@ -856,7 +878,7 @@ impl ProverServer for ProverImpl {
             let _timer = WebGpuStageTimer::new(format!("verify_segment index={}", receipt.index));
             receipt
                 .verify_integrity_with_context(ctx)
-                .context("verify segment")?;
+                .with_context(|| format!("verify segment index={}", receipt.index))?;
         }
 
         Ok(receipt)

@@ -91,7 +91,7 @@ impl PreflightResults {
 }
 
 pub(crate) struct WitnessGenerator<H: Hal> {
-    cycles: usize,
+    pub cycles: usize,
     pub global: MetaBuffer<H>,
     pub code: MetaBuffer<H>,
     pub data: MetaBuffer<H>,
@@ -131,6 +131,81 @@ where
         })
     }
 
+    /// SP7 iter 6d-g step 6.2.8 (2026-05-16): pre-allocate global/code/data
+    /// buffers + scatter injector data. Caller (the async prove_core_async
+    /// path) can then invoke a webgpu-specific async pre-dispatch hook +
+    /// `sync_gpu_to_cpu` BEFORE calling `populate_from_parts` which runs
+    /// the sync `generate_witness`. Splitting these phases is the
+    /// architectural fix for the CPU/GPU shadow desync that blocked
+    /// iter-6d-g step 6.2.7.
+    #[allow(clippy::type_complexity)]
+    pub fn allocate_buffers(
+        hal: &H,
+        global_vec: &[Val],
+        cycles: usize,
+        injector: &Injector,
+    ) -> (MetaBuffer<H>, MetaBuffer<H>, MetaBuffer<H>) {
+        let global = MetaBuffer {
+            buf: hal.copy_from_elem("global", global_vec),
+            rows: 1,
+            cols: REGCOUNT_GLOBAL,
+            checked: true,
+        };
+        let code = MetaBuffer::new_zeroed("code", hal, cycles, REGCOUNT_CODE, false);
+        let data = MetaBuffer::new("data", hal, cycles, REGCOUNT_DATA, true);
+        hal.scatter(
+            &data.buf,
+            &injector.index,
+            &injector.offsets,
+            &injector.values,
+        );
+        (global, code, data)
+    }
+
+    /// SP7 iter 6d-g step 6.2.8: complete the witgen pipeline from pre-
+    /// allocated buffers. Runs `generate_witness`, zeroizes, allocates
+    /// accum. Caller is responsible for any pre-witgen async work (e.g.
+    /// `WebGpuCircuitHal::pre_witgen_dispatch_async` + `sync_gpu_to_cpu`).
+    pub fn populate_from_parts<C: CircuitWitnessGenerator<H>>(
+        hal: &H,
+        circuit_hal: &C,
+        mode: StepMode,
+        trace: PreflightTrace,
+        cycles: usize,
+        global: MetaBuffer<H>,
+        code: MetaBuffer<H>,
+        data: MetaBuffer<H>,
+    ) -> Result<Self> {
+        circuit_hal
+            .generate_witness(mode, &trace, &global, &data)
+            .context("witness generation failure")?;
+        hal.eltwise_zeroize_elem(&global.buf);
+        hal.eltwise_zeroize_elem(&data.buf);
+        let accum = MetaBuffer::new("accum", hal, cycles, REGCOUNT_ACCUM, true);
+        Ok(Self {
+            cycles,
+            global,
+            code,
+            data,
+            accum,
+            trace,
+        })
+    }
+
+    /// SP7 iter 6d-g step 6.2.8: accessors so async callers can pull
+    /// `PreflightResults` fields without consuming the struct.
+    pub fn preflight_components(
+        preflight: PreflightResults,
+    ) -> (Vec<Val>, Injector, usize, PreflightTrace, u32) {
+        (
+            preflight.global,
+            preflight.injector,
+            preflight.cycles,
+            preflight.trace,
+            preflight.po2,
+        )
+    }
+
     #[allow(clippy::type_complexity)]
     fn hal_generate_witness<C: CircuitWitnessGenerator<H>>(
         hal: &H,
@@ -149,7 +224,7 @@ where
             cols: REGCOUNT_GLOBAL,
             checked: true,
         };
-        let code = MetaBuffer::new("code", hal, cycles, REGCOUNT_CODE, false);
+        let code = MetaBuffer::new_zeroed("code", hal, cycles, REGCOUNT_CODE, false);
         let data = scope!(
             "alloc(data)",
             MetaBuffer::new("data", hal, cycles, REGCOUNT_DATA, true)
@@ -165,7 +240,6 @@ where
             .context("witness generation failure")?;
         scope!("zeroize", {
             hal.eltwise_zeroize_elem(&global.buf);
-            hal.eltwise_zeroize_elem(&code.buf);
             hal.eltwise_zeroize_elem(&data.buf);
         });
         let accum = scope!(
@@ -327,11 +401,11 @@ fn build_global_vec(segment: &Segment, trace: &PreflightTrace) -> Vec<Val> {
 }
 
 #[derive(Clone, Debug, Default)]
-struct Injector {
+pub(crate) struct Injector {
     rows: usize,
-    offsets: Vec<u32>,
-    values: Vec<Val>,
-    index: Vec<u32>,
+    pub offsets: Vec<u32>,
+    pub values: Vec<Val>,
+    pub index: Vec<u32>,
 }
 
 impl Injector {

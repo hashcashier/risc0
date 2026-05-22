@@ -15,6 +15,7 @@
 mod hal;
 #[cfg(test)]
 mod tests;
+pub mod wgsl_pruner;
 mod witgen;
 
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
@@ -29,11 +30,136 @@ use anyhow::Result;
 use cfg_if::cfg_if;
 use risc0_core::scope;
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
-use risc0_zkp::hal::webgpu::WebGpuHal;
+use risc0_zkp::hal::webgpu::{WebGpuBuffer, WebGpuHal};
 
 use crate::execute::segment::Segment;
 
 pub use witgen::PreflightResults;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::set_witgen_gpu_probe_enabled;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::prewarm_witgen_kernel_for_hal;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::enable_webgpu_witgen_accum_acceleration_for_hal;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::set_witgen_gpu_replace_enabled;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::witgen_gpu_short_circuit_cycles;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::witgen_gpu_replace_arm_mask;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::witgen_gpu_replace_on_demand_kernel_compiles;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::set_witgen_gpu_replace_nonblocking_pending_enabled;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::witgen_gpu_replace_nonblocking_pending_skips;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::witgen_accum_shadow_replay_rows;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::set_witgen_gpu_direct_misc0_accum_enabled;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::witgen_gpu_direct_misc0_accum_rows;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::set_accum_gpu_misc0_direct_enabled;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::accum_gpu_misc0_direct_rows;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::set_accum_gpu_misc1_direct_enabled;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::accum_gpu_misc1_direct_rows;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::set_accum_gpu_misc2_direct_enabled;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::accum_gpu_misc2_direct_rows;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::set_accum_gpu_mem0_direct_enabled;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::accum_gpu_mem0_direct_rows;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::set_accum_gpu_mem1_direct_enabled;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::accum_gpu_mem1_direct_rows;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::set_accum_gpu_control0_direct_enabled;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::accum_gpu_control0_direct_rows;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::set_witgen_gpu_mem0_replace_candidate_enabled;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::set_witgen_gpu_mem0_replace_minor_mask;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::witgen_gpu_mem0_extra_prewarm_requests;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::witgen_gpu_mem0_replace_minor_mask;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::set_witgen_gpu_mem1_replace_candidate_enabled;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::set_witgen_gpu_mem1_replace_minor_mask;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::witgen_gpu_mem1_extra_prewarm_requests;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::witgen_gpu_mem1_replace_minor_mask;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::set_witgen_gpu_diff_enabled;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::set_witgen_gpu_diff_major;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::set_witgen_gpu_replace_diff_target_segment;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::{
+    accum_gpu_arm5_authoritative_dispatches, accum_gpu_arm5_probe_dispatches,
+    accum_gpu_arm5_probe_mismatch_summary, accum_gpu_arm5_probe_summary,
+    accum_gpu_candidate_sync_waits, set_accum_gpu_arm5_authoritative_enabled,
+    set_accum_gpu_arm5_probe_enabled, set_accum_gpu_candidate_sync_enabled,
+    set_accum_gpu_major_histogram_enabled, TopAccumArm5ProbeSummary,
+};
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub fn dispatch_webgpu_accum_machine_column_carry_for_test(
+    hal: &WebGpuHal,
+    accum: &WebGpuBuffer<crate::zirgen::circuit::Val>,
+    rows: usize,
+    cols: usize,
+    split: usize,
+) -> Result<bool> {
+    hal::webgpu::dispatch_accum_machine_column_carry(hal, accum, rows, cols, split)
+}
 
 const GLOBAL_MIX: usize = 0;
 const GLOBAL_OUT: usize = 1;

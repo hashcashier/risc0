@@ -178,6 +178,14 @@ impl Session {
         self.hooks.push(Box::new(hook));
     }
 
+    /// Pending keccak proof requests produced by this session. Returned
+    /// as a borrowed slice in execution order. Useful for external pool
+    /// orchestrators (e.g., `WebGpuProverPool::prove_keccak_requests_async`)
+    /// that want to distribute keccak proofs across multiple GPUDevices.
+    pub fn pending_keccaks(&self) -> &[ProveKeccakRequest] {
+        &self.pending_keccaks
+    }
+
     /// Calculate for the [ReceiptClaim] associated with this [Session]. The
     /// [ReceiptClaim] is the claim that will be proven if this [Session]
     /// is passed to the [crate::Prover].

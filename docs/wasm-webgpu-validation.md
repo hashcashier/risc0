@@ -1,6 +1,6 @@
 # WASM/WebGPU Prover Validation
 
-Status: validation paused at user request; complete parity is not yet achieved.
+Status: R1 smoke matrix refreshed 2026-05-12 (RTX 5090 + Chrome 148). xgboost SP-CR resolved 2026-05-12 via D14+D15+D16 GPU-only fix in `risc0/zkp/src/hal/webgpu.rs` (`onuncapturederror` listener, cached NTT roots, `Rc<WebGpuBufferOwner>` with Drop-destroy for explicit GPU memory release); xgboost verifies in 117.92 s on the full GPU path (~21× native CUDA). Run governed by the **Correctness-First Discipline** in `.recursive/run/wasm-webgpu-prover-perf/addenda/02-to-be-plan.addendum-01.md`; performance follow-up SP10+ unblocked.
 
 This file records the current correctness matrix for the browser WebGPU prover.
 Native baselines are measured first with the local CUDA prover and the same
@@ -10,6 +10,24 @@ The native CUDA and browser WebGPU proving paths are compared in
 
 See `docs/wasm-webgpu-prover-learnings.md` for the latest pause handoff,
 including results gathered after parts of this matrix were written.
+
+## Correctness-First Discipline (governs every entry below)
+
+Any correctness regression detected on any fixture (verifier rejection, proof
+panic before receipt, cycle drift, new `cpu_only_ops`/`cpu_fallbacks` beyond
+the documented ledger, or Chrome WebGPU device loss) **IMMEDIATELY halts
+all performance work** until the regression is fixed under the `SP-CR`
+(Correctness Regression triage) sub-phase. Performance ratios in the table
+below are informational; correctness — verified succinct receipt with matching
+cycle/segment counts — is the unconditional gate. See
+`.recursive/run/wasm-webgpu-prover-perf/addenda/02-to-be-plan.addendum-01.md`.
+
+SP-CR (xgboost verify_lift) **RESOLVED 2026-05-12 via D14+D15+D16 GPU-only fix**:
+explicit `GPUBuffer.destroy()` via Rc-owned `WebGpuBufferOwner` releases
+cumulative VRAM between lifts (previously Chrome Dawn hit
+`VK_ERROR_OUT_OF_DEVICE_MEMORY` at segments 5-8 because JS GC was too slow).
+xgboost succinct receipt now verifies in 117.92 s on the full GPU path
+(~21× native CUDA). SP10 unblocked for follow-on deferred fixtures.
 
 ## Commands
 
@@ -65,9 +83,9 @@ zero CPU-only HAL operations.
 
 | Guest | Native CUDA baseline | Chrome/WebGPU status |
 | --- | --- | --- |
-| `risc0-zkvm-methods/cfg` | 1 segment, 2261 user cycles, 32768 total cycles, 390.942019ms | Passed, same cycles |
-| `hello-world` | 1 segment, 3532 user cycles, 32768 total cycles, 407.65863ms | Passed, same cycles |
-| `json` | 1 segment, 13311 user cycles, 65536 total cycles, 416.113284ms | Passed, same cycles |
+| `risc0-zkvm-methods/cfg` | 1 segment, 2269 user cycles, 32768 total cycles, 499.535ms (refreshed 2026-05-12 RTX 5090) | Passed, same cycles; Chrome WebGPU 3.818s ≈ **7.6× ratio**; `cpu_only_ops=0`, only `scatter` fallback |
+| `hello-world` | 1 segment, 3560 user cycles, 32768 total cycles, 483.515ms (refreshed 2026-05-12 RTX 5090) | Passed, same cycles; Chrome WebGPU 3.803s ≈ **7.9× ratio**; `cpu_only_ops=0`, only `scatter` fallback |
+| `json` | 1 segment, 13319 user cycles, 65536 total cycles, 521.131ms (refreshed 2026-05-12 RTX 5090) | Passed, same cycles; Chrome WebGPU 4.583s ≈ **8.8× ratio**; `cpu_only_ops=0`, only `scatter` fallback |
 | `chess` | 1 segment, 22500 user cycles, 131072 total cycles, 503.676967ms | Passed, same cycles |
 | `composition/multiply-assumption` | 1 segment, 3532 user cycles, 32768 total cycles, 410.961683ms | Passed, same cycles |
 | `composition` | 1 segment, 13887 user cycles, 65536 total cycles, 428.996087ms | Passed, same cycles |
@@ -90,8 +108,8 @@ zero CPU-only HAL operations.
 | `ecdsa/k256` | 2 segments, 343611 user cycles, 524288 total cycles, 1.08389501s | Passed, same cycles |
 | `ecdsa/p256` | 2 segments, 232373 user cycles, 327680 total cycles, 978.112464ms | Passed, same cycles |
 | `groth16-verifier` | 914 segments, 180291710 user cycles, 239370240 total cycles, 462.439128141s | Browser run deferred until remaining eval_check/readback and oversized-buffer bottlenecks are addressed |
-| `xgboost` | 11 segments, 2294908 user cycles, 2883584 total cycles, 5.702544275s | Browser run deferred until remaining eval_check/readback and oversized-buffer bottlenecks are addressed |
-| `bn254` | 189 segments, 37989643 user cycles, 49348608 total cycles, 100.237964323s | Browser run deferred until remaining eval_check/readback and oversized-buffer bottlenecks are addressed |
+| `xgboost` | 11 segments, 2294908 user cycles, 2883584 total cycles, 5.702544275s | **SP10 refreshed 2026-05-15: 102.7 s wall ≈ 18.0× ratio** (down from 117.92 s/21× at 2026-05-12). Per-segment breakdown: rv32im_witgen ~520 ms (CPU), rv32im_accumulate ~2030 ms (CPU), commit_group+FRI+merkle ~2.5 s (GPU). The CPU witgen+accum buckets (~28 s of the 103 s wall) are the remaining iter-6d-c+iter-6d-deeper levers; recursion lift+join is 46 s. Original SP-CR fix `D14+D15+D16` (Drop + RoU cache) holds. See `evidence/perf/r9-deferred/xgboost.chrome.txt` and `project_sp7_witgen_savings_ceiling`. |
+| `bn254` | 189 segments, 37989643 user cycles, 49348608 total cycles, 100.237964323s | **SP10 measured 2026-05-15: 1877.65 s ≈ 18.7× ratio** (gpu_active_ms=1017722, gpu_idle_ratio=0.458). 189-segment fixture; per-segment ~9.9 s wall (vs xgboost ~9.4 s at 11 segments). Evidence: `evidence/perf/r9-deferred/bn254.chrome.txt`. |
 
 ## Internal Parity Matrix
 
@@ -109,13 +127,13 @@ zero CPU-only HAL operations.
 | `multi_test/sys_read` | 1 segment, 8471 user cycles, 65536 total cycles, 258.619384ms | Passed, same cycles |
 | `multi_test/echo_stdout` | 1 segment, 4203 user cycles, 32768 total cycles, 236.010871ms | Passed, same cycles |
 | `multi_test/echo_words` | 1 segment, 3996 user cycles, 32768 total cycles, 236.157902ms | Passed, same cycles |
-| `multi_test/libm` | 1 segment, 3373 user cycles, 32768 total cycles, 436.441617ms | Passed standalone in 214.08s with succinct receipt; `rv32im_eval_check` 32.546s, `segment_prove_core` 43.592s, `recursion_eval_check` 119.937s, `lift_prove` 170.293s |
-| `multi_test/poseidon2_basic` | 1 segment, 3598 user cycles, 32768 total cycles, 426.880871ms in the latest focused CUDA run | Passed via `prove_with_opts_async` with a succinct receipt in Chrome in 4.03s, same cycles; Chrome negotiated 1 GiB buffer and storage-binding limits; rv32im and recursion STARK commit/finalize plus combo prepare/divide ran in GPU-authoritative mode; `eval_check` recorded 2 WebGPU dispatches and 0 CPU fallbacks |
+| `multi_test/libm` | 1 segment, 3328 user cycles, 32768 total cycles, 510.044ms (refreshed 2026-05-12 RTX 5090) | **SP10 refreshed 2026-05-15: 3.18 s ≈ 6.2× ratio** (down from 3.80 s/7.5×); `cpu_only_ops=0`, only `scatter` fallback. Single-segment fixture; recursion lift+join is the dominant remainder. Evidence: `evidence/perf/r9-deferred/libm.chrome.txt`. |
+| `multi_test/poseidon2_basic` | 1 segment, 3553 user cycles, 32768 total cycles, 545.337ms (cold) / 244.864ms (warm, refreshed 2026-05-12 RTX 5090) | Passed via `prove_with_opts_async` with a succinct receipt in Chrome in 3.946s ≈ **7.2× cold / 16.1× warm ratio**; same cycles; Chrome negotiated 1 GiB buffer and storage-binding limits; rv32im and recursion STARK commit/finalize plus combo prepare/divide ran in GPU-authoritative mode; `eval_check` recorded 2 WebGPU dispatches and 0 CPU fallbacks; `gpu_dispatches=306, cpu_mirrors=11, cpu_fallbacks=1 (scatter), cpu_only_ops=0` |
 | `multi_test/poseidon2_short` | 1 segment, 3596 user cycles, 32768 total cycles, 235.5053ms | Passed in timed accelerator group, same cycles |
 | `multi_test/poseidon2_long` | 1 segment, 3800 user cycles, 32768 total cycles, 238.775893ms | Passed in timed accelerator group, same cycles |
 | `multi_test/poseidon2_continue` | 1 segment, 3835 user cycles, 32768 total cycles, 237.068497ms | Passed in timed accelerator group, same cycles |
 | `multi_test/sha_conforms` | 1 segment, 61122 user cycles, 131072 total cycles, 296.37097ms | Passed in timed accelerator group, same cycles |
-| `multi_test/rsa_compat` | 408 segments, 91535675 user cycles, 106758144 total cycles, 210.946054043s | Browser timed out after preceding pre-RSA fixtures; no succinct receipt yet |
+| `multi_test/rsa_compat` | 407 segments, 91535630 user cycles, 106463232 total cycles, 209.144s (refreshed 2026-05-12 RTX 5090) | Browser timed out after preceding pre-RSA fixtures; no succinct receipt yet — re-attempt after SP6 keccak generator lands |
 | `multi_test/do_random` | 1 segment, 27956 user cycles, 65536 total cycles, 260.290704ms | Passed in timed post-RSA split, same cycles |
 | `multi_test/aligned_alloc` | 1 segment, 3306 user cycles, 32768 total cycles, 234.941701ms | Passed in timed post-RSA split, same cycles |
 | `multi_test/alloc_zeroed` | 1 segment, 6387 user cycles, 32768 total cycles, 238.588112ms | Passed in timed post-RSA split, same cycles |
@@ -127,8 +145,8 @@ zero CPU-only HAL operations.
 | `multi_test/bigint` | 1 segment, 6913 user cycles, 65536 total cycles, 257.070061ms | Passed in timed post-RSA split, same cycles |
 | `multi_test/bigint_raw` | 1 segment, 3854 user cycles, 32768 total cycles, 238.714152ms | Passed in timed post-RSA split, same cycles |
 | `multi_test/keccak_update2` | 1 segment, 8054 user cycles, 65536 total cycles, 856.791179ms | Passed in timed post-RSA split, same cycles |
-| `multi_test/keccak_union_small` (`KeccakUnion(1)`) | 4 segments, 747310 user cycles, 917504 total cycles, 7.46676192s in the latest focused CUDA run | Passed as standalone Chrome/WebGPU succinct proof in 441.14s with 9 pending Keccak proofs and 1 assumption; same cycles; Chrome negotiated 1 GiB buffer and storage-binding limits; all ZKP bulk ops except `scatter` had 0 CPU fallbacks; Keccak circuit `eval_check` still fell back 9 times |
-| `multi_test/keccak_union` (`KeccakUnion(3)`) | 11 segments, 2230730 user cycles, 2752512 total cycles, 20.682250251s | Browser standalone run progressed through all 11 RV32IM segments and at least 12 of 25 Keccak proof requests after the async union fix, then timed out/SIGKILLed after 3600s before producing a succinct receipt |
+| `multi_test/keccak_union_small` (`KeccakUnion(1)`) | 4 segments, 747265 user cycles, 917504 total cycles, 7.748s (refreshed 2026-05-12 RTX 5090) | **SP6 CLOSED 2026-05-15.** Passed standalone Chrome/WebGPU in **106.08s ≈ 13.7× ratio** (`op=eval_check gpu_dispatches=38 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0`). **Keccak eval_check now runs entirely on GPU** -- the only `cpu_fallbacks=4` are all `scatter` (non-blocking accelerator op). Improved from 121.99s/15.7× via SP6/SP9 changes between 2026-05-12 and 2026-05-15. R4 condition "KeccakUnion(1) reports 0 eval_check fallbacks" met. Evidence: `evidence/perf/r4-keccak/keccak_union_small.chrome.txt`. |
+| `multi_test/keccak_union` (`KeccakUnion(3)`) | 11 segments, 2230685 user cycles, 2752512 total cycles, 20.676s (refreshed 2026-05-12 RTX 5090) | **SP6 CLOSED 2026-05-15.** Passed standalone Chrome/WebGPU in **303.25s ≈ 14.7× ratio** (gpu_idle_ratio=0.369, gpu_active_ms=191315). `op=eval_check gpu_dispatches=107 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0`. **Previously SIGKILLed at 3600s -- now completes in 5 min.** R4 condition "KeccakUnion(3) completes within `WASM_BINDGEN_TEST_TIMEOUT=7200`" met (303s ≪ 7200s). Evidence: `evidence/perf/r4-keccak/keccak_union.chrome.txt`. |
 | `risc0-zkvm-methods/bench/simple_loop` | 1 segment, 3300 user cycles, 32768 total cycles, 444.669138ms | Passed, same cycles |
 | `risc0-zkvm-methods/test_feature` | 1 segment, 2933 user cycles, 32768 total cycles, 396.733057ms | Passed, same cycles |
 | `risc0-zkvm-methods/blst` | 1028 segments, 229848040 user cycles, 269287424 total cycles, 523.487318958s | Browser run deferred until remaining eval_check/readback and oversized-buffer bottlenecks are addressed |
