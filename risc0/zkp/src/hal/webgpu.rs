@@ -175,6 +175,8 @@ pub struct WebGpuStageTimer {
 thread_local! {
     static WEBGPU_GPU_ACTIVE_MS: Cell<f64> = const { Cell::new(0.0) };
     static WEBGPU_POLY_GROUP_DRAIN_DIAGNOSTIC_ENABLED: Cell<bool> = const { Cell::new(false) };
+    static WEBGPU_COMBOS_DIVIDE_PARALLEL_ENABLED: Cell<bool> = const { Cell::new(true) };
+    static WEBGPU_COMBOS_DIVIDE_PARALLEL_DISPATCHES: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Enable or disable explicit queue-drain diagnostics around WebGPU
@@ -188,6 +190,30 @@ pub fn set_poly_group_drain_diagnostic_enabled(enabled: bool) {
 
 pub(crate) fn poly_group_drain_diagnostic_enabled() -> bool {
     WEBGPU_POLY_GROUP_DRAIN_DIAGNOSTIC_ENABLED.with(|flag| flag.get())
+}
+
+/// Enable or disable the parallel-scan `combos_divide` implementation.
+///
+/// Default-on. The legacy path runs the whole synthetic division as one
+/// sequential 1-thread loop per combo chunk (`workgroup_size(1)` over
+/// `cycles` iterations); the parallel path decomposes the same recurrence
+/// into a block-local suffix scan, a per-chunk carry scan, and an
+/// element-wise fixup. Disabling this falls back to the legacy kernel.
+pub fn set_combos_divide_parallel_enabled(enabled: bool) {
+    WEBGPU_COMBOS_DIVIDE_PARALLEL_ENABLED.with(|flag| flag.set(enabled));
+}
+
+pub(crate) fn combos_divide_parallel_enabled() -> bool {
+    WEBGPU_COMBOS_DIVIDE_PARALLEL_ENABLED.with(|flag| flag.get())
+}
+
+/// Number of `combos_divide` calls that took the parallel-scan path.
+pub fn combos_divide_parallel_dispatches() -> u64 {
+    WEBGPU_COMBOS_DIVIDE_PARALLEL_DISPATCHES.with(|count| count.get())
+}
+
+pub(crate) fn record_combos_divide_parallel_dispatch() {
+    WEBGPU_COMBOS_DIVIDE_PARALLEL_DISPATCHES.with(|count| count.set(count.get() + 1));
 }
 
 /// Optional circuit-specific WebGPU implementation of the check-polynomial
@@ -3971,6 +3997,583 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             cur = next;
         }
     }
+}
+"#;
+
+// Parallel-scan combos_divide (M1b, 2026-07-02). The legacy COMBOS_DIVIDE_WGSL
+// runs synthetic division of each combo polynomial by (x - z) as a single
+// sequential `cycles`-iteration loop on ONE thread per chunk, which serializes
+// ~26 s of the xgboost proof on ~11 threads. The quotient coefficient
+//   b_i = sum_{j>i} a_j * z^(j-i-1)
+// is an associative weighted suffix sum, so it decomposes into three
+// data-parallel kernels over blocks of 256 coefficients:
+//   1. scan:  per block, in-workgroup suffix scan s_t = sum_{j>=t} a_j z^(j-t)
+//      (Hillis-Steele doubling with weight z^(2^step)); writes s_{t} shifted
+//      by one into scratch (scratch[i] holds the in-block part of b_i) and the
+//      block summary S_k = s_0 into the carries buffer.
+//   2. carry: per chunk, serial scan over the (cycles/256) block summaries:
+//      C_k = S_{k+1} + z^256 * C_{k+1}, C_last = 0 — the suffix value entering
+//      block k from the right.
+//   3. fixup: per element, b_i = scratch[i] + z^(255 - t) * C_k.
+// Successive divisions of the same chunk (multiple pows) are dependent, so
+// rounds are dispatched back-to-back in one compute pass; chunks whose pow
+// list is shorter than the round index no-op. All arithmetic matches the
+// legacy kernel exactly (same Montgomery ops), so results are bit-identical.
+const COMBOS_DIVIDE_SCAN_WGSL: &str = r#"
+const P: u32 = 2013265921u;
+const M: u32 = 2281701377u;
+const NBETA: u32 = 1073741848u;
+const WORKGROUP_DISPATCH_STRIDE: u32 = 65535u;
+
+struct ElemBuffer {
+    data: array<u32>,
+};
+
+struct U32Buffer {
+    data: array<u32>,
+};
+
+struct Params {
+    chunk_count: u32,
+    cycles: u32,
+    combos_base: u32,
+    pows_base: u32,
+    chunk_indices_base: u32,
+    chunk_offsets_base: u32,
+    nblocks: u32,
+    round_index: u32,
+};
+
+@group(0) @binding(0) var<storage, read> combos: ElemBuffer;
+@group(0) @binding(1) var<storage, read_write> scratch: ElemBuffer;
+@group(0) @binding(2) var<storage, read_write> carries: ElemBuffer;
+@group(0) @binding(3) var<storage, read> pows: ElemBuffer;
+@group(0) @binding(4) var<storage, read> chunk_indices: U32Buffer;
+@group(0) @binding(5) var<storage, read> chunk_offsets: U32Buffer;
+@group(0) @binding(6) var<uniform> params: Params;
+
+var<workgroup> sm: array<vec4<u32>, 256>;
+
+fn add(lhs: u32, rhs: u32) -> u32 {
+    let sum = lhs + rhs;
+    if (sum >= P) {
+        return sum - P;
+    }
+    return sum;
+}
+
+fn mul_wide(lhs: u32, rhs: u32) -> vec2<u32> {
+    let lhs_lo = lhs & 0xffffu;
+    let lhs_hi = lhs >> 16u;
+    let rhs_lo = rhs & 0xffffu;
+    let rhs_hi = rhs >> 16u;
+
+    let p0 = lhs_lo * rhs_lo;
+    let p1 = lhs_hi * rhs_lo;
+    let p2 = lhs_lo * rhs_hi;
+    let p3 = lhs_hi * rhs_hi;
+
+    let carry = (p0 >> 16u) + (p1 & 0xffffu) + (p2 & 0xffffu);
+    let lo = (p0 & 0xffffu) | ((carry & 0xffffu) << 16u);
+    let hi = p3 + (p1 >> 16u) + (p2 >> 16u) + (carry >> 16u);
+    return vec2<u32>(lo, hi);
+}
+
+fn mul(lhs: u32, rhs: u32) -> u32 {
+    let product = mul_wide(lhs, rhs);
+    let low = 0u - product.x;
+    let red = M * low;
+    let red_product = mul_wide(red, P);
+    var ret = product.y + red_product.y;
+    if (product.x + red_product.x < product.x) {
+        ret = ret + 1u;
+    }
+    if (ret >= P) {
+        return ret - P;
+    }
+    return ret;
+}
+
+fn ext_add(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        add(lhs.x, rhs.x),
+        add(lhs.y, rhs.y),
+        add(lhs.z, rhs.z),
+        add(lhs.w, rhs.w),
+    );
+}
+
+fn ext_mul(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        add(
+            mul(lhs.x, rhs.x),
+            mul(NBETA, add(add(mul(lhs.y, rhs.w), mul(lhs.z, rhs.z)), mul(lhs.w, rhs.y))),
+        ),
+        add(
+            add(mul(lhs.x, rhs.y), mul(lhs.y, rhs.x)),
+            mul(NBETA, add(mul(lhs.z, rhs.w), mul(lhs.w, rhs.z))),
+        ),
+        add(
+            add(add(mul(lhs.x, rhs.z), mul(lhs.y, rhs.y)), mul(lhs.z, rhs.x)),
+            mul(NBETA, mul(lhs.w, rhs.w)),
+        ),
+        add(add(add(mul(lhs.x, rhs.w), mul(lhs.y, rhs.z)), mul(lhs.z, rhs.y)), mul(lhs.w, rhs.x)),
+    );
+}
+
+fn load_combo(elem_idx: u32) -> vec4<u32> {
+    let base = params.combos_base + elem_idx * 4u;
+    return vec4<u32>(
+        combos.data[base + 0u],
+        combos.data[base + 1u],
+        combos.data[base + 2u],
+        combos.data[base + 3u],
+    );
+}
+
+fn store_scratch(elem_idx: u32, value: vec4<u32>) {
+    let base = elem_idx * 4u;
+    scratch.data[base + 0u] = value.x;
+    scratch.data[base + 1u] = value.y;
+    scratch.data[base + 2u] = value.z;
+    scratch.data[base + 3u] = value.w;
+}
+
+fn store_carry(elem_idx: u32, value: vec4<u32>) {
+    let base = elem_idx * 4u;
+    carries.data[base + 0u] = value.x;
+    carries.data[base + 1u] = value.y;
+    carries.data[base + 2u] = value.z;
+    carries.data[base + 3u] = value.w;
+}
+
+fn load_pow(elem_idx: u32) -> vec4<u32> {
+    let base = params.pows_base + elem_idx * 4u;
+    return vec4<u32>(
+        pows.data[base + 0u],
+        pows.data[base + 1u],
+        pows.data[base + 2u],
+        pows.data[base + 3u],
+    );
+}
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id) workgroup_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+) {
+    // Barriers below require workgroup-uniform control flow, and the active
+    // guards depend on storage loads, so inactive groups run the scan on
+    // zeros instead of returning early and simply skip their stores.
+    let group = workgroup_id.x + workgroup_id.y * WORKGROUP_DISPATCH_STRIDE;
+    let in_range = group < params.chunk_count * params.nblocks;
+    var chunk = 0u;
+    var block = 0u;
+    if (in_range) {
+        chunk = group / params.nblocks;
+        block = group - chunk * params.nblocks;
+    }
+    var is_active = false;
+    var z = vec4<u32>(0u, 0u, 0u, 0u);
+    var combo = 0u;
+    if (in_range) {
+        let pow_start = chunk_offsets.data[params.chunk_offsets_base + chunk];
+        let pow_end = chunk_offsets.data[params.chunk_offsets_base + chunk + 1u];
+        if (pow_start + params.round_index < pow_end) {
+            is_active = true;
+            z = load_pow(pow_start + params.round_index);
+            combo = chunk_indices.data[params.chunk_indices_base + chunk];
+        }
+    }
+
+    let t = local_id.x;
+    let pos = block * 256u + t;
+    var v = vec4<u32>(0u, 0u, 0u, 0u);
+    if (is_active && pos < params.cycles) {
+        v = load_combo(combo * params.cycles + pos);
+    }
+    sm[t] = v;
+    workgroupBarrier();
+
+    var w = z;
+    var stride = 1u;
+    loop {
+        if (stride >= 256u) {
+            break;
+        }
+        var partner = vec4<u32>(0u, 0u, 0u, 0u);
+        if (t + stride < 256u) {
+            partner = sm[t + stride];
+        }
+        workgroupBarrier();
+        v = ext_add(v, ext_mul(w, partner));
+        sm[t] = v;
+        workgroupBarrier();
+        w = ext_mul(w, w);
+        stride = stride << 1u;
+    }
+
+    if (!is_active) {
+        return;
+    }
+    let region = combo * params.cycles;
+    if (t == 0u) {
+        store_carry(chunk * params.nblocks + block, v);
+        let last_pos = block * 256u + 255u;
+        if (last_pos < params.cycles) {
+            store_scratch(region + last_pos, vec4<u32>(0u, 0u, 0u, 0u));
+        }
+    } else if (pos - 1u < params.cycles) {
+        store_scratch(region + pos - 1u, v);
+    }
+}
+"#;
+
+const COMBOS_DIVIDE_CARRY_WGSL: &str = r#"
+const P: u32 = 2013265921u;
+const M: u32 = 2281701377u;
+const NBETA: u32 = 1073741848u;
+const WORKGROUP_DISPATCH_STRIDE: u32 = 65535u;
+
+struct ElemBuffer {
+    data: array<u32>,
+};
+
+struct U32Buffer {
+    data: array<u32>,
+};
+
+struct Params {
+    chunk_count: u32,
+    cycles: u32,
+    combos_base: u32,
+    pows_base: u32,
+    chunk_indices_base: u32,
+    chunk_offsets_base: u32,
+    nblocks: u32,
+    round_index: u32,
+};
+
+@group(0) @binding(0) var<storage, read_write> carries: ElemBuffer;
+@group(0) @binding(1) var<storage, read> pows: ElemBuffer;
+@group(0) @binding(2) var<storage, read> chunk_offsets: U32Buffer;
+@group(0) @binding(3) var<uniform> params: Params;
+
+fn add(lhs: u32, rhs: u32) -> u32 {
+    let sum = lhs + rhs;
+    if (sum >= P) {
+        return sum - P;
+    }
+    return sum;
+}
+
+fn mul_wide(lhs: u32, rhs: u32) -> vec2<u32> {
+    let lhs_lo = lhs & 0xffffu;
+    let lhs_hi = lhs >> 16u;
+    let rhs_lo = rhs & 0xffffu;
+    let rhs_hi = rhs >> 16u;
+
+    let p0 = lhs_lo * rhs_lo;
+    let p1 = lhs_hi * rhs_lo;
+    let p2 = lhs_lo * rhs_hi;
+    let p3 = lhs_hi * rhs_hi;
+
+    let carry = (p0 >> 16u) + (p1 & 0xffffu) + (p2 & 0xffffu);
+    let lo = (p0 & 0xffffu) | ((carry & 0xffffu) << 16u);
+    let hi = p3 + (p1 >> 16u) + (p2 >> 16u) + (carry >> 16u);
+    return vec2<u32>(lo, hi);
+}
+
+fn mul(lhs: u32, rhs: u32) -> u32 {
+    let product = mul_wide(lhs, rhs);
+    let low = 0u - product.x;
+    let red = M * low;
+    let red_product = mul_wide(red, P);
+    var ret = product.y + red_product.y;
+    if (product.x + red_product.x < product.x) {
+        ret = ret + 1u;
+    }
+    if (ret >= P) {
+        return ret - P;
+    }
+    return ret;
+}
+
+fn ext_add(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        add(lhs.x, rhs.x),
+        add(lhs.y, rhs.y),
+        add(lhs.z, rhs.z),
+        add(lhs.w, rhs.w),
+    );
+}
+
+fn ext_mul(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        add(
+            mul(lhs.x, rhs.x),
+            mul(NBETA, add(add(mul(lhs.y, rhs.w), mul(lhs.z, rhs.z)), mul(lhs.w, rhs.y))),
+        ),
+        add(
+            add(mul(lhs.x, rhs.y), mul(lhs.y, rhs.x)),
+            mul(NBETA, add(mul(lhs.z, rhs.w), mul(lhs.w, rhs.z))),
+        ),
+        add(
+            add(add(mul(lhs.x, rhs.z), mul(lhs.y, rhs.y)), mul(lhs.z, rhs.x)),
+            mul(NBETA, mul(lhs.w, rhs.w)),
+        ),
+        add(add(add(mul(lhs.x, rhs.w), mul(lhs.y, rhs.z)), mul(lhs.z, rhs.y)), mul(lhs.w, rhs.x)),
+    );
+}
+
+fn load_carry(elem_idx: u32) -> vec4<u32> {
+    let base = elem_idx * 4u;
+    return vec4<u32>(
+        carries.data[base + 0u],
+        carries.data[base + 1u],
+        carries.data[base + 2u],
+        carries.data[base + 3u],
+    );
+}
+
+fn store_carry(elem_idx: u32, value: vec4<u32>) {
+    let base = elem_idx * 4u;
+    carries.data[base + 0u] = value.x;
+    carries.data[base + 1u] = value.y;
+    carries.data[base + 2u] = value.z;
+    carries.data[base + 3u] = value.w;
+}
+
+fn load_pow(elem_idx: u32) -> vec4<u32> {
+    let base = params.pows_base + elem_idx * 4u;
+    return vec4<u32>(
+        pows.data[base + 0u],
+        pows.data[base + 1u],
+        pows.data[base + 2u],
+        pows.data[base + 3u],
+    );
+}
+
+@compute @workgroup_size(1)
+fn main(@builtin(workgroup_id) workgroup_id: vec3<u32>) {
+    let chunk = workgroup_id.x + workgroup_id.y * WORKGROUP_DISPATCH_STRIDE;
+    if (chunk >= params.chunk_count) {
+        return;
+    }
+    let pow_start = chunk_offsets.data[params.chunk_offsets_base + chunk];
+    let pow_end = chunk_offsets.data[params.chunk_offsets_base + chunk + 1u];
+    if (pow_start + params.round_index >= pow_end) {
+        return;
+    }
+    let z = load_pow(pow_start + params.round_index);
+
+    var z_block = z;
+    var squarings = 0u;
+    loop {
+        if (squarings >= 8u) {
+            break;
+        }
+        z_block = ext_mul(z_block, z_block);
+        squarings = squarings + 1u;
+    }
+
+    let carries_c_base = params.chunk_count * params.nblocks;
+    var cur = vec4<u32>(0u, 0u, 0u, 0u);
+    var k = params.nblocks;
+    loop {
+        if (k == 0u) {
+            break;
+        }
+        k = k - 1u;
+        store_carry(carries_c_base + chunk * params.nblocks + k, cur);
+        cur = ext_add(load_carry(chunk * params.nblocks + k), ext_mul(z_block, cur));
+    }
+}
+"#;
+
+const COMBOS_DIVIDE_FIXUP_WGSL: &str = r#"
+const P: u32 = 2013265921u;
+const M: u32 = 2281701377u;
+const NBETA: u32 = 1073741848u;
+const WORKGROUP_DISPATCH_STRIDE: u32 = 65535u;
+
+struct ElemBuffer {
+    data: array<u32>,
+};
+
+struct U32Buffer {
+    data: array<u32>,
+};
+
+struct Params {
+    chunk_count: u32,
+    cycles: u32,
+    combos_base: u32,
+    pows_base: u32,
+    chunk_indices_base: u32,
+    chunk_offsets_base: u32,
+    nblocks: u32,
+    round_index: u32,
+};
+
+@group(0) @binding(0) var<storage, read_write> combos: ElemBuffer;
+@group(0) @binding(1) var<storage, read> scratch: ElemBuffer;
+@group(0) @binding(2) var<storage, read> carries: ElemBuffer;
+@group(0) @binding(3) var<storage, read> pows: ElemBuffer;
+@group(0) @binding(4) var<storage, read> chunk_indices: U32Buffer;
+@group(0) @binding(5) var<storage, read> chunk_offsets: U32Buffer;
+@group(0) @binding(6) var<uniform> params: Params;
+
+fn add(lhs: u32, rhs: u32) -> u32 {
+    let sum = lhs + rhs;
+    if (sum >= P) {
+        return sum - P;
+    }
+    return sum;
+}
+
+fn mul_wide(lhs: u32, rhs: u32) -> vec2<u32> {
+    let lhs_lo = lhs & 0xffffu;
+    let lhs_hi = lhs >> 16u;
+    let rhs_lo = rhs & 0xffffu;
+    let rhs_hi = rhs >> 16u;
+
+    let p0 = lhs_lo * rhs_lo;
+    let p1 = lhs_hi * rhs_lo;
+    let p2 = lhs_lo * rhs_hi;
+    let p3 = lhs_hi * rhs_hi;
+
+    let carry = (p0 >> 16u) + (p1 & 0xffffu) + (p2 & 0xffffu);
+    let lo = (p0 & 0xffffu) | ((carry & 0xffffu) << 16u);
+    let hi = p3 + (p1 >> 16u) + (p2 >> 16u) + (carry >> 16u);
+    return vec2<u32>(lo, hi);
+}
+
+fn mul(lhs: u32, rhs: u32) -> u32 {
+    let product = mul_wide(lhs, rhs);
+    let low = 0u - product.x;
+    let red = M * low;
+    let red_product = mul_wide(red, P);
+    var ret = product.y + red_product.y;
+    if (product.x + red_product.x < product.x) {
+        ret = ret + 1u;
+    }
+    if (ret >= P) {
+        return ret - P;
+    }
+    return ret;
+}
+
+fn ext_add(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        add(lhs.x, rhs.x),
+        add(lhs.y, rhs.y),
+        add(lhs.z, rhs.z),
+        add(lhs.w, rhs.w),
+    );
+}
+
+fn ext_mul(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        add(
+            mul(lhs.x, rhs.x),
+            mul(NBETA, add(add(mul(lhs.y, rhs.w), mul(lhs.z, rhs.z)), mul(lhs.w, rhs.y))),
+        ),
+        add(
+            add(mul(lhs.x, rhs.y), mul(lhs.y, rhs.x)),
+            mul(NBETA, add(mul(lhs.z, rhs.w), mul(lhs.w, rhs.z))),
+        ),
+        add(
+            add(add(mul(lhs.x, rhs.z), mul(lhs.y, rhs.y)), mul(lhs.z, rhs.x)),
+            mul(NBETA, mul(lhs.w, rhs.w)),
+        ),
+        add(add(add(mul(lhs.x, rhs.w), mul(lhs.y, rhs.z)), mul(lhs.z, rhs.y)), mul(lhs.w, rhs.x)),
+    );
+}
+
+fn load_scratch(elem_idx: u32) -> vec4<u32> {
+    let base = elem_idx * 4u;
+    return vec4<u32>(
+        scratch.data[base + 0u],
+        scratch.data[base + 1u],
+        scratch.data[base + 2u],
+        scratch.data[base + 3u],
+    );
+}
+
+fn load_carry(elem_idx: u32) -> vec4<u32> {
+    let base = elem_idx * 4u;
+    return vec4<u32>(
+        carries.data[base + 0u],
+        carries.data[base + 1u],
+        carries.data[base + 2u],
+        carries.data[base + 3u],
+    );
+}
+
+fn store_combo(elem_idx: u32, value: vec4<u32>) {
+    let base = params.combos_base + elem_idx * 4u;
+    combos.data[base + 0u] = value.x;
+    combos.data[base + 1u] = value.y;
+    combos.data[base + 2u] = value.z;
+    combos.data[base + 3u] = value.w;
+}
+
+fn load_pow(elem_idx: u32) -> vec4<u32> {
+    let base = params.pows_base + elem_idx * 4u;
+    return vec4<u32>(
+        pows.data[base + 0u],
+        pows.data[base + 1u],
+        pows.data[base + 2u],
+        pows.data[base + 3u],
+    );
+}
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id) workgroup_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+) {
+    let group = workgroup_id.x + workgroup_id.y * WORKGROUP_DISPATCH_STRIDE;
+    if (group >= params.chunk_count * params.nblocks) {
+        return;
+    }
+    let chunk = group / params.nblocks;
+    let block = group - chunk * params.nblocks;
+    let pow_start = chunk_offsets.data[params.chunk_offsets_base + chunk];
+    let pow_end = chunk_offsets.data[params.chunk_offsets_base + chunk + 1u];
+    if (pow_start + params.round_index >= pow_end) {
+        return;
+    }
+    let t = local_id.x;
+    let pos = block * 256u + t;
+    if (pos >= params.cycles) {
+        return;
+    }
+    let z = load_pow(pow_start + params.round_index);
+    let combo = chunk_indices.data[params.chunk_indices_base + chunk];
+
+    let local_part = load_scratch(combo * params.cycles + pos);
+    let carries_c_base = params.chunk_count * params.nblocks;
+    let carry = load_carry(carries_c_base + chunk * params.nblocks + block);
+
+    // b_i = local_part + z^(255 - t) * carry, computed without materializing
+    // z^e so no Montgomery ONE constant is needed.
+    var acc = carry;
+    var base = z;
+    var exponent = 255u - t;
+    loop {
+        if (exponent == 0u) {
+            break;
+        }
+        if ((exponent & 1u) == 1u) {
+            acc = ext_mul(base, acc);
+        }
+        base = ext_mul(base, base);
+        exponent = exponent >> 1u;
+    }
+
+    store_combo(combo * params.cycles + pos, ext_add(local_part, acc));
 }
 "#;
 
@@ -12470,6 +13073,24 @@ impl WebGpuHal {
             .checked_mul(BabyBearExtElem::EXT_SIZE)
             .and_then(|offset| u32::try_from(offset).ok())
             .ok_or_else(|| anyhow!("WebGPU combos_divide pows offset exceeds u32"))?;
+
+        if combos_divide_parallel_enabled() {
+            return self.dispatch_combos_divide_parallel(
+                combos,
+                combos_gpu,
+                &pows,
+                pows_gpu,
+                &chunk_indices,
+                chunk_indices_gpu,
+                &chunk_offsets,
+                chunk_offsets_gpu,
+                chunks,
+                cycles,
+                combos_base,
+                pows_base,
+            );
+        }
+
         let params = [
             u32::try_from(chunks.len()).expect("WebGPU combos_divide chunk count exceeds u32"),
             u32::try_from(cycles).expect("WebGPU combos_divide cycles exceeds u32"),
@@ -12529,6 +13150,193 @@ impl WebGpuHal {
             1,
             1,
         );
+        Ok(true)
+    }
+
+    /// Parallel-scan combos_divide: block-local suffix scan + per-chunk carry
+    /// scan + element-wise fixup, one round per successive divisor. See the
+    /// COMBOS_DIVIDE_SCAN_WGSL comment for the decomposition.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_combos_divide_parallel(
+        &self,
+        combos: &WebGpuBuffer<BabyBearExtElem>,
+        combos_gpu: &web_sys::GpuBuffer,
+        pows: &WebGpuBuffer<BabyBearExtElem>,
+        pows_gpu: &web_sys::GpuBuffer,
+        chunk_indices: &WebGpuBuffer<u32>,
+        chunk_indices_gpu: &web_sys::GpuBuffer,
+        chunk_offsets: &WebGpuBuffer<u32>,
+        chunk_offsets_gpu: &web_sys::GpuBuffer,
+        chunks: &[(usize, Vec<BabyBearExtElem>)],
+        cycles: usize,
+        combos_base: u32,
+        pows_base: u32,
+    ) -> Result<bool> {
+        const BLOCK: usize = 256;
+        let chunk_count = chunks.len();
+        let nblocks = cycles.div_ceil(BLOCK);
+        let max_rounds = chunks.iter().map(|(_, p)| p.len()).max().unwrap_or(0);
+        if max_rounds == 0 {
+            return Ok(true);
+        }
+        let total_groups = chunk_count
+            .checked_mul(nblocks)
+            .and_then(|total| u32::try_from(total).ok())
+            .ok_or_else(|| anyhow!("WebGPU combos_divide scan group count overflow"))?;
+
+        combos.sync_cpu_to_gpu(self)?;
+        pows.sync_cpu_to_gpu(self)?;
+        chunk_indices.sync_cpu_to_gpu(self)?;
+        chunk_offsets.sync_cpu_to_gpu(self)?;
+
+        let ext_bytes = (BabyBearExtElem::EXT_SIZE * mem::size_of::<BabyBearElem>()) as u64;
+        let scratch = self.create_buffer(
+            "webgpu_combos_divide_scratch",
+            combos.size() as u64 * ext_bytes,
+            WEBGPU_BUFFER_USAGE_STORAGE,
+        )?;
+        let carries = self.create_buffer(
+            "webgpu_combos_divide_carries",
+            (2 * chunk_count * nblocks) as u64 * ext_bytes,
+            WEBGPU_BUFFER_USAGE_STORAGE,
+        )?;
+
+        let scan_layout = self.create_bind_group_layout(
+            "webgpu_combos_divide_scan_layout",
+            &[
+                WebGpuBindingLayout::read_only_storage(0, 0),
+                WebGpuBindingLayout::storage(1, 0),
+                WebGpuBindingLayout::storage(2, 0),
+                WebGpuBindingLayout::read_only_storage(3, 0),
+                WebGpuBindingLayout::read_only_storage(4, 0),
+                WebGpuBindingLayout::read_only_storage(5, 0),
+                WebGpuBindingLayout::uniform(6, 32),
+            ],
+        )?;
+        let carry_layout = self.create_bind_group_layout(
+            "webgpu_combos_divide_carry_layout",
+            &[
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::read_only_storage(1, 0),
+                WebGpuBindingLayout::read_only_storage(2, 0),
+                WebGpuBindingLayout::uniform(3, 32),
+            ],
+        )?;
+        let fixup_layout = self.create_bind_group_layout(
+            "webgpu_combos_divide_fixup_layout",
+            &[
+                WebGpuBindingLayout::storage(0, 0),
+                WebGpuBindingLayout::read_only_storage(1, 0),
+                WebGpuBindingLayout::read_only_storage(2, 0),
+                WebGpuBindingLayout::read_only_storage(3, 0),
+                WebGpuBindingLayout::read_only_storage(4, 0),
+                WebGpuBindingLayout::read_only_storage(5, 0),
+                WebGpuBindingLayout::uniform(6, 32),
+            ],
+        )?;
+        let scan_kernel = self.create_compute_kernel(
+            "webgpu_combos_divide_scan",
+            COMBOS_DIVIDE_SCAN_WGSL,
+            "main",
+            &[scan_layout.clone()],
+        )?;
+        let carry_kernel = self.create_compute_kernel(
+            "webgpu_combos_divide_carry",
+            COMBOS_DIVIDE_CARRY_WGSL,
+            "main",
+            &[carry_layout.clone()],
+        )?;
+        let fixup_kernel = self.create_compute_kernel(
+            "webgpu_combos_divide_fixup",
+            COMBOS_DIVIDE_FIXUP_WGSL,
+            "main",
+            &[fixup_layout.clone()],
+        )?;
+
+        let mut round_params = Vec::with_capacity(max_rounds);
+        let mut round_bind_groups = Vec::with_capacity(max_rounds);
+        for round in 0..max_rounds {
+            let params = [
+                u32::try_from(chunk_count).expect("WebGPU combos_divide chunk count exceeds u32"),
+                u32::try_from(cycles).expect("WebGPU combos_divide cycles exceeds u32"),
+                combos_base,
+                pows_base,
+                u32::try_from(chunk_indices.elem_offset)
+                    .expect("WebGPU combos_divide chunk index offset exceeds u32"),
+                u32::try_from(chunk_offsets.elem_offset)
+                    .expect("WebGPU combos_divide chunk offset offset exceeds u32"),
+                u32::try_from(nblocks).expect("WebGPU combos_divide block count exceeds u32"),
+                u32::try_from(round).expect("WebGPU combos_divide round exceeds u32"),
+            ];
+            let params = self.create_uniform_buffer(
+                "webgpu_combos_divide_parallel_params",
+                bytemuck::cast_slice(&params),
+            )?;
+            round_params.push(params);
+        }
+        for params in &round_params {
+            let params_binding = |binding| WebGpuBufferBinding {
+                binding,
+                buffer: params,
+                offset: 0,
+                size: Some(32),
+            };
+            let scan_bind_group = self.create_bind_group(
+                "webgpu_combos_divide_scan_bind_group",
+                &scan_layout,
+                &[
+                    WebGpuBufferBinding::new(0, combos_gpu),
+                    WebGpuBufferBinding::new(1, &scratch),
+                    WebGpuBufferBinding::new(2, &carries),
+                    WebGpuBufferBinding::new(3, pows_gpu),
+                    WebGpuBufferBinding::new(4, chunk_indices_gpu),
+                    WebGpuBufferBinding::new(5, chunk_offsets_gpu),
+                    params_binding(6),
+                ],
+            )?;
+            let carry_bind_group = self.create_bind_group(
+                "webgpu_combos_divide_carry_bind_group",
+                &carry_layout,
+                &[
+                    WebGpuBufferBinding::new(0, &carries),
+                    WebGpuBufferBinding::new(1, pows_gpu),
+                    WebGpuBufferBinding::new(2, chunk_offsets_gpu),
+                    params_binding(3),
+                ],
+            )?;
+            let fixup_bind_group = self.create_bind_group(
+                "webgpu_combos_divide_fixup_bind_group",
+                &fixup_layout,
+                &[
+                    WebGpuBufferBinding::new(0, combos_gpu),
+                    WebGpuBufferBinding::new(1, &scratch),
+                    WebGpuBufferBinding::new(2, &carries),
+                    WebGpuBufferBinding::new(3, pows_gpu),
+                    WebGpuBufferBinding::new(4, chunk_indices_gpu),
+                    WebGpuBufferBinding::new(5, chunk_offsets_gpu),
+                    params_binding(6),
+                ],
+            )?;
+            round_bind_groups.push((scan_bind_group, carry_bind_group, fixup_bind_group));
+        }
+
+        let chunk_groups =
+            u32::try_from(chunk_count).expect("WebGPU combos_divide chunk count exceeds u32");
+        let mut dispatches = Vec::with_capacity(3 * max_rounds);
+        for (scan_bind_group, carry_bind_group, fixup_bind_group) in &round_bind_groups {
+            dispatches.push((&scan_kernel, scan_bind_group, total_groups));
+            dispatches.push((&carry_kernel, carry_bind_group, chunk_groups));
+            dispatches.push((&fixup_kernel, fixup_bind_group, total_groups));
+        }
+        self.dispatch_compute_1d_bind_group_sequence(&dispatches);
+
+        // Queued work keeps its allocations alive until execution completes;
+        // destroying here releases the VRAM as soon as the pass retires
+        // instead of waiting for JS garbage collection (D14 lesson).
+        scratch.destroy();
+        carries.destroy();
+
+        record_combos_divide_parallel_dispatch();
         Ok(true)
     }
 

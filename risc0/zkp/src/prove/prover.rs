@@ -714,6 +714,15 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
             self.hal.wait_idle().await?;
         }
 
+        // TEMP SP7go attribution: isolate eval_check from check-group drains.
+        if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
+            let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for(
+                "finalize_async drain_after_eval_check",
+                self.hal,
+            );
+            self.hal.wait_idle().await?;
+        }
+
         #[cfg(feature = "circuit_debug")]
         let mut bad_z = None;
 
@@ -741,6 +750,14 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
             self.hal
                 .batch_interpolate_ntt_async(&check_poly, ext_size)
                 .await?;
+        }
+        // TEMP SP7go attribution: isolate check interpolate.
+        if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
+            let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for(
+                "finalize_async drain_after_check_interpolate",
+                self.hal,
+            );
+            self.hal.wait_idle().await?;
         }
         let check_group = {
             let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for(
@@ -947,6 +964,14 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
                 )
                 .await?;
         });
+        // TEMP SP7go attribution: isolate mix_poly_coeffs.
+        if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
+            let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for(
+                "finalize_async drain_after_mix_poly_coeffs",
+                self.hal,
+            );
+            self.hal.wait_idle().await?;
+        }
 
         scope!("load_combos", {
             let reg_sizes: Vec<_> = self.taps.regs().map(|x| x.size() as u32).collect();
@@ -969,6 +994,14 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
                     )
                     .await?;
             });
+            // TEMP SP7go attribution: isolate combos_prepare.
+            if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
+                let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for(
+                    "finalize_async drain_after_combos_prepare",
+                    self.hal,
+                );
+                self.hal.wait_idle().await?;
+            }
 
             scope!("divide", {
                 let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for(
@@ -990,6 +1023,14 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
                     .combos_divide_async(&combos, chunks, self.cycles)
                     .await?;
             });
+            // TEMP SP7go attribution: isolate combos_divide.
+            if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
+                let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for(
+                    "finalize_async drain_after_combos_divide",
+                    self.hal,
+                );
+                self.hal.wait_idle().await?;
+            }
         });
 
         let final_poly_coeffs = scope!("sum", {
@@ -1002,6 +1043,14 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
                 .await?;
             final_poly_coeffs
         });
+        // TEMP SP7go attribution: isolate combos sum.
+        if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
+            let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for(
+                "finalize_async drain_after_combos_sum",
+                self.hal,
+            );
+            self.hal.wait_idle().await?;
+        }
 
         scope!("bit_rev", {
             let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for(
@@ -1012,6 +1061,15 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
                 .batch_bit_reverse_async(&final_poly_coeffs, ext_size)
                 .await?;
         });
+        // TEMP SP7go attribution: isolate final bit reverse; the queue is
+        // empty entering fri_prove so its round-0 expand drain is isolated.
+        if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
+            let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for(
+                "finalize_async drain_after_final_bit_rev",
+                self.hal,
+            );
+            self.hal.wait_idle().await?;
+        }
         tracing::debug!("FRI-proof, size = {}", final_poly_coeffs.size() / ext_size);
 
         let mut inner_merkles = self

@@ -2017,6 +2017,59 @@ fn main() {
     }
 
     #[wasm_bindgen_test(async)]
+    async fn webgpu_hal_combos_divide_parallel_matches_cpu_at_production_shape() {
+        console_error_panic_hook::set_once();
+        use risc0_zkp::hal::webgpu::combos_divide_parallel_dispatches;
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        hal.reset_diagnostics();
+
+        // Production shape: po2_18 cycles, multi-block carry chains, and
+        // chunks with unequal pow counts to exercise round masking.
+        let cycles = 1usize << 18;
+        let chunks = vec![
+            (0usize, vec![ext_elem(20300)]),
+            (1usize, vec![ext_elem(20400), ext_elem(20500), ext_elem(20600)]),
+            (2usize, vec![ext_elem(20700), ext_elem(20800)]),
+        ];
+        let initial = (0..3 * cycles)
+            .map(|idx| ext_elem(20900 + idx))
+            .collect::<Vec<_>>();
+        let mut expected = initial.clone();
+        combos_divide_expected(&mut expected, &chunks, cycles);
+
+        let combos = hal.copy_from_extelem("webgpu_hal_combos_divide_parallel", &initial);
+        let dispatches_before = combos_divide_parallel_dispatches();
+        {
+            let _gpu_scope = hal.gpu_authoritative_scope(true);
+            hal.combos_divide(&combos, chunks, cycles);
+        }
+        assert!(
+            combos_divide_parallel_dispatches() > dispatches_before,
+            "combos_divide should take the parallel-scan path by default"
+        );
+        combos.sync_gpu_to_cpu(&hal).await.unwrap();
+        let actual = combos.to_vec();
+        assert_eq!(actual.len(), expected.len());
+        for (idx, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(
+                actual, expected,
+                "parallel combos_divide mismatch at ext elem {idx}"
+            );
+        }
+
+        let diagnostics = hal.diagnostics();
+        assert_eq!(diagnostics.cpu_fallbacks, 0, "{diagnostics:?}");
+        assert_eq!(diagnostics.cpu_only_ops, 0, "{diagnostics:?}");
+        assert_eq!(
+            diagnostics.cpu_mirrors, 0,
+            "GPU-authoritative combos_divide should not run CPU mirrors"
+        );
+    }
+
+    #[wasm_bindgen_test(async)]
     async fn webgpu_alloc_extelem_zeroed_skips_host_zero_upload() {
         console_error_panic_hook::set_once();
 
@@ -9518,6 +9571,7 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         let prover = init_prover().await;
         assert_representative_webgpu_limits(prover.as_ref());
+        use risc0_zkp::hal::webgpu::combos_divide_parallel_dispatches;
         set_recursion_witgen_post_zeroize_hook_probe_enabled(true);
         set_recursion_witgen_gpu_verify_mem_candidate_enabled(true);
         set_accum_gpu_arm5_authoritative_enabled(true);
@@ -9535,6 +9589,7 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
         let busy_loop_recursion_accum_dispatches_before = recursion_accum_gpu_dispatches();
         let busy_loop_recursion_witgen_dispatches_before =
             recursion_witgen_gpu_verify_mem_candidate_dispatches();
+        let busy_loop_combos_divide_parallel_before = combos_divide_parallel_dispatches();
         let busy_loop_diag_before = prover.diagnostics();
         let busy_loop_env = ExecutorEnv::builder()
             .segment_limit_po2(18)
@@ -9553,6 +9608,10 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
         .await;
         assert_eq!(busy_loop_info.stats.segments, 1);
         assert_eq!(busy_loop_info.stats.total_cycles, 1 << 18);
+        assert!(
+            combos_divide_parallel_dispatches() > busy_loop_combos_divide_parallel_before,
+            "default representative BusyLoop should use the parallel-scan combos_divide"
+        );
         assert_eq!(
             accum_gpu_arm5_authoritative_dispatches(),
             0,
@@ -11881,6 +11940,7 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         let prover = init_prover().await;
         assert_representative_webgpu_limits(prover.as_ref());
+        use risc0_zkp::hal::webgpu::combos_divide_parallel_dispatches;
         set_recursion_witgen_post_zeroize_hook_probe_enabled(true);
         set_recursion_witgen_gpu_verify_mem_candidate_enabled(true);
         assert_eq!(
@@ -11900,6 +11960,7 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
         let recursion_accum_dispatches_before = recursion_accum_gpu_dispatches();
         let recursion_witgen_dispatches_before =
             recursion_witgen_gpu_verify_mem_candidate_dispatches();
+        let combos_divide_parallel_before = combos_divide_parallel_dispatches();
         let diag_before = prover.diagnostics();
         let model: GradientBooster =
             serde_json::from_str(include_str!("../../xgboost/res/trained_model.json")).unwrap();
@@ -11926,6 +11987,10 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
             30.528042544062632
         );
         let diagnostics = prover.diagnostics();
+        assert!(
+            combos_divide_parallel_dispatches() > combos_divide_parallel_before,
+            "default xgboost proof should use the parallel-scan combos_divide"
+        );
         assert!(
             witgen_gpu_short_circuit_cycles() > short_before,
             "default xgboost proof should use GPU-witgen replacement"
