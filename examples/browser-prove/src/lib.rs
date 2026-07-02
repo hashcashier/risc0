@@ -233,6 +233,19 @@ mod tests {
     }
 
     fn log_webgpu_diagnostics(prover: &WebGpuProver, name: &str) {
+        log_webgpu_diagnostics_expecting(prover, name, 0);
+    }
+
+    /// Variant for tests that deliberately disable a GPU stage and
+    /// therefore *induce* a known number of recorded CPU fallbacks
+    /// (e.g. `set_eval_check_gpu_enabled(false)` records one per
+    /// proof). Asserting the exact expected count keeps unexpected
+    /// extra fallbacks fatal.
+    fn log_webgpu_diagnostics_expecting(
+        prover: &WebGpuProver,
+        name: &str,
+        expected_cpu_fallbacks: u64,
+    ) {
         let diagnostics = prover.diagnostics();
         assert!(
             diagnostics.gpu_dispatches > 0 || diagnostics.raw_compute_dispatches > 0,
@@ -243,7 +256,7 @@ mod tests {
             "{name}: WebGPU proof path used CPU-only HAL operations"
         );
         assert_eq!(
-            diagnostics.cpu_fallbacks, 0,
+            diagnostics.cpu_fallbacks, expected_cpu_fallbacks,
             "{name}: WebGPU proof path used CPU fallbacks"
         );
         console_log!(
@@ -664,12 +677,26 @@ mod tests {
         image_id: [u32; 8],
         opts: &ProverOpts,
     ) -> ProveInfo {
+        prove_succinct_info_async_expecting_cpu_fallbacks(prover, name, env, elf, image_id, opts, 0)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn prove_succinct_info_async_expecting_cpu_fallbacks(
+        prover: &WebGpuProver,
+        name: &str,
+        env: ExecutorEnv<'_>,
+        elf: &[u8],
+        image_id: [u32; 8],
+        opts: &ProverOpts,
+        expected_cpu_fallbacks: u64,
+    ) -> ProveInfo {
         console_log!("browser-prove:start {name}");
         prover.reset_diagnostics();
         let prove_info = match prover.prove_with_opts_async(env, elf, opts).await {
             Ok(prove_info) => prove_info,
             Err(err) => {
-                log_webgpu_diagnostics(prover, name);
+                log_webgpu_diagnostics_expecting(prover, name, expected_cpu_fallbacks);
                 // SP-CR diagnostic 7 2026-05-12: dump the full anyhow error
                 // chain so the inner VerificationError variant from
                 // verify_integrity is visible. Default `{err}` only shows the
@@ -695,7 +722,7 @@ mod tests {
             prove_info.stats.user_cycles,
             prove_info.stats.total_cycles
         );
-        log_webgpu_diagnostics(prover, name);
+        log_webgpu_diagnostics_expecting(prover, name, expected_cpu_fallbacks);
         prove_info
     }
 
@@ -1882,6 +1909,43 @@ fn main() {
     }
 
     #[wasm_bindgen_test(async)]
+    async fn rv32im_eval_check_poly_ext_matches_cpu() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        risc0_circuit_rv32im::webgpu_testutil::eval_check_webgpu_matches_portable(&hal, 1)
+            .await
+            .unwrap();
+    }
+
+    /// Focused eval_check timing at the production shape (po2=18,
+    /// domain=2^20) for both hot circuits. Not a correctness gate — a
+    /// measurement vehicle so eval_check kernel/encoder changes get a
+    /// number in ~1 minute instead of a full proof gate. First rep
+    /// includes pipeline compile + zero-buffer upload; steady-state is
+    /// reps 2+.
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_eval_check_bench_production_shape() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        let rv32im_ms = risc0_circuit_rv32im::webgpu_testutil::eval_check_webgpu_bench(&hal, 18, 5)
+            .await
+            .unwrap();
+        console_log!("browser-prove:bench eval_check circuit=rv32im po2=18 reps_ms={rv32im_ms:?}");
+        let recursion_ms = risc0_circuit_recursion::testutil::eval_check_webgpu_bench(&hal, 18, 5)
+            .await
+            .unwrap();
+        console_log!(
+            "browser-prove:bench eval_check circuit=recursion po2=18 reps_ms={recursion_ms:?}"
+        );
+    }
+
+    #[wasm_bindgen_test(async)]
     async fn webgpu_hal_mix_poly_coeffs_authoritative_matches_cpu() {
         console_error_panic_hook::set_once();
 
@@ -2031,7 +2095,10 @@ fn main() {
         let cycles = 1usize << 18;
         let chunks = vec![
             (0usize, vec![ext_elem(20300)]),
-            (1usize, vec![ext_elem(20400), ext_elem(20500), ext_elem(20600)]),
+            (
+                1usize,
+                vec![ext_elem(20400), ext_elem(20500), ext_elem(20600)],
+            ),
             (2usize, vec![ext_elem(20700), ext_elem(20800)]),
         ];
         let initial = (0..3 * cycles)
@@ -9784,13 +9851,16 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
             .unwrap()
             .build()
             .unwrap();
-        let prove_info = prove_succinct_info_async(
+        // Disabling GPU eval_check records one intentional CPU fallback
+        // per proof; this workload proves 1 segment + 1 lift = 2.
+        let prove_info = prove_succinct_info_async_expecting_cpu_fallbacks(
             prover.as_ref(),
             "multi_test/busy_loop_po2_18_async_without_eval_check_gpu",
             env,
             MULTI_TEST_ELF,
             MULTI_TEST_ID,
             &ProverOpts::succinct(),
+            2,
         )
         .await;
         assert_eq!(prove_info.stats.segments, 1);

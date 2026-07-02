@@ -53,10 +53,8 @@ const RECURSION_STEP_VERIFY_ACCUM_WGSL: &str = include_str!("webgpu_step_verify_
 const RECURSION_STEP_VERIFY_MEM_WGSL: &str = include_str!("webgpu_step_verify_mem.wgsl");
 const RECURSION_STEP_EXEC_POSEIDON2_CHAIN_WGSL: &str =
     include_str!("webgpu_step_exec_poseidon2_chain.wgsl");
-const RECURSION_STEP_EXEC_MICRO_OPS_WGSL: &str =
-    include_str!("webgpu_step_exec_micro_ops.wgsl");
-const RECURSION_STEP_EXEC_MACRO_OPS_WGSL: &str =
-    include_str!("webgpu_step_exec_macro_ops.wgsl");
+const RECURSION_STEP_EXEC_MICRO_OPS_WGSL: &str = include_str!("webgpu_step_exec_micro_ops.wgsl");
+const RECURSION_STEP_EXEC_MACRO_OPS_WGSL: &str = include_str!("webgpu_step_exec_macro_ops.wgsl");
 const RECURSION_RUST_KERNELS_GENERATED: &str = include_str!("rust_kernels_generated.rs.inc");
 
 const RECURSION_ACCUM_COMPUTE_ENTRY: &str = r#"
@@ -270,7 +268,12 @@ fn generated_wom_rows_by_family(needle: &str, scan: WomRowScan) -> BTreeMap<Stri
             WomRowScan::Forward => (line_idx + 1..lines.len().min(line_idx + 250))
                 .find_map(|idx| wom_row_family_from_comment(lines[idx])),
         }
-        .unwrap_or_else(|| panic!("missing generated WOM row family near line {}", line_idx + 1));
+        .unwrap_or_else(|| {
+            panic!(
+                "missing generated WOM row family near line {}",
+                line_idx + 1
+            )
+        });
         *out.entry(family).or_insert(0) += 1;
     }
     out
@@ -968,10 +971,8 @@ fn dispatch_recursion_witgen_gpu_verify_mem_candidate(
         preflight_wom_words.len()
     );
     let iop_buf = create_words_buffer!("recursion_witgen_candidate_iop_body", iop_words.len());
-    let iop_cursor_buf = create_words_buffer!(
-        "recursion_witgen_candidate_iop_cursors",
-        iop_cursors.len()
-    );
+    let iop_cursor_buf =
+        create_words_buffer!("recursion_witgen_candidate_iop_cursors", iop_cursors.len());
     let unsorted_rows_buf = create_words_buffer!(
         "recursion_witgen_candidate_unsorted_rows",
         unsorted_row_words
@@ -1032,7 +1033,8 @@ fn dispatch_recursion_witgen_gpu_verify_mem_candidate(
         plan.work_cycles,
     ];
     let params_bytes: &[u8] = bytemuck::cast_slice(&params);
-    let params_buf = hal.create_uniform_buffer("recursion_witgen_candidate_params", params_bytes)?;
+    let params_buf =
+        hal.create_uniform_buffer("recursion_witgen_candidate_params", params_bytes)?;
 
     let exec_layout = hal.create_bind_group_layout(
         "recursion_witgen_candidate_exec_layout",

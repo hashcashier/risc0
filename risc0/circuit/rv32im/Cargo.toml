@@ -47,6 +47,7 @@ futures = { version = "0.3", default-features = false, features = [
   "alloc",
   "async-await",
 ], optional = true }
+js-sys = { version = "0.3", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 enum-map = { version = "2.7.3", optional = true }
 malachite = { version = "0.4.22", optional = true, default-features = false, features = [
@@ -116,6 +117,7 @@ webgpu = [
   "prove",
   "risc0-zkp/webgpu",
   "dep:futures",
+  "dep:js-sys",
   "dep:wasm-bindgen-futures",
 ]
 witgen_debug = []

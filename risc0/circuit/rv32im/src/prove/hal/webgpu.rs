@@ -2137,7 +2137,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             format!("arg_u8_term(row, CONTROL0_U8_{idx}_COUNT, CONTROL0_U8_{idx}_VAL)"),
         );
     }
-    assert_eq!(term_idx, 58, "CONTROL0 direct accumulator term count changed");
+    assert_eq!(
+        term_idx, 58,
+        "CONTROL0 direct accumulator term count changed"
+    );
 
     wgsl.push_str(
         r#"  store_ext(row, ACC_COL19, cur);
@@ -6611,7 +6614,11 @@ impl CircuitAccumulator<WebGpuHal> for WebGpuCircuitHal {
                 let direct_major_mask = if misc1_rows.is_empty() { 0 } else { 1u16 << 1 }
                     | if misc2_rows.is_empty() { 0 } else { 1u16 << 2 }
                     | if mem1_rows.is_empty() { 0 } else { 1u16 << 6 }
-                    | if control0_rows.is_empty() { 0 } else { 1u16 << 7 };
+                    | if control0_rows.is_empty() {
+                        0
+                    } else {
+                        1u16 << 7
+                    };
                 super::rust_steps::with_accum_eqz_elided(|| {
                     super::rust_steps::step_accum_without_selected_majors_or_postprocess(
                         preflight,

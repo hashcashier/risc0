@@ -541,8 +541,7 @@ fn record_wom_sort_profile(sorted_rows: &[WomArgumentRow], valid_rows: usize) {
     WOM_SORT_PROFILE_ROWS.fetch_add(rows.len() as u64, AtomicOrdering::SeqCst);
     WOM_SORT_PROFILE_ADDR_GROUPS.fetch_add(addr_groups, AtomicOrdering::SeqCst);
     WOM_SORT_PROFILE_REPEATED_ADDR_GROUPS.fetch_add(repeated_addr_groups, AtomicOrdering::SeqCst);
-    WOM_SORT_PROFILE_DISTINCT_VALUE_GROUPS
-        .fetch_add(distinct_value_groups, AtomicOrdering::SeqCst);
+    WOM_SORT_PROFILE_DISTINCT_VALUE_GROUPS.fetch_add(distinct_value_groups, AtomicOrdering::SeqCst);
     WOM_SORT_PROFILE_DISTINCT_VALUE_ROWS.fetch_add(distinct_value_rows, AtomicOrdering::SeqCst);
     WOM_SORT_PROFILE_MAX_ADDR_GROUP.fetch_max(max_addr_group, AtomicOrdering::SeqCst);
 

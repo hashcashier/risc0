@@ -23,7 +23,7 @@ use std::{
     rc::Rc,
 };
 
-use anyhow::{anyhow, ensure, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 use risc0_core::field::{
     baby_bear::{BabyBear, BabyBearElem, BabyBearExtElem},
     Elem as _, ExtElem as _, RootsOfUnity,
@@ -44,9 +44,9 @@ use crate::core::{
 use crate::{
     adapter::{PolyExtStep, PolyExtStepDef},
     hal::webgpu_codegen::{
-        eval_check_fp_slot, eval_check_last_uses, eval_check_mix_slot, eval_check_note_last,
-        staged_multi_kernel_from_def, CodegenError, EmitterTap, EvalCheckSlotAllocator, FieldMode,
-        STAGED_EVAL_CHECK_PRELUDE_WGSL,
+        eval_check_fp_slot, eval_check_last_uses, eval_check_last_uses_block, eval_check_mix_slot,
+        eval_check_note_last, staged_multi_kernel_from_def, CodegenError, EmitterTap,
+        EvalCheckSlotAllocator, FieldMode, STAGED_EVAL_CHECK_PRELUDE_WGSL,
     },
     taps::TapSet,
     INV_RATE,
@@ -139,8 +139,20 @@ const WEBGPU_EVAL_CHECK_SPLIT_TERMS_PER_SHADER: usize = 64;
 const WEBGPU_EVAL_CHECK_SPLIT_FP_OPS_PER_SHADER: usize = 2048;
 const WEBGPU_EVAL_CHECK_MAX_FP_SLOTS: usize = 1536;
 const WEBGPU_EVAL_CHECK_MAX_FP_ELEM_SLOTS: usize = 8192;
+/// Cap on the hybrid base interpreter's vec4 ext bank. rv32im's
+/// production tape needs ~101 under the lazy reorder; DEFs that exceed
+/// this fall through to the all-ext interpreter.
+const WEBGPU_EVAL_CHECK_MAX_EXT_BANK_SLOTS: usize = 256;
 const WEBGPU_EVAL_CHECK_BASE_PRIVATE_MAX_FP_SLOTS: usize = 1536;
 const WEBGPU_EVAL_CHECK_MAX_MIX_SLOTS: usize = 64;
+/// M2a (2026-07-02): emit fp ops lazily (on first demand by a mix op,
+/// post-order over the operand DAG) instead of in zirgen's eager tape
+/// order. Same ops, same operands, a valid topological order — outputs
+/// are bit-identical; only the peak number of simultaneously-live fp
+/// values changes, which directly sizes the interpreter's per-thread
+/// scratch array. Measured on the production tapes: rv32im max-live
+/// 927 -> 684, recursion 1001 -> 297.
+const WEBGPU_EVAL_CHECK_LAZY_REORDER: bool = true;
 const WEBGPU_EVAL_CHECK_INTERPRETER_WORKGROUP_SIZE: u32 = 32;
 const WEBGPU_EVAL_CHECK_INSTRUCTION_WORDS: usize = 8;
 const WEBGPU_BATCH_EVALUATE_CHUNK_SIZE: usize = 1024;
@@ -155,6 +167,22 @@ const WEBGPU_EVAL_OP_MUL: u32 = 6;
 const WEBGPU_EVAL_OP_TRUE: u32 = 7;
 const WEBGPU_EVAL_OP_AND_EQZ: u32 = 8;
 const WEBGPU_EVAL_OP_AND_COND: u32 = 9;
+// M2a hybrid base interpreter (2026-07-02): ops 10+ operate on a second,
+// small vec4 "ext bank" so tapes with a handful of `ConstExt` values
+// (rv32im: 6 constants tainting ~100 simultaneously-live values) can run
+// the cheap scalar base interpreter for everything untainted instead of
+// paying vec4 arithmetic on every op. E/B suffixes name operand banks
+// (Ext bank / Base bank); commutative EB/BE forms are normalized to EB
+// by the encoder. All results land in the ext bank.
+const WEBGPU_EVAL_OP_ADD_EE: u32 = 10;
+const WEBGPU_EVAL_OP_ADD_EB: u32 = 11;
+const WEBGPU_EVAL_OP_SUB_EE: u32 = 12;
+const WEBGPU_EVAL_OP_SUB_EB: u32 = 13;
+const WEBGPU_EVAL_OP_SUB_BE: u32 = 14;
+const WEBGPU_EVAL_OP_MUL_EE: u32 = 15;
+const WEBGPU_EVAL_OP_MUL_EB: u32 = 16;
+const WEBGPU_EVAL_OP_AND_EQZ_EXT: u32 = 17;
+const WEBGPU_EVAL_OP_AND_COND_EXT: u32 = 18;
 
 /// Browser console timer for proof-stage telemetry.
 ///
@@ -693,11 +721,127 @@ fn eval_check_ext_const(words: [u32; 4]) -> String {
 // `webgpu` feature is on) can share the same slot-allocation discipline
 // as the runtime interpreter here. See iter 6 commit.
 
+/// Lazy (on-demand) reordering of a poly_ext tape. Mix ops keep their
+/// original relative order (so mix var ids and mix-pow indices are
+/// unchanged); each fp op is emitted immediately before its first
+/// consumer via an iterative post-order walk of the operand DAG, and fp
+/// var ids are renumbered to the new emission order. Every emitted op
+/// computes the same field values from the same operands, so the check
+/// output is bit-identical — only peak fp liveness (and therefore the
+/// interpreter's scratch array size) changes.
+fn eval_check_reorder_lazy(block: &[PolyExtStep]) -> Result<Vec<PolyExtStep>> {
+    // Producing op index for each fp var, in original tape order.
+    let mut fp_producer: Vec<usize> = Vec::new();
+    for (op_idx, op) in block.iter().enumerate() {
+        match op {
+            PolyExtStep::Const(_)
+            | PolyExtStep::ConstExt(_, _, _, _)
+            | PolyExtStep::Get(_)
+            | PolyExtStep::GetGlobal(_, _)
+            | PolyExtStep::Add(_, _)
+            | PolyExtStep::Sub(_, _)
+            | PolyExtStep::Mul(_, _) => fp_producer.push(op_idx),
+            PolyExtStep::True | PolyExtStep::AndEqz(_, _) | PolyExtStep::AndCond(_, _, _) => {}
+        }
+    }
+
+    let mut new_fp_id: Vec<Option<usize>> = vec![None; fp_producer.len()];
+    let mut out: Vec<PolyExtStep> = Vec::with_capacity(block.len());
+    let mut next_fp = 0usize;
+    let mut stack: Vec<(usize, bool)> = Vec::new();
+
+    let emit_fp = |root: usize,
+                   new_fp_id: &mut Vec<Option<usize>>,
+                   out: &mut Vec<PolyExtStep>,
+                   next_fp: &mut usize,
+                   stack: &mut Vec<(usize, bool)>|
+     -> Result<usize> {
+        ensure!(
+            root < fp_producer.len(),
+            "poly_ext fp operand {root} out of range"
+        );
+        if let Some(id) = new_fp_id[root] {
+            return Ok(id);
+        }
+        stack.clear();
+        stack.push((root, false));
+        while let Some((var, expanded)) = stack.pop() {
+            if new_fp_id[var].is_some() {
+                continue;
+            }
+            let op = &block[fp_producer[var]];
+            if expanded {
+                let remapped = match op {
+                    PolyExtStep::Const(value) => PolyExtStep::Const(*value),
+                    PolyExtStep::ConstExt(x0, x1, x2, x3) => {
+                        PolyExtStep::ConstExt(*x0, *x1, *x2, *x3)
+                    }
+                    PolyExtStep::Get(tap) => PolyExtStep::Get(*tap),
+                    PolyExtStep::GetGlobal(arg, offset) => PolyExtStep::GetGlobal(*arg, *offset),
+                    PolyExtStep::Add(lhs, rhs) => PolyExtStep::Add(
+                        new_fp_id[*lhs].expect("lazy reorder emitted op before its lhs"),
+                        new_fp_id[*rhs].expect("lazy reorder emitted op before its rhs"),
+                    ),
+                    PolyExtStep::Sub(lhs, rhs) => PolyExtStep::Sub(
+                        new_fp_id[*lhs].expect("lazy reorder emitted op before its lhs"),
+                        new_fp_id[*rhs].expect("lazy reorder emitted op before its rhs"),
+                    ),
+                    PolyExtStep::Mul(lhs, rhs) => PolyExtStep::Mul(
+                        new_fp_id[*lhs].expect("lazy reorder emitted op before its lhs"),
+                        new_fp_id[*rhs].expect("lazy reorder emitted op before its rhs"),
+                    ),
+                    PolyExtStep::True
+                    | PolyExtStep::AndEqz(_, _)
+                    | PolyExtStep::AndCond(_, _, _) => {
+                        bail!("poly_ext fp producer table pointed at a mix op")
+                    }
+                };
+                out.push(remapped);
+                new_fp_id[var] = Some(*next_fp);
+                *next_fp += 1;
+            } else {
+                stack.push((var, true));
+                if let PolyExtStep::Add(lhs, rhs)
+                | PolyExtStep::Sub(lhs, rhs)
+                | PolyExtStep::Mul(lhs, rhs) = op
+                {
+                    ensure!(
+                        *lhs < var && *rhs < var,
+                        "poly_ext fp operand references a later var"
+                    );
+                    if new_fp_id[*rhs].is_none() {
+                        stack.push((*rhs, false));
+                    }
+                    if new_fp_id[*lhs].is_none() {
+                        stack.push((*lhs, false));
+                    }
+                }
+            }
+        }
+        new_fp_id[root].ok_or_else(|| anyhow!("lazy reorder failed to emit fp var {root}"))
+    };
+
+    for op in block {
+        match op {
+            PolyExtStep::True => out.push(PolyExtStep::True),
+            PolyExtStep::AndEqz(chain, inner) => {
+                let inner = emit_fp(*inner, &mut new_fp_id, &mut out, &mut next_fp, &mut stack)?;
+                out.push(PolyExtStep::AndEqz(*chain, inner));
+            }
+            PolyExtStep::AndCond(chain, cond, inner) => {
+                let cond = emit_fp(*cond, &mut new_fp_id, &mut out, &mut next_fp, &mut stack)?;
+                out.push(PolyExtStep::AndCond(*chain, cond, *inner));
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
 fn eval_check_interpreter_instructions_with_limit(
     taps: &TapSet<'_>,
     def: &PolyExtStepDef,
     max_fp_slots: usize,
-    allow_const_ext: bool,
 ) -> Result<(Vec<u32>, usize, usize, usize)> {
     let tap_info: Vec<_> = taps
         .taps()
@@ -707,7 +851,14 @@ fn eval_check_interpreter_instructions_with_limit(
             back: tap.back(),
         })
         .collect();
-    let (last_fp, last_mix, _fp_count, _mix_count) = eval_check_last_uses(def)?;
+    let reordered;
+    let block: &[PolyExtStep] = if WEBGPU_EVAL_CHECK_LAZY_REORDER {
+        reordered = eval_check_reorder_lazy(def.block)?;
+        &reordered
+    } else {
+        def.block
+    };
+    let (last_fp, last_mix, _fp_count, _mix_count) = eval_check_last_uses_block(block, def.ret)?;
     let mut fp_alloc = EvalCheckSlotAllocator::default();
     let mut mix_alloc = EvalCheckSlotAllocator::default();
     let mut fp_slots: Vec<Option<usize>> = Vec::new();
@@ -718,7 +869,7 @@ fn eval_check_interpreter_instructions_with_limit(
         instructions.extend(words);
     };
 
-    for (op_idx, op) in def.block.iter().enumerate() {
+    for (op_idx, op) in block.iter().enumerate() {
         let mut used_fp = Vec::new();
         let mut used_mix = Vec::new();
         match op {
@@ -742,10 +893,6 @@ fn eval_check_interpreter_instructions_with_limit(
                 }
             }
             PolyExtStep::ConstExt(x0, x1, x2, x3) => {
-                ensure!(
-                    allow_const_ext,
-                    "WebGPU base-field eval_check does not support extension constants"
-                );
                 let out_idx = fp_slots.len();
                 let out_slot = fp_alloc.alloc();
                 fp_slots.push(Some(out_slot));
@@ -988,19 +1135,369 @@ fn eval_check_interpreter_instructions(
     taps: &TapSet<'_>,
     def: &PolyExtStepDef,
 ) -> Result<(Vec<u32>, usize, usize, usize)> {
-    eval_check_interpreter_instructions_with_limit(taps, def, WEBGPU_EVAL_CHECK_MAX_FP_SLOTS, true)
+    eval_check_interpreter_instructions_with_limit(taps, def, WEBGPU_EVAL_CHECK_MAX_FP_SLOTS)
 }
 
+/// Hybrid base-field instruction stream: base-field values live in a
+/// scalar `u32` bank (ops 0..=9, unchanged from the original base
+/// interpreter, so pure-base tapes like recursion's produce a
+/// byte-identical stream), and values tainted by `ConstExt` live in a
+/// small vec4 ext bank (ops 10..=18). Taint is static: `ConstExt` is
+/// ext, and Add/Sub/Mul is ext iff either operand is. All field
+/// operations remain exact canonical mod-P arithmetic, so results are
+/// bit-identical to the all-ext interpreter.
+///
+/// Returns `(instructions, fp_slots, ext_slots, mix_slots, ret_mix_slot)`.
 fn eval_check_base_interpreter_instructions(
     taps: &TapSet<'_>,
     def: &PolyExtStepDef,
-) -> Result<(Vec<u32>, usize, usize, usize)> {
-    eval_check_interpreter_instructions_with_limit(
-        taps,
-        def,
-        WEBGPU_EVAL_CHECK_MAX_FP_ELEM_SLOTS,
-        false,
-    )
+) -> Result<(Vec<u32>, usize, usize, usize, usize)> {
+    let tap_info: Vec<_> = taps
+        .taps()
+        .map(|tap| EvalCheckTap {
+            group: tap.group(),
+            offset: tap.offset(),
+            back: tap.back(),
+        })
+        .collect();
+    let reordered;
+    let block: &[PolyExtStep] = if WEBGPU_EVAL_CHECK_LAZY_REORDER {
+        reordered = eval_check_reorder_lazy(def.block)?;
+        &reordered
+    } else {
+        def.block
+    };
+    let (last_fp, last_mix, _fp_count, _mix_count) = eval_check_last_uses_block(block, def.ret)?;
+
+    // Per fp var: which bank it lives in and its slot there.
+    #[derive(Clone, Copy)]
+    struct HybridSlot {
+        is_ext: bool,
+        slot: usize,
+    }
+    let mut base_alloc = EvalCheckSlotAllocator::default();
+    let mut ext_alloc = EvalCheckSlotAllocator::default();
+    let mut mix_alloc = EvalCheckSlotAllocator::default();
+    let mut fp_slots: Vec<Option<HybridSlot>> = Vec::new();
+    let mut mix_slots: Vec<Option<usize>> = Vec::new();
+    let mut instructions = Vec::new();
+
+    let mut push_instr = |words: [u32; WEBGPU_EVAL_CHECK_INSTRUCTION_WORDS]| {
+        instructions.extend(words);
+    };
+    let slot_u32 = |slot: usize| u32::try_from(slot).expect("eval_check slot exceeds u32");
+    let fp_slot = |slots: &[Option<HybridSlot>], var: usize| -> Result<HybridSlot> {
+        slots
+            .get(var)
+            .copied()
+            .flatten()
+            .ok_or_else(|| anyhow!("poly_ext fp var {var} used after free or before def"))
+    };
+
+    for (op_idx, op) in block.iter().enumerate() {
+        let mut used_fp = Vec::new();
+        let mut used_mix = Vec::new();
+        match op {
+            PolyExtStep::Const(value) => {
+                let out_idx = fp_slots.len();
+                let out_slot = base_alloc.alloc();
+                fp_slots.push(Some(HybridSlot {
+                    is_ext: false,
+                    slot: out_slot,
+                }));
+                push_instr([
+                    WEBGPU_EVAL_OP_CONST,
+                    slot_u32(out_slot),
+                    elem_const_word(*value),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ]);
+                if last_fp.get(out_idx).copied().flatten().is_none() {
+                    fp_slots[out_idx] = None;
+                    base_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::ConstExt(x0, x1, x2, x3) => {
+                let out_idx = fp_slots.len();
+                let out_slot = ext_alloc.alloc();
+                fp_slots.push(Some(HybridSlot {
+                    is_ext: true,
+                    slot: out_slot,
+                }));
+                push_instr([
+                    WEBGPU_EVAL_OP_CONST_EXT,
+                    slot_u32(out_slot),
+                    elem_const_word(*x0),
+                    elem_const_word(*x1),
+                    elem_const_word(*x2),
+                    elem_const_word(*x3),
+                    0,
+                    0,
+                ]);
+                if last_fp.get(out_idx).copied().flatten().is_none() {
+                    fp_slots[out_idx] = None;
+                    ext_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::Get(tap_idx) => {
+                let tap = tap_info
+                    .get(*tap_idx)
+                    .ok_or_else(|| anyhow!("poly_ext tap index {tap_idx} is out of range"))?;
+                ensure!(tap.group < 3, "WebGPU eval_check only supports 3 groups");
+                let out_idx = fp_slots.len();
+                let out_slot = base_alloc.alloc();
+                fp_slots.push(Some(HybridSlot {
+                    is_ext: false,
+                    slot: out_slot,
+                }));
+                push_instr([
+                    WEBGPU_EVAL_OP_GET,
+                    slot_u32(out_slot),
+                    u32::try_from(tap.group).expect("eval_check tap group exceeds u32"),
+                    u32::try_from(tap.offset).expect("eval_check tap offset exceeds u32"),
+                    u32::try_from(tap.back * INV_RATE).expect("eval_check tap back exceeds u32"),
+                    0,
+                    0,
+                    0,
+                ]);
+                if last_fp.get(out_idx).copied().flatten().is_none() {
+                    fp_slots[out_idx] = None;
+                    base_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::GetGlobal(arg, offset) => {
+                ensure!(*arg < 2, "WebGPU eval_check only supports 2 global buffers");
+                let out_idx = fp_slots.len();
+                let out_slot = base_alloc.alloc();
+                fp_slots.push(Some(HybridSlot {
+                    is_ext: false,
+                    slot: out_slot,
+                }));
+                push_instr([
+                    WEBGPU_EVAL_OP_GET_GLOBAL,
+                    slot_u32(out_slot),
+                    u32::try_from(*arg).expect("eval_check global arg exceeds u32"),
+                    u32::try_from(*offset).expect("eval_check global offset exceeds u32"),
+                    0,
+                    0,
+                    0,
+                    0,
+                ]);
+                if last_fp.get(out_idx).copied().flatten().is_none() {
+                    fp_slots[out_idx] = None;
+                    base_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::Add(lhs, rhs)
+            | PolyExtStep::Sub(lhs, rhs)
+            | PolyExtStep::Mul(lhs, rhs) => {
+                let lhs_slot = fp_slot(&fp_slots, *lhs)?;
+                let rhs_slot = fp_slot(&fp_slots, *rhs)?;
+                used_fp.extend([*lhs, *rhs]);
+                let out_is_ext = lhs_slot.is_ext || rhs_slot.is_ext;
+                let out_idx = fp_slots.len();
+                let out_slot = if out_is_ext {
+                    ext_alloc.alloc()
+                } else {
+                    base_alloc.alloc()
+                };
+                fp_slots.push(Some(HybridSlot {
+                    is_ext: out_is_ext,
+                    slot: out_slot,
+                }));
+                // Pick the opcode + operand order for the bank pattern.
+                // Commutative ops normalize BE -> EB by swapping.
+                let (opcode, word_a, word_b) = match (op, lhs_slot.is_ext, rhs_slot.is_ext) {
+                    (PolyExtStep::Add(_, _), false, false) => {
+                        (WEBGPU_EVAL_OP_ADD, lhs_slot.slot, rhs_slot.slot)
+                    }
+                    (PolyExtStep::Add(_, _), true, true) => {
+                        (WEBGPU_EVAL_OP_ADD_EE, lhs_slot.slot, rhs_slot.slot)
+                    }
+                    (PolyExtStep::Add(_, _), true, false) => {
+                        (WEBGPU_EVAL_OP_ADD_EB, lhs_slot.slot, rhs_slot.slot)
+                    }
+                    (PolyExtStep::Add(_, _), false, true) => {
+                        (WEBGPU_EVAL_OP_ADD_EB, rhs_slot.slot, lhs_slot.slot)
+                    }
+                    (PolyExtStep::Sub(_, _), false, false) => {
+                        (WEBGPU_EVAL_OP_SUB, lhs_slot.slot, rhs_slot.slot)
+                    }
+                    (PolyExtStep::Sub(_, _), true, true) => {
+                        (WEBGPU_EVAL_OP_SUB_EE, lhs_slot.slot, rhs_slot.slot)
+                    }
+                    (PolyExtStep::Sub(_, _), true, false) => {
+                        (WEBGPU_EVAL_OP_SUB_EB, lhs_slot.slot, rhs_slot.slot)
+                    }
+                    (PolyExtStep::Sub(_, _), false, true) => {
+                        (WEBGPU_EVAL_OP_SUB_BE, lhs_slot.slot, rhs_slot.slot)
+                    }
+                    (PolyExtStep::Mul(_, _), false, false) => {
+                        (WEBGPU_EVAL_OP_MUL, lhs_slot.slot, rhs_slot.slot)
+                    }
+                    (PolyExtStep::Mul(_, _), true, true) => {
+                        (WEBGPU_EVAL_OP_MUL_EE, lhs_slot.slot, rhs_slot.slot)
+                    }
+                    (PolyExtStep::Mul(_, _), true, false) => {
+                        (WEBGPU_EVAL_OP_MUL_EB, lhs_slot.slot, rhs_slot.slot)
+                    }
+                    (PolyExtStep::Mul(_, _), false, true) => {
+                        (WEBGPU_EVAL_OP_MUL_EB, rhs_slot.slot, lhs_slot.slot)
+                    }
+                    _ => unreachable!("match arm covers only Add/Sub/Mul"),
+                };
+                push_instr([
+                    opcode,
+                    slot_u32(out_slot),
+                    slot_u32(word_a),
+                    slot_u32(word_b),
+                    0,
+                    0,
+                    0,
+                    0,
+                ]);
+                if last_fp.get(out_idx).copied().flatten().is_none() {
+                    fp_slots[out_idx] = None;
+                    if out_is_ext {
+                        ext_alloc.free(out_slot);
+                    } else {
+                        base_alloc.free(out_slot);
+                    }
+                }
+            }
+            PolyExtStep::True => {
+                let out_idx = mix_slots.len();
+                let out_slot = mix_alloc.alloc();
+                mix_slots.push(Some(out_slot));
+                push_instr([
+                    WEBGPU_EVAL_OP_TRUE,
+                    slot_u32(out_slot),
+                    u32::try_from(out_idx).expect("eval_check mix index exceeds u32"),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ]);
+                if last_mix.get(out_idx).copied().flatten().is_none() {
+                    mix_slots[out_idx] = None;
+                    mix_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::AndEqz(chain, inner) => {
+                let chain_slot = eval_check_mix_slot(&mix_slots, *chain)?;
+                let inner_slot = fp_slot(&fp_slots, *inner)?;
+                used_mix.push(*chain);
+                used_fp.push(*inner);
+                let out_idx = mix_slots.len();
+                let out_slot = mix_alloc.alloc();
+                mix_slots.push(Some(out_slot));
+                let opcode = if inner_slot.is_ext {
+                    WEBGPU_EVAL_OP_AND_EQZ_EXT
+                } else {
+                    WEBGPU_EVAL_OP_AND_EQZ
+                };
+                push_instr([
+                    opcode,
+                    slot_u32(out_slot),
+                    slot_u32(chain_slot),
+                    slot_u32(inner_slot.slot),
+                    u32::try_from(out_idx).expect("eval_check mix index exceeds u32"),
+                    0,
+                    0,
+                    0,
+                ]);
+                if last_mix.get(out_idx).copied().flatten().is_none() {
+                    mix_slots[out_idx] = None;
+                    mix_alloc.free(out_slot);
+                }
+            }
+            PolyExtStep::AndCond(chain, cond, inner) => {
+                let chain_slot = eval_check_mix_slot(&mix_slots, *chain)?;
+                let cond_slot = fp_slot(&fp_slots, *cond)?;
+                let inner_slot = eval_check_mix_slot(&mix_slots, *inner)?;
+                used_mix.extend([*chain, *inner]);
+                used_fp.push(*cond);
+                let out_idx = mix_slots.len();
+                let out_slot = mix_alloc.alloc();
+                mix_slots.push(Some(out_slot));
+                let opcode = if cond_slot.is_ext {
+                    WEBGPU_EVAL_OP_AND_COND_EXT
+                } else {
+                    WEBGPU_EVAL_OP_AND_COND
+                };
+                push_instr([
+                    opcode,
+                    slot_u32(out_slot),
+                    slot_u32(chain_slot),
+                    slot_u32(cond_slot.slot),
+                    slot_u32(inner_slot),
+                    u32::try_from(out_idx).expect("eval_check mix index exceeds u32"),
+                    0,
+                    0,
+                ]);
+                if last_mix.get(out_idx).copied().flatten().is_none() {
+                    mix_slots[out_idx] = None;
+                    mix_alloc.free(out_slot);
+                }
+            }
+        }
+
+        used_fp.sort_unstable();
+        used_fp.dedup();
+        used_mix.sort_unstable();
+        used_mix.dedup();
+
+        for var in used_fp {
+            if last_fp.get(var).copied().flatten() == Some(op_idx) {
+                let slot = fp_slot(&fp_slots, var)?;
+                fp_slots[var] = None;
+                if slot.is_ext {
+                    ext_alloc.free(slot.slot);
+                } else {
+                    base_alloc.free(slot.slot);
+                }
+            }
+        }
+        for var in used_mix {
+            if last_mix.get(var).copied().flatten() == Some(op_idx) {
+                let slot = eval_check_mix_slot(&mix_slots, var)?;
+                mix_slots[var] = None;
+                mix_alloc.free(slot);
+            }
+        }
+    }
+
+    let ret_slot = eval_check_mix_slot(&mix_slots, def.ret)?;
+    ensure!(
+        base_alloc.max_used() <= WEBGPU_EVAL_CHECK_MAX_FP_ELEM_SLOTS,
+        "WebGPU hybrid eval_check needs {} base FP slots, max is {}",
+        base_alloc.max_used(),
+        WEBGPU_EVAL_CHECK_MAX_FP_ELEM_SLOTS
+    );
+    ensure!(
+        ext_alloc.max_used() <= WEBGPU_EVAL_CHECK_MAX_EXT_BANK_SLOTS,
+        "WebGPU hybrid eval_check needs {} ext bank slots, max is {}",
+        ext_alloc.max_used(),
+        WEBGPU_EVAL_CHECK_MAX_EXT_BANK_SLOTS
+    );
+    ensure!(
+        mix_alloc.max_used() <= WEBGPU_EVAL_CHECK_MAX_MIX_SLOTS,
+        "WebGPU hybrid eval_check needs {} mix slots, max is {}",
+        mix_alloc.max_used(),
+        WEBGPU_EVAL_CHECK_MAX_MIX_SLOTS
+    );
+
+    Ok((
+        instructions,
+        base_alloc.max_used(),
+        ext_alloc.max_used(),
+        mix_alloc.max_used(),
+        ret_slot,
+    ))
 }
 
 const EVAL_CHECK_WGSL_PREFIX: &str = r#"
@@ -1551,6 +2048,15 @@ fn ext_mul(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
     );
 }
 
+fn ext_sub(lhs: vec4<u32>, rhs: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(
+        sub(lhs.x, rhs.x),
+        sub(lhs.y, rhs.y),
+        sub(lhs.z, rhs.z),
+        sub(lhs.w, rhs.w),
+    );
+}
+
 fn ext_scale(lhs: vec4<u32>, rhs: u32) -> vec4<u32> {
     return vec4<u32>(
         mul(lhs.x, rhs),
@@ -1558,6 +2064,10 @@ fn ext_scale(lhs: vec4<u32>, rhs: u32) -> vec4<u32> {
         mul(lhs.z, rhs),
         mul(lhs.w, rhs),
     );
+}
+
+fn promote(value: u32) -> vec4<u32> {
+    return vec4<u32>(value, 0u, 0u, 0u);
 }
 
 fn instr_word(op_idx: u32, word_idx: u32) -> u32 {
@@ -1582,6 +2092,8 @@ fn zerofier_inv(idx: u32) -> u32 {
         default: { return params.invs.w; }
     }
 }
+
+{EXT_BANK_DECLS}
 
 @compute @workgroup_size({WORKGROUP_SIZE})
 fn main(
@@ -1687,6 +2199,80 @@ fn main(
                 );
                 mix_mul[lane][out] = load_mix_pow(instr_word(op_idx, 5u));
             }
+            case 1u: {
+                ext_store(lane, instr_word(op_idx, 1u), vec4<u32>(
+                    instr_word(op_idx, 2u),
+                    instr_word(op_idx, 3u),
+                    instr_word(op_idx, 4u),
+                    instr_word(op_idx, 5u),
+                ));
+            }
+            case 10u: {
+                ext_store(lane, instr_word(op_idx, 1u), ext_add(
+                    ext_load(lane, instr_word(op_idx, 2u)),
+                    ext_load(lane, instr_word(op_idx, 3u)),
+                ));
+            }
+            case 11u: {
+                ext_store(lane, instr_word(op_idx, 1u), ext_add(
+                    ext_load(lane, instr_word(op_idx, 2u)),
+                    promote(fp[lane][instr_word(op_idx, 3u)]),
+                ));
+            }
+            case 12u: {
+                ext_store(lane, instr_word(op_idx, 1u), ext_sub(
+                    ext_load(lane, instr_word(op_idx, 2u)),
+                    ext_load(lane, instr_word(op_idx, 3u)),
+                ));
+            }
+            case 13u: {
+                ext_store(lane, instr_word(op_idx, 1u), ext_sub(
+                    ext_load(lane, instr_word(op_idx, 2u)),
+                    promote(fp[lane][instr_word(op_idx, 3u)]),
+                ));
+            }
+            case 14u: {
+                ext_store(lane, instr_word(op_idx, 1u), ext_sub(
+                    promote(fp[lane][instr_word(op_idx, 2u)]),
+                    ext_load(lane, instr_word(op_idx, 3u)),
+                ));
+            }
+            case 15u: {
+                ext_store(lane, instr_word(op_idx, 1u), ext_mul(
+                    ext_load(lane, instr_word(op_idx, 2u)),
+                    ext_load(lane, instr_word(op_idx, 3u)),
+                ));
+            }
+            case 16u: {
+                ext_store(lane, instr_word(op_idx, 1u), ext_scale(
+                    ext_load(lane, instr_word(op_idx, 2u)),
+                    fp[lane][instr_word(op_idx, 3u)],
+                ));
+            }
+            case 17u: {
+                let out = instr_word(op_idx, 1u);
+                let chain = instr_word(op_idx, 2u);
+                let inner = instr_word(op_idx, 3u);
+                mix_tot[lane][out] = ext_add(
+                    mix_tot[lane][chain],
+                    ext_mul(mix_mul[lane][chain], ext_load(lane, inner)),
+                );
+                mix_mul[lane][out] = load_mix_pow(instr_word(op_idx, 4u));
+            }
+            case 18u: {
+                let out = instr_word(op_idx, 1u);
+                let chain = instr_word(op_idx, 2u);
+                let cond = instr_word(op_idx, 3u);
+                let inner = instr_word(op_idx, 4u);
+                mix_tot[lane][out] = ext_add(
+                    mix_tot[lane][chain],
+                    ext_mul(
+                        ext_mul(mix_tot[lane][inner], mix_mul[lane][chain]),
+                        ext_load(lane, cond),
+                    ),
+                );
+                mix_mul[lane][out] = load_mix_pow(instr_word(op_idx, 5u));
+            }
             default: {}
         }
     }
@@ -1701,12 +2287,15 @@ fn main(
 
 fn build_eval_check_base_interpreter_wgsl(
     fp_slots: usize,
+    ext_slots: usize,
     mix_slots: usize,
     private_parallel: bool,
     workgroup_size: u32,
 ) -> String {
     let fp_slots = fp_slots.max(1);
+    let ext_slots = ext_slots.max(1);
     let mix_slots = mix_slots.max(1);
+    let ext_words = ext_slots * 4;
     let scratch_lanes = if private_parallel { 1 } else { workgroup_size };
     let scratch_decls = if private_parallel {
         String::new()
@@ -1717,25 +2306,75 @@ fn build_eval_check_base_interpreter_wgsl(
     };
     let local_decls = if private_parallel {
         format!(
-            "    var fp: array<array<u32, {fp_slots}>, 1>;\n    var mix_tot: array<array<vec4<u32>, {mix_slots}>, 1>;\n    var mix_mul: array<array<vec4<u32>, {mix_slots}>, 1>;"
+            "    var fp: array<u32, {fp_slots}>;\n    var mix_tot: array<vec4<u32>, {mix_slots}>;\n    var mix_mul: array<vec4<u32>, {mix_slots}>;"
         )
     } else {
         String::new()
     };
+    // M2a: the ext bank is stored as scalar u32 words (ext value k at
+    // fpe[4k..4k+3]) instead of a vec4 array. The probe matrix showed
+    // executing vec4-typed accesses against a local-memory scratch array
+    // in this kernel costs ~17x a scalar access (~430 ps vs ~25 ps per
+    // op-cycle) while the scalar u32 `fp` bank is fast; assembling the
+    // vec4 from four scalar loads sidesteps whatever lowering Tint/the
+    // driver picks for dynamically-indexed vec4 local arrays. Helpers
+    // live at module scope so both scratch modes share the case bodies.
+    let ext_bank_decls = if private_parallel {
+        format!(
+            "var<private> fpe: array<u32, {ext_words}>;\n\
+             fn ext_load(lane: u32, idx: u32) -> vec4<u32> {{\n\
+                 let base = idx * 4u;\n\
+                 return vec4<u32>(fpe[base], fpe[base + 1u], fpe[base + 2u], fpe[base + 3u]);\n\
+             }}\n\
+             fn ext_store(lane: u32, idx: u32, value: vec4<u32>) {{\n\
+                 let base = idx * 4u;\n\
+                 fpe[base] = value.x;\n\
+                 fpe[base + 1u] = value.y;\n\
+                 fpe[base + 2u] = value.z;\n\
+                 fpe[base + 3u] = value.w;\n\
+             }}"
+        )
+    } else {
+        format!(
+            "var<workgroup> fpe: array<array<u32, {ext_words}>, {scratch_lanes}>;\n\
+             fn ext_load(lane: u32, idx: u32) -> vec4<u32> {{\n\
+                 let base = idx * 4u;\n\
+                 return vec4<u32>(fpe[lane][base], fpe[lane][base + 1u], fpe[lane][base + 2u], fpe[lane][base + 3u]);\n\
+             }}\n\
+             fn ext_store(lane: u32, idx: u32, value: vec4<u32>) {{\n\
+                 let base = idx * 4u;\n\
+                 fpe[lane][base] = value.x;\n\
+                 fpe[lane][base + 1u] = value.y;\n\
+                 fpe[lane][base + 2u] = value.z;\n\
+                 fpe[lane][base + 3u] = value.w;\n\
+             }}"
+        )
+    };
     let lane_index = if private_parallel { "0u" } else { "lid.x" };
     let linear_dispatch_stride = workgroup_size * WEBGPU_MAX_WORKGROUPS_PER_DIMENSION;
 
-    EVAL_CHECK_BASE_INTERPRETER_WGSL
+    let wgsl = EVAL_CHECK_BASE_INTERPRETER_WGSL
         .replace("{FP_SLOTS}", &fp_slots.to_string())
         .replace("{MIX_SLOTS}", &mix_slots.to_string())
         .replace("{BASE_SCRATCH_DECLS}", &scratch_decls)
         .replace("{BASE_LOCAL_DECLS}", &local_decls)
+        .replace("{EXT_BANK_DECLS}", &ext_bank_decls)
         .replace("{LANE_INDEX}", lane_index)
         .replace("{WORKGROUP_SIZE}", &workgroup_size.to_string())
         .replace(
             "{LINEAR_DISPATCH_STRIDE}",
             &linear_dispatch_stride.to_string(),
-        )
+        );
+    if private_parallel {
+        // Private mode uses per-invocation scratch, so the per-lane outer
+        // array dimension is pure overhead — flatten the remaining
+        // scratch accesses to match the all-ext interpreter's shape.
+        wgsl.replace("fp[lane]", "fp")
+            .replace("mix_tot[lane]", "mix_tot")
+            .replace("mix_mul[lane]", "mix_mul")
+    } else {
+        wgsl
+    }
 }
 
 #[allow(dead_code)]
@@ -6026,6 +6665,7 @@ struct EvalCheckInterpreterPipelineKey {
     base_field_fp: bool,
     private_parallel: bool,
     fp_slots: usize,
+    ext_slots: usize,
     mix_slots: usize,
     workgroup_size: u32,
 }
@@ -7627,14 +8267,20 @@ impl WebGpuHal {
             .min(WEBGPU_SAFE_STORAGE_BINDING_BYTES)
     }
 
-    fn eval_check_base_workgroup_lanes(&self, fp_slots: usize, mix_slots: usize) -> u32 {
+    fn eval_check_base_workgroup_lanes(
+        &self,
+        fp_slots: usize,
+        ext_slots: usize,
+        mix_slots: usize,
+    ) -> u32 {
         let bytes_per_lane = fp_slots
             .checked_mul(mem::size_of::<u32>())
             .and_then(|bytes| {
+                let ext_bytes = ext_slots.max(1).checked_mul(mem::size_of::<[u32; 4]>())?;
                 let mix_bytes = mix_slots
                     .checked_mul(mem::size_of::<[u32; 4]>())
                     .and_then(|bytes| bytes.checked_mul(2))?;
-                bytes.checked_add(mix_bytes)
+                bytes.checked_add(ext_bytes)?.checked_add(mix_bytes)
             })
             .expect("WebGPU eval_check base scratch size overflow");
         let lanes = (self.max_compute_workgroup_storage_size as usize / bytes_per_lane).max(1);
@@ -7646,6 +8292,7 @@ impl WebGpuHal {
         base_field_fp: bool,
         private_parallel: bool,
         fp_slots: usize,
+        ext_slots: usize,
         mix_slots: usize,
         workgroup_size: u32,
     ) -> Result<EvalCheckInterpreterPipeline> {
@@ -7653,6 +8300,7 @@ impl WebGpuHal {
             base_field_fp,
             private_parallel,
             fp_slots,
+            ext_slots,
             mix_slots,
             workgroup_size,
         };
@@ -7677,12 +8325,24 @@ impl WebGpuHal {
         let (kernel_name, wgsl) = if private_parallel {
             (
                 "webgpu_eval_check_base_private_interpreter",
-                build_eval_check_base_interpreter_wgsl(fp_slots, mix_slots, true, workgroup_size),
+                build_eval_check_base_interpreter_wgsl(
+                    fp_slots,
+                    ext_slots,
+                    mix_slots,
+                    true,
+                    workgroup_size,
+                ),
             )
         } else if base_field_fp {
             (
                 "webgpu_eval_check_base_interpreter",
-                build_eval_check_base_interpreter_wgsl(fp_slots, mix_slots, false, workgroup_size),
+                build_eval_check_base_interpreter_wgsl(
+                    fp_slots,
+                    ext_slots,
+                    mix_slots,
+                    false,
+                    workgroup_size,
+                ),
             )
         } else {
             (
@@ -8236,10 +8896,14 @@ impl WebGpuHal {
         params: [u32; 12],
         base_field_fp: bool,
     ) -> Result<bool> {
-        let (instructions, fp_slots, mix_slots, ret_mix_slot) = match if base_field_fp {
+        let (instructions, fp_slots, ext_slots, mix_slots, ret_mix_slot) = match if base_field_fp {
             eval_check_base_interpreter_instructions(taps, def)
         } else {
-            eval_check_interpreter_instructions(taps, def)
+            eval_check_interpreter_instructions(taps, def).map(
+                |(instructions, fp_slots, mix_slots, ret)| {
+                    (instructions, fp_slots, 0, mix_slots, ret)
+                },
+            )
         } {
             Ok(program) => program,
             Err(err) => {
@@ -8260,7 +8924,7 @@ impl WebGpuHal {
         let base_workgroup_size = if base_private_parallel {
             WEBGPU_EVAL_CHECK_INTERPRETER_WORKGROUP_SIZE
         } else if base_field_fp {
-            self.eval_check_base_workgroup_lanes(fp_slots, mix_slots)
+            self.eval_check_base_workgroup_lanes(fp_slots, ext_slots, mix_slots)
         } else {
             WEBGPU_EVAL_CHECK_INTERPRETER_WORKGROUP_SIZE
         };
@@ -8272,12 +8936,13 @@ impl WebGpuHal {
             "eval_check_interpreter_submit"
         };
         let _timer = WebGpuStageTimer::new(format!(
-            "{interpreter_label} domain={} dispatch_count={} cycle_base={} instructions={} fp_slots={} mix_slots={} workgroup_size={}",
+            "{interpreter_label} domain={} dispatch_count={} cycle_base={} instructions={} fp_slots={} ext_slots={} mix_slots={} workgroup_size={}",
             domain_u32,
             dispatch_count,
             cycle_base,
             instruction_count,
             fp_slots,
+            ext_slots,
             mix_slots,
             base_workgroup_size
         ));
@@ -8340,6 +9005,7 @@ impl WebGpuHal {
             base_field_fp,
             base_private_parallel,
             fp_slots,
+            ext_slots,
             mix_slots,
             base_workgroup_size,
         ) {
@@ -9165,7 +9831,7 @@ impl WebGpuHal {
 
         if def.block.len() > WEBGPU_EVAL_CHECK_MAX_POLY_EXT_STEPS {
             let base_interpreter_program = eval_check_base_interpreter_instructions(taps, def);
-            if let Ok((_, fp_slots, _, _)) = &base_interpreter_program {
+            if let Ok((_, fp_slots, _, _, _)) = &base_interpreter_program {
                 if WEBGPU_EVAL_CHECK_ENABLE_SPLIT
                     && *fp_slots > WEBGPU_EVAL_CHECK_BASE_PRIVATE_MAX_FP_SLOTS
                     && group_can_bind.iter().all(|can_bind| *can_bind)

@@ -62,6 +62,7 @@ risc0-circuit-recursion = { path = "../../risc0/circuit/recursion", features = [
 # feature, so name the dep explicitly.
 risc0-circuit-rv32im = { path = "../../risc0/circuit/rv32im", features = [
   "prove",
+  "webgpu",
 ] }
 risc0-groth16 = { path = "../../risc0/groth16" }
 risc0-zkp = { path = "../../risc0/zkp", features = ["webgpu"] }

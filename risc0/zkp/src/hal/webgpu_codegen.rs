@@ -110,12 +110,22 @@ pub(crate) fn eval_check_note_last(last_uses: &mut Vec<Option<usize>>, var: usiz
 pub(crate) fn eval_check_last_uses(
     def: &PolyExtStepDef,
 ) -> Result<(Vec<Option<usize>>, Vec<Option<usize>>, usize, usize)> {
+    eval_check_last_uses_block(def.block, def.ret)
+}
+
+/// Block-slice variant of [`eval_check_last_uses`] so callers can run
+/// the same analysis over a reordered (owned) tape, not just a
+/// `&'static` `PolyExtStepDef`.
+pub(crate) fn eval_check_last_uses_block(
+    block: &[PolyExtStep],
+    ret: usize,
+) -> Result<(Vec<Option<usize>>, Vec<Option<usize>>, usize, usize)> {
     let mut last_fp = Vec::new();
     let mut last_mix = Vec::new();
     let mut fp_count = 0usize;
     let mut mix_count = 0usize;
 
-    for (op_idx, op) in def.block.iter().enumerate() {
+    for (op_idx, op) in block.iter().enumerate() {
         match op {
             PolyExtStep::Const(_)
             | PolyExtStep::ConstExt(_, _, _, _)
@@ -153,12 +163,12 @@ pub(crate) fn eval_check_last_uses(
     }
 
     ensure!(
-        def.ret < mix_count,
+        ret < mix_count,
         "poly_ext return mix index {} exceeds generated mix count {}",
-        def.ret,
+        ret,
         mix_count
     );
-    last_mix[def.ret] = Some(usize::MAX);
+    last_mix[ret] = Some(usize::MAX);
     Ok((last_fp, last_mix, fp_count, mix_count))
 }
 

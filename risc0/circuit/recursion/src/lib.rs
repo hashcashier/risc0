@@ -286,4 +286,65 @@ pub mod testutil {
         );
         Ok(())
     }
+
+    /// Times `reps` full eval_check dispatches (dispatch + queue drain)
+    /// at the given `po2` using zero-filled group/global buffers.
+    /// eval_check arithmetic is data-independent, so zero inputs give
+    /// production-representative timing without generating large
+    /// deterministic data on the wasm CPU. Returns per-rep wall ms.
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    pub async fn eval_check_webgpu_bench(
+        hal: &risc0_zkp::hal::webgpu::WebGpuHal,
+        po2: usize,
+        reps: usize,
+    ) -> anyhow::Result<Vec<f64>> {
+        use anyhow::ensure;
+
+        let steps = 1 << po2;
+        let domain = steps * INV_RATE;
+        let circuit = CircuitImpl::new();
+        let taps = circuit.get_taps();
+        let accum = hal.alloc_elem(
+            "recursion_eval_check_bench_accum",
+            taps.group_size(REGISTER_GROUP_ACCUM) * domain,
+        );
+        let code = hal.alloc_elem(
+            "recursion_eval_check_bench_code",
+            taps.group_size(REGISTER_GROUP_CODE) * domain,
+        );
+        let data = hal.alloc_elem(
+            "recursion_eval_check_bench_data",
+            taps.group_size(REGISTER_GROUP_DATA) * domain,
+        );
+        let mix = hal.alloc_elem("recursion_eval_check_bench_mix", CircuitImpl::MIX_SIZE);
+        let out = hal.alloc_elem("recursion_eval_check_bench_out", CircuitImpl::OUTPUT_SIZE);
+        let poly_mix = deterministic_ext(6000);
+        let check = hal.alloc_elem(
+            "recursion_eval_check_bench_check",
+            BabyBearExtElem::EXT_SIZE * domain,
+        );
+
+        let mut times = Vec::with_capacity(reps);
+        for _ in 0..reps {
+            hal.wait_idle().await?;
+            let t0 = js_sys::Date::now();
+            let dispatched = hal.dispatch_eval_check_poly_ext(
+                &check,
+                &[&accum, &code, &data],
+                &[&mix, &out],
+                crate::taps::TAPSET,
+                &crate::poly_ext::DEF,
+                poly_mix,
+                po2,
+                steps,
+            )?;
+            ensure!(
+                dispatched,
+                "recursion eval_check bench did not dispatch on WebGPU"
+            );
+            hal.wait_idle().await?;
+            times.push(js_sys::Date::now() - t0);
+        }
+        Ok(times)
+    }
 }

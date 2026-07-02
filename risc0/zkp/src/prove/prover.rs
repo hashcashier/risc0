@@ -546,10 +546,30 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
             self.taps.group_name(tap_group_index)
         );
 
+        // M2b attribution: without this drain, all GPU work queued before
+        // the commit (e.g. accumulate witgen kernels) is absorbed into the
+        // poly_group expand drain below and misattributed to the NTT.
+        if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
+            let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for(
+                format!("commit_group {} drain_before_commit", witness.name()),
+                self.hal,
+            );
+            self.hal.wait_idle().await?;
+        }
+
         let coeffs = {
             let _gpu_scope = self.hal.gpu_authoritative_scope(make_coeffs_authoritative);
             make_coeffs_async(self.hal, witness, group_size).await?
         };
+        // M2b attribution: isolate the interpolate NTT inside make_coeffs
+        // from the poly_group expand that follows it.
+        if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
+            let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for(
+                format!("commit_group {} drain_after_make_coeffs", witness.name()),
+                self.hal,
+            );
+            self.hal.wait_idle().await?;
+        }
         let group = {
             let _gpu_scope = self.hal.gpu_authoritative_scope(poly_group_authoritative);
             PolyGroup::new_committed_async(
@@ -613,10 +633,30 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
             self.taps.group_name(tap_group_index)
         );
 
+        // M2b attribution: without this drain, all GPU work queued before
+        // the commit (e.g. accumulate witgen kernels) is absorbed into the
+        // poly_group expand drain below and misattributed to the NTT.
+        if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
+            let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for(
+                format!("commit_group {witness_name} drain_before_commit"),
+                self.hal,
+            );
+            self.hal.wait_idle().await?;
+        }
+
         let coeffs = {
             let _gpu_scope = self.hal.gpu_authoritative_scope(make_coeffs_authoritative);
             make_coeffs_in_place_async(self.hal, witness, group_size).await?
         };
+        // M2b attribution: isolate the interpolate NTT inside make_coeffs
+        // from the poly_group expand that follows it.
+        if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
+            let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for(
+                format!("commit_group {witness_name} drain_after_make_coeffs"),
+                self.hal,
+            );
+            self.hal.wait_idle().await?;
+        }
         let group = {
             let _gpu_scope = self.hal.gpu_authoritative_scope(poly_group_authoritative);
             PolyGroup::new_committed_async(
