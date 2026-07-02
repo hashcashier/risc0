@@ -1,0 +1,82 @@
+warning: fields `fp_scratch_stride_u32` and `mix_scratch_stride_u32` are never read
+    --> /home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkp/src/hal/webgpu.rs:5477:5
+     |
+5461 | struct StagedEvalCheckPipeline {
+     |        ----------------------- fields in this struct
+...
+5477 |     fp_scratch_stride_u32: usize,
+     |     ^^^^^^^^^^^^^^^^^^^^^
+...
+5481 |     mix_scratch_stride_u32: usize,
+     |     ^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `StagedEvalCheckPipeline` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+     = note: `#[warn(dead_code)]` on by default
+
+warning: `risc0-zkp` (lib) generated 1 warning
+   Compiling sha-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/sha/methods)
+   Compiling wordle-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/wordle/methods)
+   Compiling voting-machine-methods v0.12.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/voting-machine/methods)
+   Compiling xgboost-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/xgboost/methods)
+   Compiling composition-example-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/composition/methods)
+   Compiling digital-signature-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/digital-signature/methods)
+   Compiling chess-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/chess/methods)
+   Compiling json-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/json/methods)
+   Compiling p256-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/ecdsa/p256/methods)
+   Compiling jwt-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/jwt-validator/methods)
+   Compiling keccak-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/keccak/methods)
+warning: methods `lookup_witgen_top_chunk0_kernel`, `lookup_witgen_top_chunk1_kernel`, `dispatch_witgen_top_chunk0_probe`, and `lookup_topaccum_arm5_probe_kernel` are never used
+    --> /home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/rv32im/src/prove/hal/webgpu.rs:3751:8
+     |
+3238 | impl WebGpuCircuitHal {
+     | --------------------- methods in this implementation
+...
+3751 |     fn lookup_witgen_top_chunk0_kernel(&self) -> Option<WebGpuKernel> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3755 |     fn lookup_witgen_top_chunk1_kernel(&self) -> Option<WebGpuKernel> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+4928 |     fn dispatch_witgen_top_chunk0_probe(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+5010 |     fn lookup_topaccum_arm5_probe_kernel(&self) -> Result<WebGpuKernel> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` on by default
+
+warning: function `rewrite_chunk0` is never used
+   --> /home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/rv32im/src/prove/wgsl_pruner.rs:780:4
+    |
+780 | fn rewrite_chunk0(body: &str, chunked_bases: &BTreeSet<&str>) -> String {
+    |    ^^^^^^^^^^^^^^
+
+   Compiling prorata-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/prorata/methods)
+   Compiling k256-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/ecdsa/k256/methods)
+   Compiling password-checker-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/password-checker/methods)
+   Compiling risc0-bigint2-methods v3.0.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/bigint2/methods)
+   Compiling waldo-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/waldo/methods)
+   Compiling bn254-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/bn254/methods)
+   Compiling groth16-verifier-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/groth16-verifier/methods)
+warning: `risc0-circuit-rv32im` (lib) generated 2 warnings
+   Compiling smartcore-ml-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/smartcore-ml/methods)
+   Compiling wasm-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/wasm/methods)
+   Compiling hello-world-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/hello-world/methods)
+   Compiling bevy-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/bevy/methods)
+   Compiling risc0-zkvm-methods v3.0.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm/methods)
+   Compiling browser-prove v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/browser-prove)
+    Finished `release` profile [optimized + debuginfo] target(s) in 2m 18s
+     Running unittests src/lib.rs (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/target/wasm32-unknown-unknown/release/deps/browser_prove-d084df2f0d3bf6c6.wasm)
+Set timeout to 120 seconds...
+Executing bindgen...                                                                                Running headless tests in Chrome on `http://127.0.0.1:33589/`
+Try find `webdriver.json` for configure browser's capabilities:
+Ok
+Starting new webdriver session...                 Visiting http://127.0.0.1:38749...                Loading page elements...                          Waiting for test to finish...                                                                       using deprecated parameters for the initialization function; pass a single object instead
+running 1 test
+browser-prove:metric recursion_exec_x429_wgsl exec_bytes=354992
+browser-prove:webgpu-limits max_buffer_size=4294967292 max_storage_buffer_binding_size=2147483644 max_compute_workgroup_storage_size=49152
+browser-prove:metric recursion_accum_probe recursion_step_exec_main module_bytes=354992 phase=OK
+test tests::recursion_exec_x429_wgsl_capacity_probe_on_chrome ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 158 filtered out; finished in 33.04s
+                                                  

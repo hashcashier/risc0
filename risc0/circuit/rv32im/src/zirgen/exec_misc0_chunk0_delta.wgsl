@@ -444,7 +444,11 @@ store(lookup_NondetRegLayout__super(lookup_CycleArgLayout_count(lookup_ReadSourc
 eqz(load(lookup_NondetRegLayout__super(lookup_CycleArgLayout_count(lookup_ReadSourceRegsSourceRegsArm0Layout__extra2(lookup_ReadSourceRegsSourceRegsLayout_arm0(lookup_ReadSourceRegsLayout_sourceRegs(layout3))))), 0));
 x7 = SourceRegsStruct(x8._super, x8._super);
 } else {
-  // TODO(wgsl): unreachable mux arm (no assert in WGSL)
+// ReadSourceRegs(zirgen/circuit/rv32im/v2/dsl/inst.zir:59)
+let x8a: GetDataStruct = exec_ReadReg(arg0, arg1_0, arg2_0.rs1, lookup_ReadSourceRegsSourceRegsArm1_SuperLayout__0(lookup_ReadSourceRegsSourceRegsLayout_arm1(lookup_ReadSourceRegsLayout_sourceRegs(layout3))));
+// ReadSourceRegs(zirgen/circuit/rv32im/v2/dsl/inst.zir:60)
+let x9a: GetDataStruct = exec_ReadReg(arg0, arg1_0, arg2_0.rs2, lookup_ReadSourceRegsSourceRegsArm1_SuperLayout__1(lookup_ReadSourceRegsSourceRegsLayout_arm1(lookup_ReadSourceRegsLayout_sourceRegs(layout3))));
+x7 = SourceRegsStruct(x8a._super, x9a._super);
 }
 var x9: ReadSourceRegsStruct;
 if ((x5._super) != 0u) {
@@ -460,7 +464,17 @@ let x13: NondetRegStruct = exec_Reg(x7.rs2.high, lookup_ReadSourceRegsLayout_rs2
 let x14: ReadSourceRegsStruct = ReadSourceRegsStruct(ValU32Struct(x10._super, x11._super), ValU32Struct(x12._super, x13._super));
 x9 = x14;
 } else {
-  // TODO(wgsl): unreachable mux arm (no assert in WGSL)
+// ReadSourceRegs(zirgen/circuit/rv32im/v2/dsl/inst.zir:62)
+let x10a: NondetRegStruct = exec_Reg(x7.rs1.low, lookup_ReadSourceRegsLayout_rs1Low(layout3));
+// ReadSourceRegs(zirgen/circuit/rv32im/v2/dsl/inst.zir:63)
+let x11a: NondetRegStruct = exec_Reg(x7.rs1.high, lookup_ReadSourceRegsLayout_rs1High(layout3));
+// ReadSourceRegs(zirgen/circuit/rv32im/v2/dsl/inst.zir:64)
+let x12a: NondetRegStruct = exec_Reg(x7.rs2.low, lookup_ReadSourceRegsLayout_rs2Low(layout3));
+// ReadSourceRegs(zirgen/circuit/rv32im/v2/dsl/inst.zir:65)
+let x13a: NondetRegStruct = exec_Reg(x7.rs2.high, lookup_ReadSourceRegsLayout_rs2High(layout3));
+// ReadSourceRegs(zirgen/circuit/rv32im/v2/dsl/inst.zir:46)
+let x14a: ReadSourceRegsStruct = ReadSourceRegsStruct(ValU32Struct(x10a._super, x11a._super), ValU32Struct(x12a._super, x13a._super));
+x9 = x14a;
 }
 return x9;
 }

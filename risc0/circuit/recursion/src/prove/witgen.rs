@@ -17,6 +17,7 @@ use risc0_circuit_recursion_sys::{RawPreflightTrace, StepMode};
 use risc0_core::scope;
 use risc0_zkp::{
     adapter::{CircuitInfo as _, TapsProvider as _},
+    core::digest::Digest,
     field::{
         baby_bear::{BabyBear, BabyBearElem, BabyBearExtElem},
         Elem as _,
@@ -46,6 +47,7 @@ where
         circuit_hal: &C,
         zkr: &Program,
         preflight: &Preflight,
+        ctrl_cache_key: Option<Digest>,
     ) -> Result<Self> {
         scope!("witgen");
 
@@ -54,20 +56,23 @@ where
         let global = vec![BabyBearElem::INVALID; CircuitImpl::OUTPUT_SIZE];
         let global = hal.copy_from_elem("global", &global);
 
-        let mut ctrl = vec![BabyBearElem::ZERO; total_cycles * CIRCUIT.ctrl_size()];
-
         // populate the ctrl buffer
         let ctrl_size = CIRCUIT.ctrl_size();
         assert_eq!(ctrl_size, zkr.code_size);
-        for i in 0..zkr.code_rows() {
-            for j in 0..ctrl_size {
-                ctrl[j * total_cycles + i] = zkr.code[i * ctrl_size + j];
-            }
-        }
-        let ctrl = hal.copy_from_elem("ctrl", &ctrl);
+        let ctrl = hal
+            .copy_from_elem_transpose_zero_pad(
+                "ctrl",
+                "recursion_ctrl_compact",
+                &zkr.code,
+                zkr.code_rows(),
+                ctrl_size,
+                total_cycles,
+                ctrl_cache_key,
+            )
+            .context("recursion ctrl construction failure")?;
 
         let data = hal.alloc_elem_init(
-            "data",
+            "recursion_data",
             total_cycles * CIRCUIT.data_size(),
             BabyBearElem::INVALID,
         );
@@ -87,9 +92,10 @@ where
             num_iops: preflight.trace.iops.len() as u32,
         };
 
+        let witness_mode = StepMode::Parallel;
         circuit_hal
             .generate_witness(
-                StepMode::Parallel,
+                witness_mode,
                 total_cycles as u32,
                 &raw_trace,
                 preflight.byte_reads(),
@@ -121,6 +127,19 @@ where
             hal.eltwise_zeroize_elem(&data);
             hal.eltwise_zeroize_elem(&global);
         });
+
+        circuit_hal
+            .post_witness_zeroize(
+                hal,
+                witness_mode,
+                total_cycles as u32,
+                &raw_trace,
+                preflight.byte_reads(),
+                &ctrl,
+                &data,
+                &global,
+            )
+            .context("post-zeroize witness generation failure")?;
 
         Ok(Self {
             work_cycles,
@@ -160,7 +179,8 @@ where
             );
         });
 
-        circuit_hal.accumulate(
+        let accumulation_mode = circuit_hal.accumulate(
+            hal,
             self.work_cycles,
             self.total_cycles,
             &self.ctrl,
@@ -171,8 +191,7 @@ where
         )?;
 
         scope!("zeroize", {
-            hal.eltwise_zeroize_elem(&self.accum);
-            hal.eltwise_zeroize_elem(&self.global);
+            circuit_hal.zeroize_after_accumulate(hal, accumulation_mode, &self.accum, &self.global);
         });
 
         Ok(mix)

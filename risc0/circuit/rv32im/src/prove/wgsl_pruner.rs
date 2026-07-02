@@ -53,8 +53,7 @@
 /// Pruned `exec_TopChunk0` WGSL module (prelude + types + layout +
 /// reachable-closure of `exec_TopChunk0`). ~1 MB, sub-cliff for both
 /// Chrome's whole-module and reachable-closure capacity ceilings.
-pub const EXEC_TOP_CHUNK0_WGSL: &str =
-    include_str!("../zirgen/exec_top_chunk0.wgsl");
+pub const EXEC_TOP_CHUNK0_WGSL: &str = include_str!("../zirgen/exec_top_chunk0.wgsl");
 
 /// SP7 iter 6d-e (2026-05-15): pruned `exec_TopChunk1` WGSL module
 /// (chunk1 of the top-level mux) -- 1.09 MB, sub-cliff. Generated via
@@ -62,8 +61,7 @@ pub const EXEC_TOP_CHUNK0_WGSL: &str =
 /// chunk0 these cover the full top-level mux; sub-chunk bases (e.g.,
 /// `exec_Sha0` with only Chunk0) clamp to their max chunk index in
 /// each module.
-pub const EXEC_TOP_CHUNK1_WGSL: &str =
-    include_str!("../zirgen/exec_top_chunk1.wgsl");
+pub const EXEC_TOP_CHUNK1_WGSL: &str = include_str!("../zirgen/exec_top_chunk1.wgsl");
 
 /// Thin `@compute` wrapper to make [`EXEC_TOP_CHUNK0_WGSL`] runnable on
 /// a WebGPU compute pipeline. Concatenated at use sites; depends on the
@@ -101,15 +99,13 @@ fn exec_top_chunk1_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// ~791 KB. Concatenated with a per-arm delta + @compute wrapper at
 /// HAL init to produce the final module passed to
 /// `create_compute_kernel_async`.
-pub const WITGEN_BASELINE_WGSL: &str =
-    include_str!("../zirgen/witgen_baseline.wgsl");
+pub const WITGEN_BASELINE_WGSL: &str = include_str!("../zirgen/witgen_baseline.wgsl");
 
 /// SP7 TopAccum arm5 real-buffer probe body. This is the pruned
 /// reachable closure for `step_TopAccumArm5`, generated from
 /// `steps_step_TopAccum.pruned.wgsl`; it is concatenated with
 /// [`WITGEN_BASELINE_WGSL`] plus a cycle-list compute entry.
-pub const TOPACCUM_ARM5_PROBE_WGSL: &str =
-    include_str!("../zirgen/topaccum_arm5_probe.wgsl");
+pub const TOPACCUM_ARM5_PROBE_WGSL: &str = include_str!("../zirgen/topaccum_arm5_probe.wgsl");
 
 /// Compute entry used by the real-buffer TopAccum arm5 probe. The HAL
 /// uploads a bounded cycle list so the probe executes on valid proof
@@ -135,24 +131,53 @@ fn topaccum_arm5_cycle_list_main(@builtin(global_invocation_id) gid: vec3<u32>) 
 /// variant). Total ~38 KB average × 13 arms = ~488 KB vendored.
 /// All deltas paired with [`WITGEN_BASELINE_WGSL`] at runtime via
 /// [`assemble_arm_kernel`].
-pub const EXEC_SHA0_CHUNK0_DELTA_WGSL: &str =
-    include_str!("../zirgen/exec_sha0_chunk0_delta.wgsl");
+pub const EXEC_SHA0_CHUNK0_DELTA_WGSL: &str = include_str!("../zirgen/exec_sha0_chunk0_delta.wgsl");
 pub const EXEC_CONTROL0_CHUNK0_DELTA_WGSL: &str =
     include_str!("../zirgen/exec_control0_chunk0_delta.wgsl");
-pub const EXEC_MEM0_CHUNK0_DELTA_WGSL: &str =
-    include_str!("../zirgen/exec_mem0_chunk0_delta.wgsl");
-pub const EXEC_MEM1_CHUNK0_DELTA_WGSL: &str =
-    include_str!("../zirgen/exec_mem1_chunk0_delta.wgsl");
+pub const EXEC_MEM0_CHUNK0_DELTA_WGSL: &str = include_str!("../zirgen/exec_mem0_chunk0_delta.wgsl");
+pub const EXEC_MEM0_CHUNK2_DELTA_WGSL: &str = include_str!("../zirgen/exec_mem0_chunk2_delta.wgsl");
+pub const EXEC_MEM0_CHUNK3_DELTA_WGSL: &str = include_str!("../zirgen/exec_mem0_chunk3_delta.wgsl");
+pub const EXEC_MEM0_CHUNK4_DELTA_WGSL: &str = include_str!("../zirgen/exec_mem0_chunk4_delta.wgsl");
+pub const EXEC_MEM0_CHUNK5_DELTA_WGSL: &str = include_str!("../zirgen/exec_mem0_chunk5_delta.wgsl");
+pub const EXEC_MEM0_CHUNK6_DELTA_WGSL: &str = include_str!("../zirgen/exec_mem0_chunk6_delta.wgsl");
+pub const EXEC_MEM0_CHUNK7_DELTA_WGSL: &str = include_str!("../zirgen/exec_mem0_chunk7_delta.wgsl");
+pub const EXEC_MEM1_CHUNK0_DELTA_WGSL: &str = include_str!("../zirgen/exec_mem1_chunk0_delta.wgsl");
+pub const EXEC_MEM1_CHUNK2_DELTA_WGSL: &str = include_str!("../zirgen/exec_mem1_chunk2_delta.wgsl");
+pub const EXEC_MEM1_CHUNK3_DELTA_WGSL: &str = include_str!("../zirgen/exec_mem1_chunk3_delta.wgsl");
+pub const EXEC_MEM1_CHUNK4_DELTA_WGSL: &str = include_str!("../zirgen/exec_mem1_chunk4_delta.wgsl");
+pub const EXEC_MEM1_CHUNK5_DELTA_WGSL: &str = include_str!("../zirgen/exec_mem1_chunk5_delta.wgsl");
+pub const EXEC_MEM1_CHUNK6_DELTA_WGSL: &str = include_str!("../zirgen/exec_mem1_chunk6_delta.wgsl");
+pub const EXEC_MEM1_CHUNK7_DELTA_WGSL: &str = include_str!("../zirgen/exec_mem1_chunk7_delta.wgsl");
 pub const EXEC_MISC0_CHUNK0_DELTA_WGSL: &str =
     include_str!("../zirgen/exec_misc0_chunk0_delta.wgsl");
+pub const EXEC_MISC0_CHUNK2_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_misc0_chunk2_delta.wgsl");
+pub const EXEC_MISC0_CHUNK3_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_misc0_chunk3_delta.wgsl");
+pub const EXEC_MISC0_CHUNK4_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_misc0_chunk4_delta.wgsl");
+pub const EXEC_MISC0_CHUNK7_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_misc0_chunk7_delta.wgsl");
 pub const EXEC_MISC1_CHUNK0_DELTA_WGSL: &str =
     include_str!("../zirgen/exec_misc1_chunk0_delta.wgsl");
 pub const EXEC_MISC2_CHUNK0_DELTA_WGSL: &str =
     include_str!("../zirgen/exec_misc2_chunk0_delta.wgsl");
-pub const EXEC_MUL0_CHUNK0_DELTA_WGSL: &str =
-    include_str!("../zirgen/exec_mul0_chunk0_delta.wgsl");
-pub const EXEC_DIV0_CHUNK0_DELTA_WGSL: &str =
-    include_str!("../zirgen/exec_div0_chunk0_delta.wgsl");
+pub const EXEC_MISC2_COMBINED_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_misc2_combined_delta.wgsl");
+pub const EXEC_MISC2_CHUNK2_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_misc2_chunk2_delta.wgsl");
+pub const EXEC_MISC2_CHUNK3_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_misc2_chunk3_delta.wgsl");
+pub const EXEC_MISC2_CHUNK4_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_misc2_chunk4_delta.wgsl");
+pub const EXEC_MISC2_CHUNK5_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_misc2_chunk5_delta.wgsl");
+pub const EXEC_MISC2_CHUNK6_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_misc2_chunk6_delta.wgsl");
+pub const EXEC_MISC2_CHUNK7_DELTA_WGSL: &str =
+    include_str!("../zirgen/exec_misc2_chunk7_delta.wgsl");
+pub const EXEC_MUL0_CHUNK0_DELTA_WGSL: &str = include_str!("../zirgen/exec_mul0_chunk0_delta.wgsl");
+pub const EXEC_DIV0_CHUNK0_DELTA_WGSL: &str = include_str!("../zirgen/exec_div0_chunk0_delta.wgsl");
 pub const EXEC_BIGINT0_CHUNK0_DELTA_WGSL: &str =
     include_str!("../zirgen/exec_bigint0_chunk0_delta.wgsl");
 pub const EXEC_ECALL0_CHUNK0_DELTA_WGSL: &str =
@@ -175,31 +200,244 @@ pub const EXEC_POSEIDON1_CHUNK0_DELTA_WGSL: &str =
 /// gives the kernel data for that cycle.
 pub const TOP_CHUNK0_ARM_DELTAS: &[(&str, &str, &str)] = &[
     // 0: MISC0
-    ("misc0_chunk0", EXEC_MISC0_CHUNK0_DELTA_WGSL, "exec_Misc0Chunk0"),
+    (
+        "misc0_chunk0",
+        EXEC_MISC0_CHUNK0_DELTA_WGSL,
+        "exec_Misc0Chunk0",
+    ),
     // 1: MISC1
-    ("misc1_chunk0", EXEC_MISC1_CHUNK0_DELTA_WGSL, "exec_Misc1Chunk0"),
+    (
+        "misc1_chunk0",
+        EXEC_MISC1_CHUNK0_DELTA_WGSL,
+        "exec_Misc1Chunk0",
+    ),
     // 2: MISC2
-    ("misc2_chunk0", EXEC_MISC2_CHUNK0_DELTA_WGSL, "exec_Misc2Chunk0"),
+    (
+        "misc2_chunk0",
+        EXEC_MISC2_CHUNK0_DELTA_WGSL,
+        "exec_Misc2Chunk0",
+    ),
     // 3: MUL0
-    ("mul0_chunk0", EXEC_MUL0_CHUNK0_DELTA_WGSL, "exec_Mul0Chunk0"),
+    (
+        "mul0_chunk0",
+        EXEC_MUL0_CHUNK0_DELTA_WGSL,
+        "exec_Mul0Chunk0",
+    ),
     // 4: DIV0
-    ("div0_chunk0", EXEC_DIV0_CHUNK0_DELTA_WGSL, "exec_Div0Chunk0"),
+    (
+        "div0_chunk0",
+        EXEC_DIV0_CHUNK0_DELTA_WGSL,
+        "exec_Div0Chunk0",
+    ),
     // 5: MEM0
-    ("mem0_chunk0", EXEC_MEM0_CHUNK0_DELTA_WGSL, "exec_Mem0Chunk0"),
+    (
+        "mem0_chunk0",
+        EXEC_MEM0_CHUNK0_DELTA_WGSL,
+        "exec_Mem0Chunk0",
+    ),
     // 6: MEM1
-    ("mem1_chunk0", EXEC_MEM1_CHUNK0_DELTA_WGSL, "exec_Mem1Chunk0"),
+    (
+        "mem1_chunk0",
+        EXEC_MEM1_CHUNK0_DELTA_WGSL,
+        "exec_Mem1Chunk0",
+    ),
     // 7: CONTROL0
-    ("control0_chunk0", EXEC_CONTROL0_CHUNK0_DELTA_WGSL, "exec_Control0Chunk0"),
+    (
+        "control0_chunk0",
+        EXEC_CONTROL0_CHUNK0_DELTA_WGSL,
+        "exec_Control0Chunk0",
+    ),
     // 8: ECALL0
-    ("ecall0_chunk0", EXEC_ECALL0_CHUNK0_DELTA_WGSL, "exec_ECall0Chunk0"),
+    (
+        "ecall0_chunk0",
+        EXEC_ECALL0_CHUNK0_DELTA_WGSL,
+        "exec_ECall0Chunk0",
+    ),
     // 9: POSEIDON0
-    ("poseidon0_chunk0", EXEC_POSEIDON0_CHUNK0_DELTA_WGSL, "exec_Poseidon0Chunk0"),
+    (
+        "poseidon0_chunk0",
+        EXEC_POSEIDON0_CHUNK0_DELTA_WGSL,
+        "exec_Poseidon0Chunk0",
+    ),
     // 10: POSEIDON1
-    ("poseidon1_chunk0", EXEC_POSEIDON1_CHUNK0_DELTA_WGSL, "exec_Poseidon1Chunk0"),
+    (
+        "poseidon1_chunk0",
+        EXEC_POSEIDON1_CHUNK0_DELTA_WGSL,
+        "exec_Poseidon1Chunk0",
+    ),
     // 11: SHA0
-    ("sha0_chunk0", EXEC_SHA0_CHUNK0_DELTA_WGSL, "exec_Sha0Chunk0"),
+    (
+        "sha0_chunk0",
+        EXEC_SHA0_CHUNK0_DELTA_WGSL,
+        "exec_Sha0Chunk0",
+    ),
     // 12: BIGINT0
-    ("bigint0_chunk0", EXEC_BIGINT0_CHUNK0_DELTA_WGSL, "exec_BigInt0Chunk0"),
+    (
+        "bigint0_chunk0",
+        EXEC_BIGINT0_CHUNK0_DELTA_WGSL,
+        "exec_BigInt0Chunk0",
+    ),
+];
+
+/// Extra per-minor MISC0 chunks used by the bounded authoritative
+/// GPU-witgen replacement path. Chunk0 and chunk1 are handled by the
+/// common per-arm kernels; these entries cover additional MISC0 minor
+/// opcodes whose witness writes are safe to short-circuit once their
+/// CPU lookup side effects are replayed.
+pub const MISC0_EXTRA_CHUNK_DELTAS: &[(u8, &str, &str, &str)] = &[
+    (
+        2,
+        "misc0_chunk2",
+        EXEC_MISC0_CHUNK2_DELTA_WGSL,
+        "exec_Misc0Chunk2",
+    ),
+    (
+        3,
+        "misc0_chunk3",
+        EXEC_MISC0_CHUNK3_DELTA_WGSL,
+        "exec_Misc0Chunk3",
+    ),
+    (
+        4,
+        "misc0_chunk4",
+        EXEC_MISC0_CHUNK4_DELTA_WGSL,
+        "exec_Misc0Chunk4",
+    ),
+    (
+        7,
+        "misc0_chunk7",
+        EXEC_MISC0_CHUNK7_DELTA_WGSL,
+        "exec_Misc0Chunk7",
+    ),
+];
+
+/// Extra per-minor MISC2 chunks for diff-only correctness screening.
+/// Unlike the rejected single-kernel `exec_Misc2_combined` path, these
+/// run as separate dispatches so each kernel invocation starts
+/// `extern_getMemoryTxn` at the correct per-cycle transaction offset.
+pub const MISC2_EXTRA_CHUNK_DELTAS: &[(u8, &str, &str, &str)] = &[
+    (
+        2,
+        "misc2_chunk2",
+        EXEC_MISC2_CHUNK2_DELTA_WGSL,
+        "exec_Misc2Chunk2",
+    ),
+    (
+        3,
+        "misc2_chunk3",
+        EXEC_MISC2_CHUNK3_DELTA_WGSL,
+        "exec_Misc2Chunk3",
+    ),
+    (
+        4,
+        "misc2_chunk4",
+        EXEC_MISC2_CHUNK4_DELTA_WGSL,
+        "exec_Misc2Chunk4",
+    ),
+    (
+        5,
+        "misc2_chunk5",
+        EXEC_MISC2_CHUNK5_DELTA_WGSL,
+        "exec_Misc2Chunk5",
+    ),
+    (
+        6,
+        "misc2_chunk6",
+        EXEC_MISC2_CHUNK6_DELTA_WGSL,
+        "exec_Misc2Chunk6",
+    ),
+    (
+        7,
+        "misc2_chunk7",
+        EXEC_MISC2_CHUNK7_DELTA_WGSL,
+        "exec_Misc2Chunk7",
+    ),
+];
+
+/// Extra per-minor MEM0 chunks for diff-only correctness screening.
+/// Chunk0 and chunk1 are covered by the common per-arm chunk0/chunk1
+/// kernels; these complete the remaining load-op minor arms without the
+/// combined-dispatch txn-order bug seen on generated multi-chunk kernels.
+pub const MEM0_EXTRA_CHUNK_DELTAS: &[(u8, &str, &str, &str)] = &[
+    (
+        2,
+        "mem0_chunk2",
+        EXEC_MEM0_CHUNK2_DELTA_WGSL,
+        "exec_Mem0Chunk2",
+    ),
+    (
+        3,
+        "mem0_chunk3",
+        EXEC_MEM0_CHUNK3_DELTA_WGSL,
+        "exec_Mem0Chunk3",
+    ),
+    (
+        4,
+        "mem0_chunk4",
+        EXEC_MEM0_CHUNK4_DELTA_WGSL,
+        "exec_Mem0Chunk4",
+    ),
+    (
+        5,
+        "mem0_chunk5",
+        EXEC_MEM0_CHUNK5_DELTA_WGSL,
+        "exec_Mem0Chunk5",
+    ),
+    (
+        6,
+        "mem0_chunk6",
+        EXEC_MEM0_CHUNK6_DELTA_WGSL,
+        "exec_Mem0Chunk6",
+    ),
+    (
+        7,
+        "mem0_chunk7",
+        EXEC_MEM0_CHUNK7_DELTA_WGSL,
+        "exec_Mem0Chunk7",
+    ),
+];
+
+/// Extra per-minor MEM1 chunks for diff-only correctness screening.
+/// Chunk0 and chunk1 are covered by the common per-arm chunk0/chunk1
+/// kernels; these cover the remaining store-op minor arms so MEM1 can
+/// be tested as a chunk-complete GPU-witgen replacement candidate.
+pub const MEM1_EXTRA_CHUNK_DELTAS: &[(u8, &str, &str, &str)] = &[
+    (
+        2,
+        "mem1_chunk2",
+        EXEC_MEM1_CHUNK2_DELTA_WGSL,
+        "exec_Mem1Chunk2",
+    ),
+    (
+        3,
+        "mem1_chunk3",
+        EXEC_MEM1_CHUNK3_DELTA_WGSL,
+        "exec_Mem1Chunk3",
+    ),
+    (
+        4,
+        "mem1_chunk4",
+        EXEC_MEM1_CHUNK4_DELTA_WGSL,
+        "exec_Mem1Chunk4",
+    ),
+    (
+        5,
+        "mem1_chunk5",
+        EXEC_MEM1_CHUNK5_DELTA_WGSL,
+        "exec_Mem1Chunk5",
+    ),
+    (
+        6,
+        "mem1_chunk6",
+        EXEC_MEM1_CHUNK6_DELTA_WGSL,
+        "exec_Mem1Chunk6",
+    ),
+    (
+        7,
+        "mem1_chunk7",
+        EXEC_MEM1_CHUNK7_DELTA_WGSL,
+        "exec_Mem1Chunk7",
+    ),
 ];
 
 /// SP7 iter 6d-g: assemble a per-arm full kernel by concatenating
@@ -401,8 +639,7 @@ fn shadow_init_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// cliff). Used in dispatch-per-arm where each kernel runs over the
 /// subset of cycles with that major opcode (per preflight major
 /// opcode lookup -- iter-6d-g work).
-pub const EXEC_SHA0_CHUNK0_ONLY_WGSL: &str =
-    include_str!("../zirgen/exec_sha0_chunk0_only.wgsl");
+pub const EXEC_SHA0_CHUNK0_ONLY_WGSL: &str = include_str!("../zirgen/exec_sha0_chunk0_only.wgsl");
 
 /// SP7 iter 6d-f-take-2: `@compute` wrapper for the Sha0 per-arm
 /// kernel. Calls only exec_Sha0Chunk0 -- iter-6d-g will multi-call
@@ -430,8 +667,7 @@ fn exec_sha0_chunk0_only_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// the unreachable-arm return vars). 2.35 MB -- on the boundary of
 /// Chrome's whole-module ceiling (1.99-3.27 MB band per iter-5b).
 /// Generated via `.recursive/.../sp9/gen_all_chunks.py`.
-pub const EXEC_TOP_CHUNK0_ALL_WGSL: &str =
-    include_str!("../zirgen/exec_top_chunk0_all.wgsl");
+pub const EXEC_TOP_CHUNK0_ALL_WGSL: &str = include_str!("../zirgen/exec_top_chunk0_all.wgsl");
 
 /// SP7 iter 6d-f `@compute` wrapper for [`EXEC_TOP_CHUNK0_ALL_WGSL`].
 /// Identical body to the chunk0 wrapper -- only differs in the entry
@@ -456,6 +692,12 @@ use std::collections::{BTreeMap, BTreeSet};
 struct WgslFn<'a> {
     name: &'a str,
     body: &'a str,
+}
+
+#[derive(Debug)]
+struct OwnedWgslFn {
+    name: String,
+    body: String,
 }
 
 fn parse_fns(text: &str) -> Vec<WgslFn<'_>> {
@@ -592,7 +834,12 @@ pub fn pruned_delta_at_chunk(
     }
     let rewritten_steps: BTreeMap<&str, String> = steps_fns
         .iter()
-        .map(|f| (f.name, rewrite_to_chunk(f.body, &chunked_max_idx, target_chunk)))
+        .map(|f| {
+            (
+                f.name,
+                rewrite_to_chunk(f.body, &chunked_max_idx, target_chunk),
+            )
+        })
         .collect();
     let mut calls: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for f in &steps_fns {
@@ -618,6 +865,54 @@ pub fn pruned_delta_at_chunk(
         if closure.contains(f.name) {
             let body = rewritten_steps.get(f.name).unwrap();
             out.push_str(body);
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Extract a delta-only reachable closure from an already assembled
+/// all-chunks WGSL module. Functions already present in `baseline`
+/// are treated as terminals because callers concatenate the returned
+/// delta with [`WITGEN_BASELINE_WGSL`] before compiling the kernel.
+pub fn pruned_delta_from_combined_module(
+    baseline: &str,
+    module: &str,
+    entry: &str,
+) -> Result<String, PrunerError> {
+    let module_fns = parse_fns(module);
+    let baseline_fns = parse_fns(baseline);
+
+    let module_names: BTreeSet<&str> = module_fns.iter().map(|f| f.name).collect();
+    let baseline_names: BTreeSet<&str> = baseline_fns.iter().map(|f| f.name).collect();
+    if !module_names.contains(entry) {
+        return Err(PrunerError::EntryNotFound(entry.to_string()));
+    }
+
+    let mut calls: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for f in &module_fns {
+        calls.insert(f.name, callees_in(f.body, &module_names));
+    }
+
+    let mut closure: BTreeSet<&str> = BTreeSet::new();
+    let mut stack: Vec<&str> = vec![entry];
+    while let Some(name) = stack.pop() {
+        if baseline_names.contains(name) || !closure.insert(name) {
+            continue;
+        }
+        if let Some(callees) = calls.get(name) {
+            for &callee in callees {
+                stack.push(callee);
+            }
+        }
+    }
+
+    let mut out = String::with_capacity(module.len() / 8);
+    for f in &module_fns {
+        if closure.contains(f.name) && !baseline_names.contains(f.name) {
+            out.push_str(f.body);
             if !out.ends_with('\n') {
                 out.push('\n');
             }
@@ -666,6 +961,237 @@ fn rewrite_to_chunk(
         i = j;
     }
     out
+}
+
+/// Generate a pruned, single-major TopAccum probe from the steps-only
+/// TopAccum WGSL artifact. This is the reproducible version of the
+/// checked-in `topaccum_arm5_probe.wgsl` slice, and is used to prevent
+/// additional TopAccum arms from becoming hand-sliced one-offs.
+pub fn topaccum_arm_probe_wgsl(steps: &str, arm: usize) -> Result<String, PrunerError> {
+    const TOPACCUM_ARM_COUNT: usize = 13;
+    if arm >= TOPACCUM_ARM_COUNT {
+        return Err(PrunerError::InvalidArmIndex(arm));
+    }
+
+    let arm_suffix = format!("Arm{arm}");
+    let mappings = [
+        ("exec_TopExtract", format!("exec_TopExtract{arm_suffix}")),
+        ("execUser_Accum", format!("execUser_Accum{arm_suffix}")),
+        ("exec_TopAccum", format!("exec_TopAccum{arm_suffix}")),
+        ("step_TopAccum", format!("step_TopAccum{arm_suffix}")),
+    ];
+
+    let parsed = parse_fns(steps);
+    let mut transformed = Vec::with_capacity(parsed.len());
+    for f in &parsed {
+        let mut name = f.name.to_string();
+        let mut body = f.body.to_string();
+        match f.name {
+            "exec_TopExtract" => {
+                name = mappings[0].1.clone();
+                body = rename_fn(&body, mappings[0].0, &mappings[0].1)?;
+                body = slice_topaccum_mux_arm(
+                    &body,
+                    &name,
+                    "lookup_TopLayout_majorOnehot(layout0)",
+                    arm,
+                )?;
+            }
+            "execUser_Accum" => {
+                name = mappings[1].1.clone();
+                body = rename_fn(&body, mappings[1].0, &mappings[1].1)?;
+            }
+            "exec_TopAccum" => {
+                name = mappings[2].1.clone();
+                body = rename_fn(&body, mappings[2].0, &mappings[2].1)?;
+                body = slice_topaccum_mux_arm(
+                    &body,
+                    &name,
+                    "lookup_TopInstResultLayout__selector(lookup_TopLayout_instResult(arg0))",
+                    arm,
+                )?;
+            }
+            "step_TopAccum" => {
+                name = mappings[3].1.clone();
+                body = rename_fn(&body, mappings[3].0, &mappings[3].1)?;
+                body = body.replacen("{\n// zirgen/dsl/passes/GenerateAccum.cpp:524\n", "{\n", 1);
+            }
+            _ => {}
+        }
+
+        for (old, new) in &mappings {
+            body = rewrite_call_name(&body, old, new);
+        }
+
+        transformed.push(OwnedWgslFn { name, body });
+    }
+
+    let entry = format!("step_TopAccum{arm_suffix}");
+    let all_names: BTreeSet<&str> = transformed.iter().map(|f| f.name.as_str()).collect();
+    if !all_names.contains(entry.as_str()) {
+        return Err(PrunerError::EntryNotFound(entry));
+    }
+
+    let mut calls: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for f in &transformed {
+        calls.insert(f.name.as_str(), callees_in(&f.body, &all_names));
+    }
+
+    let mut closure: BTreeSet<&str> = BTreeSet::new();
+    let mut stack: Vec<&str> = vec![entry.as_str()];
+    while let Some(n) = stack.pop() {
+        if !closure.insert(n) {
+            continue;
+        }
+        if let Some(cs) = calls.get(n) {
+            for &c in cs {
+                stack.push(c);
+            }
+        }
+    }
+
+    let compute_entry = format!(
+        "\n@compute @workgroup_size(64)\nfn topaccum_arm{arm}_main(@builtin(global_invocation_id) gid: vec3<u32>) {{\n  cycle = gid.x;\n  if (cycle >= params.data_rows) {{ return; }}\n  step_TopAccum{arm_suffix}(buf_accum, buf_data, buf_global, buf_mix);\n}}\n"
+    );
+    let mut out = String::with_capacity(steps.len() / 12 + compute_entry.len());
+    for f in &transformed {
+        if closure.contains(f.name.as_str()) {
+            out.push_str(&f.body);
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+    }
+    out.push_str(&compute_entry);
+    Ok(out)
+}
+
+fn rename_fn(body: &str, old: &str, new: &str) -> Result<String, PrunerError> {
+    let needle = format!("fn {old}(");
+    let replacement = format!("fn {new}(");
+    if !body.contains(&needle) {
+        return Err(PrunerError::SymbolNotFound(old.to_string()));
+    }
+    Ok(body.replacen(&needle, &replacement, 1))
+}
+
+fn rewrite_call_name(body: &str, old: &str, new: &str) -> String {
+    let bytes = body.as_bytes();
+    let mut out = String::with_capacity(body.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if !is_ident_start(bytes[i] as char) || (i > 0 && is_ident_char(bytes[i - 1] as char)) {
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j < bytes.len() && is_ident_char(bytes[j] as char) {
+            j += 1;
+        }
+        let ident = &body[i..j];
+        if ident == old && j < bytes.len() && bytes[j] == b'(' {
+            out.push_str(new);
+        } else {
+            out.push_str(ident);
+        }
+        i = j;
+    }
+    out
+}
+
+fn slice_topaccum_mux_arm(
+    body: &str,
+    function_name: &str,
+    marker: &str,
+    arm: usize,
+) -> Result<String, PrunerError> {
+    let open = body
+        .find('{')
+        .ok_or_else(|| PrunerError::MalformedFunction(function_name.to_string()))?;
+    let close = body
+        .rfind('}')
+        .ok_or_else(|| PrunerError::MalformedFunction(function_name.to_string()))?;
+    if close <= open {
+        return Err(PrunerError::MalformedFunction(function_name.to_string()));
+    }
+
+    let head = &body[..=open];
+    let inner = &body[open + 1..close];
+    let tail = &body[close..];
+    let branch_starts = find_mux_branch_starts(inner, marker);
+    if branch_starts.len() != 13 || arm >= branch_starts.len() {
+        return Err(PrunerError::ArmMuxNotFound {
+            function: function_name.to_string(),
+            arm,
+            found: branch_starts.len(),
+        });
+    }
+
+    let branch_start = branch_starts[arm];
+    let branch_content_start = inner[branch_start..]
+        .find('\n')
+        .map(|pos| branch_start + pos + 1)
+        .unwrap_or(inner.len());
+    let branch_end = if arm + 1 < branch_starts.len() {
+        branch_starts[arm + 1]
+    } else {
+        find_outer_unreachable_else(inner, branch_content_start).ok_or_else(|| {
+            PrunerError::ArmMuxNotFound {
+                function: function_name.to_string(),
+                arm,
+                found: branch_starts.len(),
+            }
+        })?
+    };
+    let suffix_start = inner
+        .rfind("\nreturn ")
+        .map(|pos| pos + 1)
+        .or_else(|| inner.find("return "))
+        .ok_or_else(|| PrunerError::MalformedFunction(function_name.to_string()))?;
+    if suffix_start <= branch_end {
+        return Err(PrunerError::MalformedFunction(function_name.to_string()));
+    }
+
+    let mut out = String::with_capacity(body.len() / 4);
+    out.push_str(head);
+    out.push('\n');
+    out.push_str(&inner[..branch_starts[0]]);
+    out.push('\n');
+    out.push_str(&inner[branch_content_start..branch_end]);
+    out.push_str(&inner[suffix_start..]);
+    out.push_str(tail);
+    Ok(out)
+}
+
+fn find_mux_branch_starts(inner: &str, marker: &str) -> Vec<usize> {
+    let mut starts = Vec::new();
+    for (idx, _) in inner.match_indices(marker) {
+        let line_start = inner[..idx].rfind('\n').map(|pos| pos + 1).unwrap_or(0);
+        if starts.last().copied() != Some(line_start) {
+            starts.push(line_start);
+        }
+    }
+    starts
+}
+
+fn find_outer_unreachable_else(inner: &str, from: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut offset = 0usize;
+    for line in inner.split_inclusive('\n') {
+        if offset >= from && depth == 1 && line.starts_with("} else {") {
+            return Some(offset);
+        }
+        for ch in line.chars() {
+            match ch {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        offset += line.len();
+    }
+    None
 }
 
 /// Per-leaf pruned WGSL module for one `@compute` entry.
@@ -743,11 +1269,21 @@ pub fn pruned_module_at_chunk(
     // Rewrite every fn body's callsites to chunked-bases -> chunk{target_chunk}.
     let rewritten_steps: BTreeMap<&str, String> = steps_fns
         .iter()
-        .map(|f| (f.name, rewrite_to_chunk(f.body, &chunked_max_idx, target_chunk)))
+        .map(|f| {
+            (
+                f.name,
+                rewrite_to_chunk(f.body, &chunked_max_idx, target_chunk),
+            )
+        })
         .collect();
     let rewritten_types: BTreeMap<&str, String> = types_fns
         .iter()
-        .map(|f| (f.name, rewrite_to_chunk(f.body, &chunked_max_idx, target_chunk)))
+        .map(|f| {
+            (
+                f.name,
+                rewrite_to_chunk(f.body, &chunked_max_idx, target_chunk),
+            )
+        })
         .collect();
 
     // Build call graph from the rewritten bodies.
@@ -805,6 +1341,14 @@ pub fn pruned_module_at_chunk(
 #[derive(Debug)]
 pub enum PrunerError {
     EntryNotFound(String),
+    SymbolNotFound(String),
+    InvalidArmIndex(usize),
+    ArmMuxNotFound {
+        function: String,
+        arm: usize,
+        found: usize,
+    },
+    MalformedFunction(String),
 }
 
 impl std::fmt::Display for PrunerError {
@@ -813,6 +1357,19 @@ impl std::fmt::Display for PrunerError {
             Self::EntryNotFound(name) => {
                 write!(f, "entry symbol not found in steps.wgsl: {name}")
             }
+            Self::SymbolNotFound(name) => write!(f, "symbol not found in WGSL: {name}"),
+            Self::InvalidArmIndex(arm) => {
+                write!(f, "TopAccum arm index out of range: {arm}")
+            }
+            Self::ArmMuxNotFound {
+                function,
+                arm,
+                found,
+            } => write!(
+                f,
+                "could not isolate TopAccum arm {arm} in {function}: found {found} mux arms"
+            ),
+            Self::MalformedFunction(name) => write!(f, "malformed WGSL function: {name}"),
         }
     }
 }
@@ -879,6 +1436,88 @@ fn gamma() -> u32 { return beta(2u); }
     }
 
     #[test]
+    fn misc2_combined_delta_extractor_covers_all_nested_chunks() {
+        let delta = pruned_delta_from_combined_module(
+            WITGEN_BASELINE_WGSL,
+            EXEC_TOP_CHUNK0_ALL_WGSL,
+            "exec_Misc2_combined",
+        )
+        .expect("MISC2 combined delta should extract from all-chunks module");
+
+        assert!(delta.contains("fn exec_Misc2Chunk0("));
+        assert!(delta.contains("fn exec_Misc2Chunk7("));
+        assert!(delta.contains("fn exec_Misc2_combined("));
+        assert!(delta.contains("fn exec_ReadSourceRegs_combined("));
+        assert!(delta.contains("fn merge_InstOutputBaseStruct("));
+        assert!(!delta.contains("const P: u32"));
+        assert!(
+            delta.len() < 512 * 1024,
+            "MISC2 combined delta should stay below the reachable-closure cliff: {} bytes",
+            delta.len()
+        );
+    }
+
+    #[test]
+    fn misc2_chunk4_delta_uses_checked_in_jalr_shape() {
+        assert!(EXEC_MISC2_CHUNK4_DELTA_WGSL.contains("stale OpJALRLayout side writes"));
+        assert!(
+            !EXEC_MISC2_CHUNK4_DELTA_WGSL.contains("let x6: MiscOutputStruct = exec_OpJALR(x4"),
+            "MISC2 chunk4 must mirror checked-in steps.rs.inc and avoid stale OpJALRLayout writes"
+        );
+    }
+
+    #[test]
+    fn mem0_extra_chunk_deltas_are_pruned_single_minor_entries() {
+        for (minor, _label, delta, sub_fn) in MEM0_EXTRA_CHUNK_DELTAS {
+            assert!(
+                delta.contains(&format!("fn {sub_fn}(")),
+                "MEM0 minor {minor} delta should contain its entry function"
+            );
+            assert!(
+                !delta.contains("fn exec_Mem0_combined("),
+                "MEM0 minor {minor} delta must not pull in the combined dispatcher"
+            );
+            assert!(
+                delta.len() < 128 * 1024,
+                "MEM0 minor {minor} delta is unexpectedly large: {} bytes",
+                delta.len()
+            );
+        }
+    }
+
+    #[test]
+    fn mem1_extra_chunk_deltas_are_pruned_single_minor_entries() {
+        for (minor, _label, delta, sub_fn) in MEM1_EXTRA_CHUNK_DELTAS {
+            assert!(
+                delta.contains(&format!("fn {sub_fn}(")),
+                "MEM1 minor {minor} delta should contain its entry function"
+            );
+            assert!(
+                !delta.contains("fn exec_Mem1_combined("),
+                "MEM1 minor {minor} delta must not pull in the combined dispatcher"
+            );
+            assert!(
+                delta.len() < 128 * 1024,
+                "MEM1 minor {minor} delta is unexpectedly large: {} bytes",
+                delta.len()
+            );
+        }
+    }
+
+    #[test]
+    fn mem1_chunk0_delta_uses_combined_source_registers() {
+        assert!(
+            EXEC_MEM1_CHUNK0_DELTA_WGSL.contains("fn exec_ReadSourceRegs_combined("),
+            "MEM1 chunk0 must include the combined source-register helper"
+        );
+        assert!(
+            EXEC_MEM1_CHUNK0_DELTA_WGSL
+                .contains("let x4: ReadSourceRegsStruct = exec_ReadSourceRegs_combined("),
+            "MEM1 store-byte input must not use only ReadSourceRegsChunk0"
+        );
+    }
+
+    #[test]
     fn iter6a_exec_top_chunk0_is_under_capacity_cliffs() {
         let Some((prelude, types, layout, steps)) = try_load_iter6a() else {
             eprintln!(
@@ -916,9 +1555,7 @@ fn gamma() -> u32 { return beta(2u); }
         // small WGSL. Skip cleanly if naga isn't on $PATH.
         let out_path = std::path::PathBuf::from("/tmp/iter6c_exec_TopChunk0.wgsl");
         std::fs::write(&out_path, &module).expect("write probe module");
-        let rc = std::process::Command::new("naga")
-            .arg(&out_path)
-            .output();
+        let rc = std::process::Command::new("naga").arg(&out_path).output();
         match rc {
             Ok(r) if r.status.success() => {
                 eprintln!("naga: validation successful for {}", out_path.display());
@@ -931,7 +1568,10 @@ fn gamma() -> u32 { return beta(2u); }
                 );
             }
             Err(e) => {
-                eprintln!("skipping naga validation: {} (install naga-cli to enable)", e);
+                eprintln!(
+                    "skipping naga validation: {} (install naga-cli to enable)",
+                    e
+                );
             }
         }
     }
@@ -939,9 +1579,7 @@ fn gamma() -> u32 { return beta(2u); }
     #[test]
     fn iter6a_top_accum_chunk0_is_correctly_documented_as_over_cliff() {
         let Some((prelude, types, layout, steps)) = try_load_iter6a() else {
-            eprintln!(
-                "skipping: gen_zirgen iter-6a output not present at /tmp/zirgen-out8"
-            );
+            eprintln!("skipping: gen_zirgen iter-6a output not present at /tmp/zirgen-out8");
             return;
         };
         let module = pruned_module(&prelude, &types, &layout, &steps, "exec_TopAccumChunk0")
@@ -1025,6 +1663,101 @@ fn gamma() -> u32 { return beta(2u); }
         }
     }
 
+    #[test]
+    fn topaccum_arm_generator_reproduces_vendored_arm5() {
+        let generated = topaccum_arm_probe_wgsl(
+            include_str!(
+                "../../../../../examples/browser-prove/src/sp7_wgsl/steps_step_TopAccum.pruned.wgsl"
+            ),
+            5,
+        )
+        .expect("TopAccum arm5 slice should generate");
+        let expected = TOPACCUM_ARM5_PROBE_WGSL
+            .strip_prefix("// Generated SP7 TopAccum arm 5 browser capacity probe.\n\n")
+            .unwrap_or(TOPACCUM_ARM5_PROBE_WGSL);
+        assert_same_nonblank_wgsl(&generated, expected);
+    }
+
+    #[test]
+    fn topaccum_arm_generator_profiles_all_arms() {
+        let xgboost_major_cycles = [
+            768_461usize,
+            173_854,
+            399_587,
+            65_151,
+            5_203,
+            430_888,
+            351_857,
+            388_742,
+            74_670,
+            30_308,
+            194_571,
+            292,
+            0,
+        ];
+        eprintln!(
+            "arm generated_bytes nonblank_lines ext_inv_calls xgboost_cycles xgboost_inv_items"
+        );
+        for (arm, cycles) in xgboost_major_cycles.iter().copied().enumerate() {
+            let generated = topaccum_arm_probe_wgsl(
+                include_str!(
+                    "../../../../../examples/browser-prove/src/sp7_wgsl/steps_step_TopAccum.pruned.wgsl"
+                ),
+                arm,
+            )
+            .unwrap_or_else(|err| panic!("TopAccum arm {arm} should generate: {err}"));
+            let nonblank_lines = generated
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count();
+            let ext_inv_calls = generated.matches("ext_inv(").count();
+            eprintln!(
+                "{arm} {} {nonblank_lines} {ext_inv_calls} {cycles} {}",
+                generated.len(),
+                cycles.saturating_mul(ext_inv_calls),
+            );
+            if arm == 5 {
+                assert_eq!(
+                    ext_inv_calls, 26,
+                    "arm5 profile must match the authoritative split-inverse path"
+                );
+            }
+        }
+    }
+
+    fn assert_same_nonblank_wgsl(generated: &str, expected: &str) {
+        let generated_lines: Vec<_> = generated
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        let expected_lines: Vec<_> = expected
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        for (idx, (generated, expected)) in generated_lines
+            .iter()
+            .zip(expected_lines.iter())
+            .enumerate()
+        {
+            if generated != expected {
+                let start = idx.saturating_sub(3);
+                let end = (idx + 4).min(generated_lines.len().min(expected_lines.len()));
+                panic!(
+                    "generated TopAccum arm5 differs from vendored slice at nonblank line {}\n\
+                     generated context: {:?}\nexpected context: {:?}",
+                    idx + 1,
+                    &generated_lines[start..end],
+                    &expected_lines[start..end]
+                );
+            }
+        }
+        assert_eq!(
+            generated_lines.len(),
+            expected_lines.len(),
+            "generated TopAccum arm5 line count differs after blank-line normalization"
+        );
+    }
+
     /// iter-6d-a (2026-05-15): the vendored exec_TopChunk0 module with the
     /// thin `@compute` entry wrapper appended must remain naga-valid. This
     /// pins the wrapper against the names declared in the vendored WGSL --
@@ -1032,10 +1765,7 @@ fn gamma() -> u32 { return beta(2u); }
     /// `BoundLayout_TopLayout`, `cycle`, or `params` will fail here.
     #[test]
     fn iter6d_a_compute_entry_concat_validates_with_naga() {
-        let module = format!(
-            "{}{}",
-            EXEC_TOP_CHUNK0_WGSL, EXEC_TOP_CHUNK0_COMPUTE_ENTRY,
-        );
+        let module = format!("{}{}", EXEC_TOP_CHUNK0_WGSL, EXEC_TOP_CHUNK0_COMPUTE_ENTRY,);
         let out_path = std::path::PathBuf::from("/tmp/iter6d_a_exec_top_chunk0_with_entry.wgsl");
         std::fs::write(&out_path, &module).expect("write probe module");
         let rc = std::process::Command::new("naga").arg(&out_path).output();

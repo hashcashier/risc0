@@ -151,7 +151,7 @@ where
             cols: REGCOUNT_GLOBAL,
             checked: true,
         };
-        let code = MetaBuffer::new("code", hal, cycles, REGCOUNT_CODE, false);
+        let code = MetaBuffer::new_zeroed("code", hal, cycles, REGCOUNT_CODE, false);
         let data = MetaBuffer::new("data", hal, cycles, REGCOUNT_DATA, true);
         hal.scatter(
             &data.buf,
@@ -180,7 +180,6 @@ where
             .generate_witness(mode, &trace, &global, &data)
             .context("witness generation failure")?;
         hal.eltwise_zeroize_elem(&global.buf);
-        hal.eltwise_zeroize_elem(&code.buf);
         hal.eltwise_zeroize_elem(&data.buf);
         let accum = MetaBuffer::new("accum", hal, cycles, REGCOUNT_ACCUM, true);
         Ok(Self {
@@ -195,8 +194,16 @@ where
 
     /// SP7 iter 6d-g step 6.2.8: accessors so async callers can pull
     /// `PreflightResults` fields without consuming the struct.
-    pub fn preflight_components(preflight: PreflightResults) -> (Vec<Val>, Injector, usize, PreflightTrace, u32) {
-        (preflight.global, preflight.injector, preflight.cycles, preflight.trace, preflight.po2)
+    pub fn preflight_components(
+        preflight: PreflightResults,
+    ) -> (Vec<Val>, Injector, usize, PreflightTrace, u32) {
+        (
+            preflight.global,
+            preflight.injector,
+            preflight.cycles,
+            preflight.trace,
+            preflight.po2,
+        )
     }
 
     #[allow(clippy::type_complexity)]
@@ -217,7 +224,7 @@ where
             cols: REGCOUNT_GLOBAL,
             checked: true,
         };
-        let code = MetaBuffer::new("code", hal, cycles, REGCOUNT_CODE, false);
+        let code = MetaBuffer::new_zeroed("code", hal, cycles, REGCOUNT_CODE, false);
         let data = scope!(
             "alloc(data)",
             MetaBuffer::new("data", hal, cycles, REGCOUNT_DATA, true)
@@ -233,7 +240,6 @@ where
             .context("witness generation failure")?;
         scope!("zeroize", {
             hal.eltwise_zeroize_elem(&global.buf);
-            hal.eltwise_zeroize_elem(&code.buf);
             hal.eltwise_zeroize_elem(&data.buf);
         });
         let accum = scope!(

@@ -1,0 +1,853 @@
+Script started on 2026-05-22 10:57:25+03:00 [COMMAND="env VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json __VK_LAYER_NV_optimus=NVIDIA_only __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner CHROMEDRIVER=/home/rami/.cache/.wasm-pack/chromedriver-75649e7ca5ae435b/chromedriver WASM_BINDGEN_TEST_TIMEOUT=300 cargo test --manifest-path examples/browser-prove/Cargo.toml --target wasm32-unknown-unknown --release recursion_witgen_gpu_verify_mem_candidate_busy_loop_e2e_verify -- --nocapture" <not executed on terminal>]
+warning: fields `fp_scratch_stride_u32` and `mix_scratch_stride_u32` are never read
+    --> /home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkp/src/hal/webgpu.rs:5477:5
+     |
+5461 | struct StagedEvalCheckPipeline {
+     |        ----------------------- fields in this struct
+...
+5477 |     fp_scratch_stride_u32: usize,
+     |     ^^^^^^^^^^^^^^^^^^^^^
+...
+5481 |     mix_scratch_stride_u32: usize,
+     |     ^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `StagedEvalCheckPipeline` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+     = note: `#[warn(dead_code)]` on by default
+
+warning: `risc0-zkp` (lib) generated 1 warning
+   Compiling password-checker-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/password-checker/methods)
+   Compiling digital-signature-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/digital-signature/methods)
+   Compiling composition-example-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/composition/methods)
+   Compiling risc0-bigint2-methods v3.0.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/bigint2/methods)
+   Compiling keccak-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/keccak/methods)
+   Compiling smartcore-ml-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/smartcore-ml/methods)
+   Compiling wasm-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/wasm/methods)
+   Compiling prorata-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/prorata/methods)
+   Compiling json-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/json/methods)
+   Compiling groth16-verifier-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/groth16-verifier/methods)
+   Compiling jwt-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/jwt-validator/methods)
+warning: methods `lookup_witgen_top_chunk0_kernel`, `lookup_witgen_top_chunk1_kernel`, `dispatch_witgen_top_chunk0_probe`, and `lookup_topaccum_arm5_probe_kernel` are never used
+    --> /home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/rv32im/src/prove/hal/webgpu.rs:3751:8
+     |
+3238 | impl WebGpuCircuitHal {
+     | --------------------- methods in this implementation
+...
+3751 |     fn lookup_witgen_top_chunk0_kernel(&self) -> Option<WebGpuKernel> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3755 |     fn lookup_witgen_top_chunk1_kernel(&self) -> Option<WebGpuKernel> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+4928 |     fn dispatch_witgen_top_chunk0_probe(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+5010 |     fn lookup_topaccum_arm5_probe_kernel(&self) -> Result<WebGpuKernel> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` on by default
+
+warning: function `rewrite_chunk0` is never used
+   --> /home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/rv32im/src/prove/wgsl_pruner.rs:780:4
+    |
+780 | fn rewrite_chunk0(body: &str, chunked_bases: &BTreeSet<&str>) -> String {
+    |    ^^^^^^^^^^^^^^
+
+   Compiling k256-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/ecdsa/k256/methods)
+   Compiling wordle-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/wordle/methods)
+   Compiling bevy-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/bevy/methods)
+   Compiling hello-world-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/hello-world/methods)
+   Compiling bn254-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/bn254/methods)
+   Compiling waldo-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/waldo/methods)
+   Compiling voting-machine-methods v0.12.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/voting-machine/methods)
+warning: `risc0-circuit-rv32im` (lib) generated 2 warnings
+   Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+   Compiling p256-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/ecdsa/p256/methods)
+   Compiling chess-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/chess/methods)
+   Compiling xgboost-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/xgboost/methods)
+   Compiling sha-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/sha/methods)
+   Compiling risc0-zkvm-methods v3.0.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm/methods)
+pw_checker: Starting build for riscv32im-risc0-zkvm-elf
+risc0-bigint2-guest: Starting build for riscv32im-risc0-zkvm-elf
+exponentiate: Starting build for riscv32im-risc0-zkvm-elf
+sign: Starting build for riscv32im-risc0-zkvm-elf
+keccak: Starting build for riscv32im-risc0-zkvm-elf
+search_json: Starting build for riscv32im-risc0-zkvm-elf
+wasm-interp: Starting build for riscv32im-risc0-zkvm-elf
+ml_template: Starting build for riscv32im-risc0-zkvm-elf
+prorata-guest: Starting build for riscv32im-risc0-zkvm-elf
+wordle-guest: Starting build for riscv32im-risc0-zkvm-elf
+groth16-verifier: Starting build for riscv32im-risc0-zkvm-elf
+validator: Starting build for riscv32im-risc0-zkvm-elf
+bevy-guest: Starting build for riscv32im-risc0-zkvm-elf
+k256-verify: Starting build for riscv32im-risc0-zkvm-elf
+image_crop: Starting build for riscv32im-risc0-zkvm-elf
+multiply: Starting build for riscv32im-risc0-zkvm-elf
+voting-machine-methods-guest: Starting build for riscv32im-risc0-zkvm-elf
+p256-verify: Starting build for riscv32im-risc0-zkvm-elf
+bn254-inner: Starting build for riscv32im-risc0-zkvm-elf
+checkmate: Starting build for riscv32im-risc0-zkvm-elf
+xgboost: Starting build for riscv32im-risc0-zkvm-elf
+hash: Starting build for riscv32im-risc0-zkvm-elf
+exponentiate:     Blocking waiting for file lock on package cache
+wasm-interp:     Blocking waiting for file lock on package cache
+search_json:     Blocking waiting for file lock on package cache
+pw_checker:     Blocking waiting for file lock on package cache
+wordle-guest:     Blocking waiting for file lock on package cache
+sign:     Blocking waiting for file lock on package cache
+ml_template:     Blocking waiting for file lock on package cache
+keccak:     Blocking waiting for file lock on package cache
+bevy-guest:     Blocking waiting for file lock on package cache
+groth16-verifier:     Blocking waiting for file lock on package cache
+validator:     Blocking waiting for file lock on package cache
+prorata-guest:     Blocking waiting for file lock on package cache
+risc0-bigint2-guest:     Blocking waiting for file lock on package cache
+image_crop:     Blocking waiting for file lock on package cache
+k256-verify:     Blocking waiting for file lock on package cache
+p256-verify:     Blocking waiting for file lock on package cache
+multiply:     Blocking waiting for file lock on package cache
+voting-machine-methods-guest:     Blocking waiting for file lock on package cache
+hash:     Blocking waiting for file lock on package cache
+checkmate:     Blocking waiting for file lock on package cache
+exponentiate:     Blocking waiting for file lock on package cache
+xgboost:     Blocking waiting for file lock on package cache
+bn254-inner:     Blocking waiting for file lock on package cache
+wasm-interp:     Blocking waiting for file lock on package cache
+search_json:     Blocking waiting for file lock on package cache
+risc0-zkvm-methods-cfg: Starting build for riscv32im-risc0-zkvm-elf
+pw_checker:     Blocking waiting for file lock on package cache
+wordle-guest:     Blocking waiting for file lock on package cache
+sign:     Blocking waiting for file lock on package cache
+ml_template:     Blocking waiting for file lock on package cache
+risc0-zkvm-methods-cfg:     Blocking waiting for file lock on package cache
+keccak:     Blocking waiting for file lock on package cache
+bevy-guest:     Blocking waiting for file lock on package cache
+groth16-verifier:     Blocking waiting for file lock on package cache
+validator:     Blocking waiting for file lock on package cache
+prorata-guest:     Blocking waiting for file lock on package cache
+risc0-bigint2-guest:     Blocking waiting for file lock on package cache
+image_crop:     Blocking waiting for file lock on package cache
+k256-verify:     Blocking waiting for file lock on package cache
+p256-verify:     Blocking waiting for file lock on package cache
+multiply:     Blocking waiting for file lock on package cache
+voting-machine-methods-guest:     Blocking waiting for file lock on package cache
+hash:     Blocking waiting for file lock on package cache
+checkmate:     Blocking waiting for file lock on package cache
+exponentiate:     Blocking waiting for file lock on package cache
+xgboost:     Blocking waiting for file lock on package cache
+bn254-inner:     Blocking waiting for file lock on package cache
+wasm-interp:     Blocking waiting for file lock on package cache
+search_json:     Blocking waiting for file lock on package cache
+pw_checker:     Blocking waiting for file lock on package cache
+wordle-guest:     Blocking waiting for file lock on package cache
+sign:     Blocking waiting for file lock on package cache
+ml_template:     Blocking waiting for file lock on package cache
+risc0-zkvm-methods-cfg:     Blocking waiting for file lock on package cache
+keccak:     Blocking waiting for file lock on package cache
+bevy-guest:     Blocking waiting for file lock on package cache
+groth16-verifier:     Blocking waiting for file lock on package cache
+validator:     Blocking waiting for file lock on package cache
+prorata-guest:     Blocking waiting for file lock on package cache
+risc0-bigint2-guest:     Blocking waiting for file lock on package cache
+image_crop:     Blocking waiting for file lock on package cache
+k256-verify:     Blocking waiting for file lock on package cache
+p256-verify:     Blocking waiting for file lock on package cache
+multiply:     Blocking waiting for file lock on package cache
+voting-machine-methods-guest:     Blocking waiting for file lock on package cache
+hash:     Blocking waiting for file lock on package cache
+checkmate:     Blocking waiting for file lock on package cache
+exponentiate:     Blocking waiting for file lock on package cache
+xgboost:     Blocking waiting for file lock on package cache
+bn254-inner:     Blocking waiting for file lock on package cache
+wasm-interp:     Blocking waiting for file lock on package cache
+search_json:     Blocking waiting for file lock on package cache
+pw_checker:     Blocking waiting for file lock on package cache
+wordle-guest:     Blocking waiting for file lock on package cache
+sign:     Blocking waiting for file lock on package cache
+ml_template:     Blocking waiting for file lock on package cache
+risc0-zkvm-methods-cfg:     Blocking waiting for file lock on package cache
+keccak:     Blocking waiting for file lock on package cache
+bevy-guest:     Blocking waiting for file lock on package cache
+groth16-verifier:     Blocking waiting for file lock on package cache
+validator:     Blocking waiting for file lock on package cache
+prorata-guest:     Blocking waiting for file lock on package cache
+image_crop:     Blocking waiting for file lock on package cache
+risc0-bigint2-guest:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+k256-verify:     Blocking waiting for file lock on package cache
+p256-verify:     Blocking waiting for file lock on package cache
+multiply:     Blocking waiting for file lock on package cache
+voting-machine-methods-guest:     Blocking waiting for file lock on package cache
+hash:     Blocking waiting for file lock on package cache
+checkmate:     Blocking waiting for file lock on package cache
+xgboost:     Blocking waiting for file lock on package cache
+exponentiate:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+exponentiate:    Compiling hello-world-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/hello-world/methods)
+bn254-inner:     Blocking waiting for file lock on package cache
+sign:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+wordle-guest:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+pw_checker:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+ml_template:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+search_json:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+wasm-interp:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+multiply: Starting build for riscv32im-risc0-zkvm-elf
+keccak:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+checkmate:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+bn254-inner:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+risc0-zkvm-methods-cfg:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+prorata-guest:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+multiply:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+voting-machine-methods-guest:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+groth16-verifier:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+hash:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+k256-verify:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+image_crop:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+xgboost:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+p256-verify:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+validator:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+bevy-guest:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+multiply:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+risc0-bigint2-guest:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+bn254-inner:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+risc0-zkvm-methods-cfg:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+groth16-verifier:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+bevy-guest:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+prorata-guest:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+wasm-interp:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+wordle-guest:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+search_json:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+ml_template:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+exponentiate:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+pw_checker:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+keccak:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+sign:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+validator:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+checkmate:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+image_crop:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+p256-verify:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+hash:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+voting-machine-methods-guest:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+k256-verify:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+multiply:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+xgboost:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+multiply:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+wordle-guest:    Compiling wordle-core v1.0.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/wordle/core)
+risc0-zkvm-methods-cfg:    Compiling risc0-zkvm-methods-cfg v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm/methods/cfg)
+image_crop:    Compiling waldo-core v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/waldo/core)
+sign:    Compiling digital-signature-core v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/digital-signature/core)
+search_json:    Compiling json-core v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/json/core)
+pw_checker:    Compiling pw_checker v0.12.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/password-checker/methods/guest)
+voting-machine-methods-guest:    Compiling voting-machine-methods-guest v0.12.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/voting-machine/methods/guest)
+multiply:    Compiling multiply v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/hello-world/methods/guest)
+pw_checker:     Finished `release` profile [optimized] target(s) in 5.24s
+keccak:    Compiling keccak v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/keccak/methods/guest)
+wasm-interp:    Compiling wasm-interp v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/wasm/methods/guest)
+prorata-guest:    Compiling prorata-guest v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/prorata/methods/guest)
+wordle-guest:    Compiling wordle-guest v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/wordle/methods/guest)
+multiply:     Finished `release` profile [optimized] target(s) in 5.13s
+keccak:     Finished `release` profile [optimized] target(s) in 5.79s
+bn254-inner:    Compiling bn254-inner v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/bn254/methods/guest)
+groth16-verifier:    Compiling groth16-verifier v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/groth16-verifier/methods/guest)
+voting-machine-methods-guest:     Finished `release` profile [optimized] target(s) in 5.83s
+risc0-zkvm-methods-cfg:     Finished `release` profile [optimized + debuginfo] target(s) in 5.77s
+image_crop:    Compiling image_crop v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/waldo/methods/guest)
+risc0-zkvm-methods-guest: Starting build for riscv32im-risc0-zkvm-elf
+multiply:    Compiling multiply v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/hello-world/methods/guest)
+k256-verify:    Compiling k256-verify v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/ecdsa/k256/methods/guest)
+prorata-guest:     Finished `release` profile [optimized] target(s) in 6.10s
+wordle-guest:     Finished `release` profile [optimized] target(s) in 6.11s
+risc0-zkvm-methods-guest:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+bn254-inner:     Finished `release` profile [optimized] target(s) in 6.22s
+multiply:     Finished `release` profile [optimized] target(s) in 6.30s
+image_crop:     Finished `release` profile [optimized] target(s) in 6.47s
+bevy-guest:    Compiling bevy-guest v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/bevy/methods/guest)
+checkmate:    Compiling checkmate v0.12.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/chess/methods/guest)
+groth16-verifier:     Finished `release` profile [optimized] target(s) in 6.52s
+exponentiate:    Compiling exponentiate v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/composition/methods/guest)
+risc0-bigint2-guest:    Compiling risc0-bigint2-guest v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/bigint2/methods/guest)
+search_json:    Compiling search_json v0.12.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/json/methods/guest)
+wasm-interp:     Finished `release` profile [optimized] target(s) in 6.75s
+sign:    Compiling sign v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/digital-signature/methods/guest)
+hash:    Compiling hash v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/sha/methods/guest)
+ml_template:    Compiling ml_template v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/smartcore-ml/methods/guest)
+xgboost:    Compiling xgboost v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/xgboost/methods/guest)
+risc0-zkvm-methods-guest:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+checkmate:     Finished `release` profile [optimized] target(s) in 7.04s
+exponentiate:     Finished `release` profile [optimized] target(s) in 7.08s
+sign:     Finished `release` profile [optimized] target(s) in 7.14s
+bevy-guest:     Finished `release` profile [optimized] target(s) in 7.14s
+search_json:     Finished `release` profile [optimized] target(s) in 7.17s
+hash:     Finished `release` profile [optimized] target(s) in 7.14s
+validator:    Compiling validator v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/jwt-validator/methods/guest)
+risc0-bigint2-guest:     Finished `release` profile [optimized] target(s) in 7.26s
+ml_template:     Finished `release` profile [optimized] target(s) in 7.34s
+validator:     Finished `release` profile [optimized] target(s) in 7.34s
+k256-verify:     Finished `release` profile [optimized] target(s) in 7.34s
+p256-verify:    Compiling p256-verify v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/ecdsa/p256/methods/guest)
+risc0-zkvm-methods-guest:    Compiling risc0-zkvm-methods v3.0.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm/methods)
+p256-verify:     Finished `release` profile [optimized] target(s) in 8.71s
+xgboost:     Finished `release` profile [optimized] target(s) in 9.32s
+risc0-zkvm-methods-guest:    Compiling risc0-zkvm-methods-guest v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm/methods/guest)
+risc0-zkvm-methods-guest:     Finished `release` profile [optimized + debuginfo] target(s) in 7.39s
+risc0-zkvm-methods-heap: Starting build for riscv32im-risc0-zkvm-elf
+risc0-zkvm-methods-heap:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+   Compiling risc0-circuit-keccak v4.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/keccak)
+risc0-zkvm-methods-heap:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+risc0-zkvm-methods-heap:    Compiling risc0-zkvm-methods-heap v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm/methods/heap)
+risc0-zkvm-methods-heap:     Finished `release` profile [optimized + debuginfo] target(s) in 3.41s
+risc0-zkvm-methods-rand: Starting build for riscv32im-risc0-zkvm-elf
+risc0-zkvm-methods-rand:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+risc0-zkvm-methods-rand:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+risc0-zkvm-methods-rand:    Compiling risc0-zkvm-methods-rand v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm/methods/rand)
+risc0-zkvm-methods-rand:     Finished `release` profile [optimized + debuginfo] target(s) in 2.72s
+risc0-zkvm-methods-rand2: Starting build for riscv32im-risc0-zkvm-elf
+risc0-zkvm-methods-rand2:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+risc0-zkvm-methods-rand2:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+risc0-zkvm-methods-rand2:    Compiling risc0-zkvm-methods-rand2 v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm/methods/rand2)
+   Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+risc0-zkvm-methods-rand2:     Finished `release` profile [optimized + debuginfo] target(s) in 2.74s
+risc0-zkvm-methods-std: Starting build for riscv32im-risc0-zkvm-elf
+risc0-zkvm-methods-std:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+risc0-zkvm-methods-std:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+risc0-zkvm-methods-std:    Compiling risc0-zkvm-methods v3.0.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm/methods)
+   Compiling digital-signature-core v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/digital-signature/core)
+   Compiling waldo-core v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/waldo/core)
+   Compiling json-core v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/json/core)
+   Compiling wordle-core v1.0.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/wordle/core)
+risc0-zkvm-methods-std:    Compiling risc0-zkvm-methods-std v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm/methods/std)
+risc0-zkvm-methods-std:     Finished `release` profile [optimized] target(s) in 10.04s
+risc0-zkvm-methods-std-ext: Starting build for riscv32im-risc0-zkvm-elf
+risc0-zkvm-methods-std-ext:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+risc0-zkvm-methods-std-ext:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+risc0-zkvm-methods-std-ext:    Compiling risc0-zkvm-methods v3.0.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm/methods)
+risc0-zkvm-methods-std-ext:    Compiling risc0-zkvm-methods-std-ext v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm/methods/std-ext)
+risc0-zkvm-methods-std-ext:     Finished `release` profile [optimized] target(s) in 4.29s
+risc0-zkvm-methods-cpp-crates: Starting build for riscv32im-risc0-zkvm-elf
+risc0-zkvm-methods-cpp-crates:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+risc0-zkvm-methods-cpp-crates:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+risc0-zkvm-methods-cpp-crates:    Compiling risc0-zkvm-methods-cpp-crates v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm/methods/cpp-crates)
+risc0-zkvm-methods-cpp-crates:     Finished `release` profile [optimized] target(s) in 3.80s
+risc0-zkvm-methods-sys-env: Starting build for riscv32im-risc0-zkvm-elf
+risc0-zkvm-methods-sys-env:    Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+risc0-zkvm-methods-sys-env:    Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+risc0-zkvm-methods-sys-env:    Compiling risc0-zkvm-methods-sys-env v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm/methods/env)
+risc0-zkvm-methods-sys-env:     Finished `release` profile [optimized + debuginfo] target(s) in 2.13s
+   Compiling browser-prove v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/browser-prove)
+    Finished `release` profile [optimized + debuginfo] target(s) in 3m 01s
+     Running unittests src/lib.rs (examples/target/wasm32-unknown-unknown/release/deps/browser_prove-dd95d199bcf14693.wasm)
+Set timeout to 300 seconds...
+Executing bindgen...                                                                                Running headless tests in Chrome on `http://127.0.0.1:38751/`
+Try find `webdriver.json` for configure browser's capabilities:
+Ok
+Starting new webdriver session...                 Visiting http://127.0.0.1:34155...                Loading page elements...                          Waiting for test to finish...                                                                       using deprecated parameters for the initialization function; pass a single object instead
+running 1 test
+browser-prove:webgpu-limits max_buffer_size=4294967292 max_storage_buffer_binding_size=2147483644 max_compute_workgroup_storage_size=49152
+browser-prove:start multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate
+browser-prove:stage start execute
+browser-prove:stage done execute elapsed_ms=64
+browser-prove:stage start prove_session_async segments=1 pending_keccaks=0 assumptions=0
+browser-prove:stage start prove_segment_async index=0 po2=18 user_cycles=202872
+browser-prove:stage start segment_preflight index=0 po2=18 user_cycles=202872
+browser-prove:stage done segment_preflight index=0 po2=18 user_cycles=202872 elapsed_ms=58
+browser-prove:stage start prove_segment_core_async index=0 po2=18
+browser-prove:stage start segment_prove_core_async index=0 po2=18
+browser-prove:stage start iter6d_g_pre_witgen_dispatch_async cycles=262144
+browser-prove:metric iter6d_g_pre_witgen_dispatch_async nonblocking_pending_skip
+browser-prove:metric iter6d_g_pre_witgen_dispatch_async mask=0x0000 no_ready_replacement no_sync
+browser-prove:stage done iter6d_g_pre_witgen_dispatch_async cycles=262144 elapsed_ms=2.000
+browser-prove:stage start rv32im_witgen mode=parallel cycles=262144 txns=832996 bigint_bytes=0 data_rows=262144 data_cols=211
+browser-prove:stage done rv32im_witgen mode=parallel cycles=262144 txns=832996 bigint_bytes=0 data_rows=262144 data_cols=211 elapsed_ms=514.000
+browser-prove:metric webgpu_zeroize_sparse_upload name=data values=18501357 ranges=2142375 sparse_bytes=91144444 dense_bytes=221249536
+browser-prove:stage start commit_group_async rv32im_code
+browser-prove:stage start poly_group code batch_expand_into_evaluate_ntt count=1 size=262144 domain=1048576
+browser-prove:stage done poly_group code batch_expand_into_evaluate_ntt count=1 size=262144 domain=1048576 elapsed_ms=5.000
+browser-prove:stage start poly_group code batch_bit_reverse count=1 size=262144
+browser-prove:stage done poly_group code batch_bit_reverse count=1 size=262144 elapsed_ms=0.000
+browser-prove:stage start merkle code hash_rows rows=1048576 cols=1
+browser-prove:stage done merkle code hash_rows rows=1048576 cols=1 elapsed_ms=1.000
+browser-prove:stage start merkle code hash_fold rows=1048576 layers=20
+browser-prove:stage done merkle code hash_fold rows=1048576 layers=20 elapsed_ms=0.000
+browser-prove:stage start merkle code root_top_readback rows=1048576 top_size=32
+browser-prove:stage start iter6d_d_witgen_prewarm_async
+browser-prove:metric iter6d_g_prewarm arm=misc0_chunk0 DONE
+browser-prove:metric iter6d_g_prewarm arm=mem0_chunk0 DONE
+browser-prove:metric iter6d_g_prewarm arm=misc0_chunk2 DONE
+browser-prove:metric iter6d_g_prewarm arm=misc0_chunk3 DONE
+browser-prove:metric iter6d_g_prewarm arm=misc0_chunk4 DONE
+browser-prove:stage done merkle code root_top_readback rows=1048576 top_size=32 elapsed_ms=579.000
+browser-prove:stage done commit_group_async rv32im_code elapsed_ms=590.000 gpu_active=true
+browser-prove:stage start commit_group_async rv32im_data
+browser-prove:stage start poly_group data batch_expand_into_evaluate_ntt count=211 size=262144 domain=1048576
+browser-prove:stage done poly_group data batch_expand_into_evaluate_ntt count=211 size=262144 domain=1048576 elapsed_ms=1.000
+browser-prove:stage start poly_group data batch_bit_reverse count=211 size=262144
+browser-prove:stage done poly_group data batch_bit_reverse count=211 size=262144 elapsed_ms=0.000
+browser-prove:stage start merkle data hash_rows rows=1048576 cols=211
+browser-prove:stage done merkle data hash_rows rows=1048576 cols=211 elapsed_ms=0.000
+browser-prove:stage start merkle data hash_fold rows=1048576 layers=20
+browser-prove:stage done merkle data hash_fold rows=1048576 layers=20 elapsed_ms=0.000
+browser-prove:stage start merkle data root_top_readback rows=1048576 top_size=32
+browser-prove:metric iter6d_g_prewarm arm=misc0_chunk7 DONE
+browser-prove:metric iter6d_g_prewarm arm=mem0_chunk2 DONE
+browser-prove:stage done merkle data root_top_readback rows=1048576 top_size=32 elapsed_ms=83.000
+browser-prove:stage done commit_group_async rv32im_data elapsed_ms=268.000 gpu_active=true
+browser-prove:stage start rv32im_witgen_accum
+browser-prove:stage start rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144
+browser-prove:stage start rv32im_accumulate step_top_accum_cpu_skip_replaced_misc0=true_mem0=true_major_mask=0x00c6 cycles=262144
+browser-prove:stage done rv32im_accumulate step_top_accum_cpu_skip_replaced_misc0=true_mem0=true_major_mask=0x00c6 cycles=262144 elapsed_ms=303.000
+browser-prove:stage start rv32im_accumulate misc_direct_gpu_grouped
+browser-prove:metric rv32im_accumulate MISC0 direct_gpu dispatched rows=68239
+browser-prove:metric rv32im_accumulate MISC1 direct_gpu dispatched rows=7111
+browser-prove:metric rv32im_accumulate MISC2 direct_gpu dispatched rows=25080
+browser-prove:metric rv32im_accumulate MEM0 direct_gpu dispatched rows=40795
+browser-prove:metric rv32im_accumulate MEM1 direct_gpu dispatched rows=31917
+browser-prove:metric rv32im_accumulate CONTROL0 direct_gpu dispatched rows=41560
+browser-prove:stage done rv32im_accumulate misc_direct_gpu_grouped elapsed_ms=1.000 gpu_active=true
+browser-prove:stage start rv32im_accumulate terminal_ext_prefix_gpu
+browser-prove:metric webgpu_zero_default_sparse_upload name=accum values=1350740 ranges=935164 sparse_bytes=12884288 dense_bytes=108003328
+browser-prove:stage done rv32im_accumulate terminal_ext_prefix_gpu elapsed_ms=18.000 gpu_active=true
+browser-prove:stage start rv32im_accumulate machine_column_carry_gpu
+browser-prove:stage done rv32im_accumulate machine_column_carry_gpu elapsed_ms=0.000 gpu_active=true
+browser-prove:stage done rv32im_accumulate cycles=262144 data_rows=262144 accum_rows=262144 elapsed_ms=325.000
+browser-prove:stage done rv32im_witgen_accum elapsed_ms=333.000
+browser-prove:stage start commit_group_async rv32im_accum
+browser-prove:stage start poly_group accum batch_expand_into_evaluate_ntt count=103 size=262144 domain=1048576
+browser-prove:stage done poly_group accum batch_expand_into_evaluate_ntt count=103 size=262144 domain=1048576 elapsed_ms=1.000
+browser-prove:stage start poly_group accum batch_bit_reverse count=103 size=262144
+browser-prove:stage done poly_group accum batch_bit_reverse count=103 size=262144 elapsed_ms=0.000
+browser-prove:stage start merkle accum hash_rows rows=1048576 cols=103
+browser-prove:stage done merkle accum hash_rows rows=1048576 cols=103 elapsed_ms=0.000
+browser-prove:stage start merkle accum hash_fold rows=1048576 layers=20
+browser-prove:stage done merkle accum hash_fold rows=1048576 layers=20 elapsed_ms=0.000
+browser-prove:stage start merkle accum root_top_readback rows=1048576 top_size=32
+browser-prove:metric iter6d_g_prewarm arm=misc0_chunk0_chunk1 DONE
+browser-prove:stage done merkle accum root_top_readback rows=1048576 top_size=32 elapsed_ms=84.000
+browser-prove:stage done commit_group_async rv32im_accum elapsed_ms=164.000 gpu_active=true
+browser-prove:stage start eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32
+browser-prove:stage done eval_check_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=20202 fp_slots=927 mix_slots=29 workgroup_size=32 elapsed_ms=1.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=3.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage start poly_group check batch_expand_into_evaluate_ntt count=16 size=262144 domain=1048576
+browser-prove:stage done poly_group check batch_expand_into_evaluate_ntt count=16 size=262144 domain=1048576 elapsed_ms=0.000
+browser-prove:stage start poly_group check batch_bit_reverse count=16 size=262144
+browser-prove:stage done poly_group check batch_bit_reverse count=16 size=262144 elapsed_ms=0.000
+browser-prove:stage start merkle check hash_rows rows=1048576 cols=16
+browser-prove:stage done merkle check hash_rows rows=1048576 cols=16 elapsed_ms=0.000
+browser-prove:stage start merkle check hash_fold rows=1048576 layers=20
+browser-prove:stage done merkle check hash_fold rows=1048576 layers=20 elapsed_ms=1.000
+browser-prove:stage start merkle check root_top_readback rows=1048576 top_size=32
+browser-prove:metric iter6d_g_prewarm arm=mem0_chunk0_chunk1 DONE
+browser-prove:metric iter6d_g_prewarm misc0_extra requested=4
+browser-prove:metric iter6d_g_prewarm mem0_extra requested=1
+browser-prove:metric iter6d_g_prewarm ALL arms requested=2
+browser-prove:metric iter6d_g_prewarm chunk1 ALL requested=2
+browser-prove:stage done iter6d_d_witgen_prewarm_async elapsed_ms=1384.000
+browser-prove:stage done merkle check root_top_readback rows=1048576 top_size=32 elapsed_ms=639.000
+browser-prove:stage done finalize_async check_group elapsed_ms=661.000 gpu_active=true
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=1.000 gpu_active=true
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=0.000 gpu_active=true
+browser-prove:stage start finalize_async eval_u_readback
+browser-prove:stage done finalize_async eval_u_readback elapsed_ms=20.000 gpu_active=true
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=0.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=1.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=0.000 gpu_active=true
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000 gpu_active=true
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=1.000 gpu_active=true
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=1.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=0.000 gpu_active=true
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage start fri_prove round=0 domain_in=1048576
+browser-prove:stage start fri_prove round=0 expand_evaluate_ntt domain=1048576
+browser-prove:stage done fri_prove round=0 expand_evaluate_ntt domain=1048576 elapsed_ms=0.000
+browser-prove:stage start fri_prove round=0 merkle_new rows=65536 cols=64
+browser-prove:stage start merkle fri_round0 hash_rows rows=65536 cols=64
+browser-prove:stage done merkle fri_round0 hash_rows rows=65536 cols=64 elapsed_ms=0.000
+browser-prove:stage start merkle fri_round0 hash_fold rows=65536 layers=16
+browser-prove:stage done merkle fri_round0 hash_fold rows=65536 layers=16 elapsed_ms=0.000
+browser-prove:stage start merkle fri_round0 root_top_readback rows=65536 top_size=32
+browser-prove:stage done merkle fri_round0 root_top_readback rows=65536 top_size=32 elapsed_ms=873.000
+browser-prove:stage done fri_prove round=0 merkle_new rows=65536 cols=64 elapsed_ms=874.000
+browser-prove:stage start fri_prove round=0 fri_fold count_out=16384
+browser-prove:stage done fri_prove round=0 fri_fold count_out=16384 elapsed_ms=1.000
+browser-prove:stage done fri_prove round=0 domain_in=1048576 elapsed_ms=878.000
+browser-prove:stage start fri_prove round=1 domain_in=65536
+browser-prove:stage start fri_prove round=1 expand_evaluate_ntt domain=65536
+browser-prove:stage done fri_prove round=1 expand_evaluate_ntt domain=65536 elapsed_ms=0.000
+browser-prove:stage start fri_prove round=1 merkle_new rows=4096 cols=64
+browser-prove:stage start merkle fri_round1 hash_rows rows=4096 cols=64
+browser-prove:stage done merkle fri_round1 hash_rows rows=4096 cols=64 elapsed_ms=0.000
+browser-prove:stage start merkle fri_round1 hash_fold rows=4096 layers=12
+browser-prove:stage done merkle fri_round1 hash_fold rows=4096 layers=12 elapsed_ms=0.000
+browser-prove:stage start merkle fri_round1 root_top_readback rows=4096 top_size=32
+browser-prove:stage done merkle fri_round1 root_top_readback rows=4096 top_size=32 elapsed_ms=8.000
+browser-prove:stage done fri_prove round=1 merkle_new rows=4096 cols=64 elapsed_ms=8.000
+browser-prove:stage start fri_prove round=1 fri_fold count_out=1024
+browser-prove:stage done fri_prove round=1 fri_fold count_out=1024 elapsed_ms=0.000
+browser-prove:stage done fri_prove round=1 domain_in=65536 elapsed_ms=8.000
+browser-prove:stage start fri_prove round=2 domain_in=4096
+browser-prove:stage start fri_prove round=2 expand_evaluate_ntt domain=4096
+browser-prove:stage done fri_prove round=2 expand_evaluate_ntt domain=4096 elapsed_ms=0.000
+browser-prove:stage start fri_prove round=2 merkle_new rows=256 cols=64
+browser-prove:stage start merkle fri_round2 hash_rows rows=256 cols=64
+browser-prove:stage done merkle fri_round2 hash_rows rows=256 cols=64 elapsed_ms=0.000
+browser-prove:stage start merkle fri_round2 hash_fold rows=256 layers=8
+browser-prove:stage done merkle fri_round2 hash_fold rows=256 layers=8 elapsed_ms=0.000
+browser-prove:stage start merkle fri_round2 root_top_readback rows=256 top_size=32
+browser-prove:stage done merkle fri_round2 root_top_readback rows=256 top_size=32 elapsed_ms=4.000
+browser-prove:stage done fri_prove round=2 merkle_new rows=256 cols=64 elapsed_ms=4.000
+browser-prove:stage start fri_prove round=2 fri_fold count_out=64
+browser-prove:stage done fri_prove round=2 fri_fold count_out=64 elapsed_ms=0.000
+browser-prove:stage done fri_prove round=2 domain_in=4096 elapsed_ms=4.000
+browser-prove:stage start fri_prove final size=256
+browser-prove:stage done fri_prove final size=256 elapsed_ms=2.000
+browser-prove:stage done finalize_async fri_prove elapsed_ms=944.000 gpu_active=true
+browser-prove:stage done segment_prove_core_async index=0 po2=18 elapsed_ms=3750
+browser-prove:stage start verify_segment index=0
+browser-prove:stage done verify_segment index=0 elapsed_ms=16
+browser-prove:stage done prove_segment_core_async index=0 po2=18 elapsed_ms=3766
+browser-prove:stage done prove_segment_async index=0 po2=18 user_cycles=202872 elapsed_ms=3824
+browser-prove:stage start keccak_receipts_root
+browser-prove:stage done keccak_receipts_root elapsed_ms=0
+browser-prove:stage start verify_composite
+browser-prove:stage done verify_composite elapsed_ms=15
+browser-prove:stage start composite_to_succinct_async
+browser-prove:stage start lift_async segment_index=0
+browser-prove:stage start lift_prove_async segment_index=0
+browser-prove:stage start recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111
+browser-prove:metric recursion_witgen_gpu_verify_mem_candidate_plan work_cycles=145470 total_cycles=262144 valid_rows=994436 buckets=317029
+browser-prove:stage done recursion_witgen mode=parallel total_cycles=262144 preflight_cycles=145470 wom=317028 iops=54111 elapsed_ms=160.000
+browser-prove:metric webgpu_zeroize_sparse_upload name=recursion_data values=6003622 ranges=831418 sparse_bytes=30665848 dense_bytes=134217728
+browser-prove:stage start recursion_witgen gpu_verify_mem_candidate_sequence
+browser-prove:metric recursion_witgen_gpu_verify_mem_candidate work_cycles=145470 valid_rows=994436 buckets=317029 dispatches=7
+browser-prove:stage done recursion_witgen gpu_verify_mem_candidate_sequence elapsed_ms=0.000 gpu_active=true
+browser-prove:metric recursion_witgen_gpu_verify_mem_candidate_done mode=parallel total_cycles=262144 work_cycles=145470 valid_rows=994436
+browser-prove:stage start commit_group_async recursion_ctrl
+browser-prove:stage start poly_group ctrl batch_expand_into_evaluate_ntt count=23 size=262144 domain=1048576
+browser-prove:stage done poly_group ctrl batch_expand_into_evaluate_ntt count=23 size=262144 domain=1048576 elapsed_ms=0.000
+browser-prove:stage start poly_group ctrl batch_bit_reverse count=23 size=262144
+browser-prove:stage done poly_group ctrl batch_bit_reverse count=23 size=262144 elapsed_ms=0.000
+browser-prove:stage start merkle ctrl hash_rows rows=1048576 cols=23
+browser-prove:stage done merkle ctrl hash_rows rows=1048576 cols=23 elapsed_ms=0.000
+browser-prove:stage start merkle ctrl hash_fold rows=1048576 layers=20
+browser-prove:stage done merkle ctrl hash_fold rows=1048576 layers=20 elapsed_ms=0.000
+browser-prove:stage start merkle ctrl root_top_readback rows=1048576 top_size=32
+browser-prove:stage done merkle ctrl root_top_readback rows=1048576 top_size=32 elapsed_ms=289.000
+browser-prove:stage done commit_group_async recursion_ctrl elapsed_ms=297.000 gpu_active=true
+browser-prove:stage start commit_group_async recursion_data
+browser-prove:stage start poly_group recursion_data batch_expand_into_evaluate_ntt count=128 size=262144 domain=1048576
+browser-prove:stage done poly_group recursion_data batch_expand_into_evaluate_ntt count=128 size=262144 domain=1048576 elapsed_ms=0.000
+browser-prove:stage start poly_group recursion_data batch_bit_reverse count=128 size=262144
+browser-prove:stage done poly_group recursion_data batch_bit_reverse count=128 size=262144 elapsed_ms=0.000
+browser-prove:stage start merkle recursion_data hash_rows rows=1048576 cols=128
+browser-prove:stage done merkle recursion_data hash_rows rows=1048576 cols=128 elapsed_ms=0.000
+browser-prove:stage start merkle recursion_data hash_fold rows=1048576 layers=20
+browser-prove:stage done merkle recursion_data hash_fold rows=1048576 layers=20 elapsed_ms=0.000
+browser-prove:stage start merkle recursion_data root_top_readback rows=1048576 top_size=32
+browser-prove:stage done merkle recursion_data root_top_readback rows=1048576 top_size=32 elapsed_ms=38.000
+browser-prove:stage done commit_group_async recursion_data elapsed_ms=66.000 gpu_active=true
+browser-prove:stage start recursion_witgen_accum
+browser-prove:metric webgpu_zeroize_sparse_upload name=accum values=0 ranges=0 sparse_bytes=0 dense_bytes=12582912
+browser-prove:stage start recursion_accumulate work_cycles=145470 total_cycles=262144
+browser-prove:stage start recursion_accumulate gpu_compute_accum
+browser-prove:stage done recursion_accumulate gpu_compute_accum elapsed_ms=0.000 gpu_active=true
+browser-prove:stage start recursion_accumulate gpu_prefix
+browser-prove:stage done recursion_accumulate gpu_prefix elapsed_ms=0.000 gpu_active=true
+browser-prove:stage start recursion_accumulate gpu_verify_accum
+browser-prove:stage done recursion_accumulate gpu_verify_accum elapsed_ms=0.000 gpu_active=true
+browser-prove:stage done recursion_accumulate work_cycles=145470 total_cycles=262144 elapsed_ms=1.000
+browser-prove:stage done recursion_witgen_accum elapsed_ms=2.000
+browser-prove:stage start commit_group_async recursion_accum
+browser-prove:stage start poly_group accum batch_expand_into_evaluate_ntt count=12 size=262144 domain=1048576
+browser-prove:stage done poly_group accum batch_expand_into_evaluate_ntt count=12 size=262144 domain=1048576 elapsed_ms=0.000
+browser-prove:stage start poly_group accum batch_bit_reverse count=12 size=262144
+browser-prove:stage done poly_group accum batch_bit_reverse count=12 size=262144 elapsed_ms=0.000
+browser-prove:stage start merkle accum hash_rows rows=1048576 cols=12
+browser-prove:stage done merkle accum hash_rows rows=1048576 cols=12 elapsed_ms=0.000
+browser-prove:stage start merkle accum hash_fold rows=1048576 layers=20
+browser-prove:stage done merkle accum hash_fold rows=1048576 layers=20 elapsed_ms=0.000
+browser-prove:stage start merkle accum root_top_readback rows=1048576 top_size=32
+browser-prove:stage done merkle accum root_top_readback rows=1048576 top_size=32 elapsed_ms=263.000
+browser-prove:stage done commit_group_async recursion_accum elapsed_ms=267.000 gpu_active=true
+browser-prove:stage start eval_check_base_private_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=12359 fp_slots=1001 mix_slots=10 workgroup_size=32
+browser-prove:stage done eval_check_base_private_interpreter_submit domain=1048576 dispatch_count=1048576 cycle_base=0 instructions=12359 fp_slots=1001 mix_slots=10 workgroup_size=32 elapsed_ms=0.000
+browser-prove:stage start finalize_async check_interpolate
+browser-prove:stage done finalize_async check_interpolate elapsed_ms=1.000
+browser-prove:stage start finalize_async check_group
+browser-prove:stage start poly_group check batch_expand_into_evaluate_ntt count=16 size=262144 domain=1048576
+browser-prove:stage done poly_group check batch_expand_into_evaluate_ntt count=16 size=262144 domain=1048576 elapsed_ms=0.000
+browser-prove:stage start poly_group check batch_bit_reverse count=16 size=262144
+browser-prove:stage done poly_group check batch_bit_reverse count=16 size=262144 elapsed_ms=0.000
+browser-prove:stage start merkle check hash_rows rows=1048576 cols=16
+browser-prove:stage done merkle check hash_rows rows=1048576 cols=16 elapsed_ms=1.000
+browser-prove:stage start merkle check hash_fold rows=1048576 layers=20
+browser-prove:stage done merkle check hash_fold rows=1048576 layers=20 elapsed_ms=0.000
+browser-prove:stage start merkle check root_top_readback rows=1048576 top_size=32
+browser-prove:stage done merkle check root_top_readback rows=1048576 top_size=32 elapsed_ms=119.000
+browser-prove:stage done finalize_async check_group elapsed_ms=124.000 gpu_active=true
+browser-prove:stage start finalize_async eval_u_groups
+browser-prove:stage done finalize_async eval_u_groups elapsed_ms=0.000 gpu_active=true
+browser-prove:stage start finalize_async eval_u_check
+browser-prove:stage done finalize_async eval_u_check elapsed_ms=0.000 gpu_active=true
+browser-prove:stage start finalize_async eval_u_readback
+browser-prove:stage done finalize_async eval_u_readback elapsed_ms=8.000 gpu_active=true
+browser-prove:stage start finalize_async poly_interpolate
+browser-prove:stage done finalize_async poly_interpolate elapsed_ms=1.000
+browser-prove:stage start finalize_async write_u_commit
+browser-prove:stage done finalize_async write_u_commit elapsed_ms=0.000
+browser-prove:stage start finalize_async mix_poly_coeffs
+browser-prove:stage done finalize_async mix_poly_coeffs elapsed_ms=0.000 gpu_active=true
+browser-prove:stage start finalize_async combos_prepare
+browser-prove:stage done finalize_async combos_prepare elapsed_ms=0.000 gpu_active=true
+browser-prove:stage start finalize_async combos_divide
+browser-prove:stage done finalize_async combos_divide elapsed_ms=0.000 gpu_active=true
+browser-prove:stage start finalize_async sum
+browser-prove:stage done finalize_async sum elapsed_ms=0.000
+browser-prove:stage start finalize_async bit_rev
+browser-prove:stage done finalize_async bit_rev elapsed_ms=0.000 gpu_active=true
+browser-prove:stage start finalize_async fri_prove
+browser-prove:stage start fri_prove round=0 domain_in=1048576
+browser-prove:stage start fri_prove round=0 expand_evaluate_ntt domain=1048576
+browser-prove:stage done fri_prove round=0 expand_evaluate_ntt domain=1048576 elapsed_ms=0.000
+browser-prove:stage start fri_prove round=0 merkle_new rows=65536 cols=64
+browser-prove:stage start merkle fri_round0 hash_rows rows=65536 cols=64
+browser-prove:stage done merkle fri_round0 hash_rows rows=65536 cols=64 elapsed_ms=0.000
+browser-prove:stage start merkle fri_round0 hash_fold rows=65536 layers=16
+browser-prove:stage done merkle fri_round0 hash_fold rows=65536 layers=16 elapsed_ms=0.000
+browser-prove:stage start merkle fri_round0 root_top_readback rows=65536 top_size=32
+browser-prove:stage done merkle fri_round0 root_top_readback rows=65536 top_size=32 elapsed_ms=852.000
+browser-prove:stage done fri_prove round=0 merkle_new rows=65536 cols=64 elapsed_ms=852.000
+browser-prove:stage start fri_prove round=0 fri_fold count_out=16384
+browser-prove:stage done fri_prove round=0 fri_fold count_out=16384 elapsed_ms=0.000
+browser-prove:stage done fri_prove round=0 domain_in=1048576 elapsed_ms=853.000
+browser-prove:stage start fri_prove round=1 domain_in=65536
+browser-prove:stage start fri_prove round=1 expand_evaluate_ntt domain=65536
+browser-prove:stage done fri_prove round=1 expand_evaluate_ntt domain=65536 elapsed_ms=0.000
+browser-prove:stage start fri_prove round=1 merkle_new rows=4096 cols=64
+browser-prove:stage start merkle fri_round1 hash_rows rows=4096 cols=64
+browser-prove:stage done merkle fri_round1 hash_rows rows=4096 cols=64 elapsed_ms=0.000
+browser-prove:stage start merkle fri_round1 hash_fold rows=4096 layers=12
+browser-prove:stage done merkle fri_round1 hash_fold rows=4096 layers=12 elapsed_ms=0.000
+browser-prove:stage start merkle fri_round1 root_top_readback rows=4096 top_size=32
+browser-prove:stage done merkle fri_round1 root_top_readback rows=4096 top_size=32 elapsed_ms=4.000
+browser-prove:stage done fri_prove round=1 merkle_new rows=4096 cols=64 elapsed_ms=5.000
+browser-prove:stage start fri_prove round=1 fri_fold count_out=1024
+browser-prove:stage done fri_prove round=1 fri_fold count_out=1024 elapsed_ms=0.000
+browser-prove:stage done fri_prove round=1 domain_in=65536 elapsed_ms=5.000
+browser-prove:stage start fri_prove round=2 domain_in=4096
+browser-prove:stage start fri_prove round=2 expand_evaluate_ntt domain=4096
+browser-prove:stage done fri_prove round=2 expand_evaluate_ntt domain=4096 elapsed_ms=0.000
+browser-prove:stage start fri_prove round=2 merkle_new rows=256 cols=64
+browser-prove:stage start merkle fri_round2 hash_rows rows=256 cols=64
+browser-prove:stage done merkle fri_round2 hash_rows rows=256 cols=64 elapsed_ms=1.000
+browser-prove:stage start merkle fri_round2 hash_fold rows=256 layers=8
+browser-prove:stage done merkle fri_round2 hash_fold rows=256 layers=8 elapsed_ms=0.000
+browser-prove:stage start merkle fri_round2 root_top_readback rows=256 top_size=32
+browser-prove:stage done merkle fri_round2 root_top_readback rows=256 top_size=32 elapsed_ms=3.000
+browser-prove:stage done fri_prove round=2 merkle_new rows=256 cols=64 elapsed_ms=4.000
+browser-prove:stage start fri_prove round=2 fri_fold count_out=64
+browser-prove:stage done fri_prove round=2 fri_fold count_out=64 elapsed_ms=0.000
+browser-prove:stage done fri_prove round=2 domain_in=4096 elapsed_ms=4.000
+browser-prove:stage start fri_prove final size=256
+browser-prove:stage done fri_prove final size=256 elapsed_ms=3.000
+browser-prove:stage done finalize_async fri_prove elapsed_ms=902.000 gpu_active=true
+browser-prove:stage done lift_prove_async segment_index=0 elapsed_ms=1942
+browser-prove:stage start verify_lift
+browser-prove:stage done verify_lift elapsed_ms=16
+browser-prove:stage done lift_async segment_index=0 elapsed_ms=1958
+browser-prove:stage done composite_to_succinct_async elapsed_ms=1959
+browser-prove:metric prove_session_async wall_ms=5799.0 gpu_active_ms=4332.0 gpu_idle_ratio=0.253
+browser-prove:stage done prove_session_async segments=1 pending_keccaks=0 assumptions=0 elapsed_ms=5799
+browser-prove:done multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: segments=1 user_cycles=202872 total_cycles=262144
+browser-prove:webgpu multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: gpu_dispatches=329 raw_compute_dispatches=613 queue_submits=168 cpu_mirrors=8 cpu_fallbacks=0 cpu_only_ops=0 uploads=217 upload_bytes=171286960 device_copies=4 device_copy_bytes=575488 readbacks=22 readback_bytes=478272 bind_group_layout_creations=31 bind_group_layout_cache_hits=97 bind_group_creations=150 compute_pipeline_creations=47 compute_pipeline_cache_hits=90 buffers=308 buffer_bytes=3913055340
+browser-prove:webgpu-op multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: op=batch_bit_reverse gpu_dispatches=12 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: op=batch_evaluate_any gpu_dispatches=8 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: op=batch_expand_into_evaluate_ntt gpu_dispatches=14 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: op=batch_interpolate_ntt gpu_dispatches=8 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: op=combos_divide gpu_dispatches=2 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: op=combos_prepare gpu_dispatches=2 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: op=copy_from_elem_transpose_zero_pad gpu_dispatches=1 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: op=eltwise_copy_elem gpu_dispatches=2 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: op=eltwise_copy_elem_slice gpu_dispatches=2 cpu_mirrors=2 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: op=eltwise_sum_extelem gpu_dispatches=2 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: op=eltwise_zeroize_elem gpu_dispatches=7 cpu_mirrors=5 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: op=eval_check gpu_dispatches=2 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: op=fri_fold gpu_dispatches=6 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: op=hash_fold gpu_dispatches=232 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: op=hash_rows gpu_dispatches=14 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: op=mix_poly_coeffs gpu_dispatches=8 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: op=prefix_products gpu_dispatches=1 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: op=scatter gpu_dispatches=0 cpu_mirrors=1 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-op multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: op=zk_shift gpu_dispatches=6 cpu_mirrors=0 cpu_fallbacks=0 cpu_only_ops=0
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=global uploads=5 upload_bytes=1104
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=mix uploads=2 upload_bytes=224
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=recursion_accum_params uploads=1 upload_bytes=32
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=recursion_accum_wom uploads=1 upload_bytes=2327520
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=recursion_ctrl_compact uploads=1 upload_bytes=13383240
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=recursion_witgen_candidate_bucket_bases uploads=1 upload_bytes=1268116
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=recursion_witgen_candidate_cycle_prefixes uploads=1 upload_bytes=581880
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=recursion_witgen_candidate_iop_body uploads=1 upload_bytes=865776
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=recursion_witgen_candidate_iop_cursors uploads=1 upload_bytes=581880
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=recursion_witgen_candidate_params uploads=1 upload_bytes=32
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=recursion_witgen_candidate_preflight_wom uploads=1 upload_bytes=5072448
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=rv32im_accum_control0_direct_params uploads=1 upload_bytes=32
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=rv32im_accum_control0_direct_rows uploads=1 upload_bytes=166240
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=rv32im_accum_machine_column_carry_params uploads=1 upload_bytes=32
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=rv32im_accum_mem0_direct_params uploads=1 upload_bytes=32
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=rv32im_accum_mem0_direct_rows uploads=1 upload_bytes=163180
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=rv32im_accum_mem1_direct_params uploads=1 upload_bytes=32
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=rv32im_accum_mem1_direct_rows uploads=1 upload_bytes=127668
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=rv32im_accum_misc0_direct_params uploads=1 upload_bytes=32
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=rv32im_accum_misc0_direct_rows uploads=1 upload_bytes=272956
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=rv32im_accum_misc1_direct_params uploads=1 upload_bytes=32
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=rv32im_accum_misc1_direct_rows uploads=1 upload_bytes=28444
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=rv32im_accum_misc2_direct_params uploads=1 upload_bytes=32
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=rv32im_accum_misc2_direct_rows uploads=1 upload_bytes=100320
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=rv32im_accum_terminal_ext_prefix_params uploads=1 upload_bytes=16
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_batch_bit_reverse_params uploads=12 upload_bytes=192
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_batch_evaluate_any_params uploads=3 upload_bytes=96
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_batch_evaluate_any_partial_2d_params uploads=5 upload_bytes=240
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_batch_evaluate_any_reduce_params uploads=5 upload_bytes=160
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_batch_expand_local_ntt_params uploads=14 upload_bytes=672
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_combos_divide_chunk_indices uploads=2 upload_bytes=44
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_combos_divide_chunk_offsets uploads=2 upload_bytes=52
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_combos_divide_params uploads=2 upload_bytes=64
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_combos_divide_pows uploads=2 upload_bytes=576
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_combos_prepare_coeff_u uploads=2 upload_bytes=23440
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_combos_prepare_mix_pows uploads=2 upload_bytes=8160
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_combos_prepare_params uploads=2 upload_bytes=96
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_combos_prepare_reg_combo_ids uploads=2 upload_bytes=1912
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_combos_prepare_reg_sizes uploads=2 upload_bytes=1912
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_eltwise_copy_elem_slice_from uploads=2 upload_bytes=573440
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_eltwise_sum_extelem_params uploads=2 upload_bytes=32
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_eval_check_base_interpreter_instructions uploads=1 upload_bytes=395488
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_eval_check_base_interpreter_mix_pows uploads=1 upload_bytes=19664
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_eval_check_interpreter_instructions uploads=1 upload_bytes=646464
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_eval_check_interpreter_mix_pows uploads=1 upload_bytes=103456
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_eval_check_interpreter_params uploads=2 upload_bytes=192
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_fri_fold_params uploads=6 upload_bytes=192
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_mix_poly_coeffs_params uploads=8 upload_bytes=512
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_ntt_interpolate_from_params uploads=3 upload_bytes=96
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_ntt_normalize_params uploads=8 upload_bytes=128
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_ntt_step_params uploads=22 upload_bytes=66816
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_ntt_twiddles_fwd uploads=3 upload_bytes=4472820
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_ntt_twiddles_rev uploads=2 upload_bytes=5242872
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_poseidon2_fold_chain_params uploads=14 upload_bytes=59392
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_poseidon2_rows_params uploads=14 upload_bytes=448
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_transpose_zero_pad_params uploads=1 upload_bytes=16
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_zero_default_sparse_params uploads=1 upload_bytes=16
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_zero_default_sparse_ranges uploads=1 upload_bytes=7481312
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_zero_default_sparse_values uploads=1 upload_bytes=5402960
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_zeroize_sparse_params uploads=2 upload_bytes=32
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_zeroize_sparse_ranges uploads=2 upload_bytes=23790344
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_zeroize_sparse_values uploads=2 upload_bytes=98019916
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=webgpu_zk_shift_params uploads=6 upload_bytes=96
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=which uploads=16 upload_bytes=7900
+browser-prove:webgpu-upload multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=xs uploads=8 upload_bytes=23440
+browser-prove:webgpu-device-copy multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=accum device_copies=1 device_copy_bytes=49152
+browser-prove:webgpu-device-copy multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=final_coeffs device_copies=2 device_copy_bytes=2048
+browser-prove:webgpu-device-copy multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=recursion_data device_copies=1 device_copy_bytes=524288
+browser-prove:webgpu-readback multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=final_coeffs readbacks=2 readback_bytes=2048
+browser-prove:webgpu-readback multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=merkle_query readbacks=4 readback_bytes=438000
+browser-prove:webgpu-readback multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=nodes readbacks=14 readback_bytes=14784
+browser-prove:webgpu-readback multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: source=out readbacks=2 readback_bytes=23440
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=poly_group code batch_expand_into_evaluate_ntt count=1 size=262144 domain=1048576 elapsed_us=5000 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=poly_group code batch_bit_reverse count=1 size=262144 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle code hash_rows rows=1048576 cols=1 elapsed_us=1000 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle code hash_fold rows=1048576 layers=20 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle code root_top_readback rows=1048576 top_size=32 elapsed_us=579000 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=commit_group_async rv32im_code elapsed_us=590000 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=poly_group data batch_expand_into_evaluate_ntt count=211 size=262144 domain=1048576 elapsed_us=1000 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=poly_group data batch_bit_reverse count=211 size=262144 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle data hash_rows rows=1048576 cols=211 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle data hash_fold rows=1048576 layers=20 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle data root_top_readback rows=1048576 top_size=32 elapsed_us=83000 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=commit_group_async rv32im_data elapsed_us=268000 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=rv32im_accumulate misc_direct_gpu_grouped elapsed_us=1000 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=rv32im_accumulate terminal_ext_prefix_gpu elapsed_us=18000 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=rv32im_accumulate machine_column_carry_gpu elapsed_us=0 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=poly_group accum batch_expand_into_evaluate_ntt count=103 size=262144 domain=1048576 elapsed_us=1000 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=poly_group accum batch_bit_reverse count=103 size=262144 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle accum hash_rows rows=1048576 cols=103 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle accum hash_fold rows=1048576 layers=20 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle accum root_top_readback rows=1048576 top_size=32 elapsed_us=84000 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=commit_group_async rv32im_accum elapsed_us=164000 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=poly_group check batch_expand_into_evaluate_ntt count=16 size=262144 domain=1048576 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=poly_group check batch_bit_reverse count=16 size=262144 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle check hash_rows rows=1048576 cols=16 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle check hash_fold rows=1048576 layers=20 elapsed_us=1000 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle check root_top_readback rows=1048576 top_size=32 elapsed_us=639000 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=finalize_async check_group elapsed_us=661000 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=finalize_async eval_u_groups elapsed_us=1000 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=finalize_async eval_u_check elapsed_us=0 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=finalize_async eval_u_readback elapsed_us=20000 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=finalize_async mix_poly_coeffs elapsed_us=0 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=finalize_async combos_prepare elapsed_us=0 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=finalize_async combos_divide elapsed_us=1000 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=finalize_async bit_rev elapsed_us=0 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle fri_round0 hash_rows rows=65536 cols=64 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle fri_round0 hash_fold rows=65536 layers=16 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle fri_round0 root_top_readback rows=65536 top_size=32 elapsed_us=873000 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle fri_round1 hash_rows rows=4096 cols=64 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle fri_round1 hash_fold rows=4096 layers=12 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle fri_round1 root_top_readback rows=4096 top_size=32 elapsed_us=8000 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle fri_round2 hash_rows rows=256 cols=64 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle fri_round2 hash_fold rows=256 layers=8 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle fri_round2 root_top_readback rows=256 top_size=32 elapsed_us=4000 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=finalize_async fri_prove elapsed_us=944000 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=recursion_witgen gpu_verify_mem_candidate_sequence elapsed_us=0 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=poly_group ctrl batch_expand_into_evaluate_ntt count=23 size=262144 domain=1048576 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=poly_group ctrl batch_bit_reverse count=23 size=262144 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle ctrl hash_rows rows=1048576 cols=23 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle ctrl hash_fold rows=1048576 layers=20 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle ctrl root_top_readback rows=1048576 top_size=32 elapsed_us=289000 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=commit_group_async recursion_ctrl elapsed_us=297000 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=poly_group recursion_data batch_expand_into_evaluate_ntt count=128 size=262144 domain=1048576 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=poly_group recursion_data batch_bit_reverse count=128 size=262144 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle recursion_data hash_rows rows=1048576 cols=128 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle recursion_data hash_fold rows=1048576 layers=20 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle recursion_data root_top_readback rows=1048576 top_size=32 elapsed_us=38000 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=commit_group_async recursion_data elapsed_us=66000 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=recursion_accumulate gpu_compute_accum elapsed_us=0 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=recursion_accumulate gpu_prefix elapsed_us=0 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=recursion_accumulate gpu_verify_accum elapsed_us=0 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=poly_group accum batch_expand_into_evaluate_ntt count=12 size=262144 domain=1048576 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=poly_group accum batch_bit_reverse count=12 size=262144 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle accum hash_rows rows=1048576 cols=12 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle accum hash_fold rows=1048576 layers=20 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle accum root_top_readback rows=1048576 top_size=32 elapsed_us=263000 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=commit_group_async recursion_accum elapsed_us=267000 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=poly_group check batch_expand_into_evaluate_ntt count=16 size=262144 domain=1048576 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=poly_group check batch_bit_reverse count=16 size=262144 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle check hash_rows rows=1048576 cols=16 elapsed_us=1000 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle check hash_fold rows=1048576 layers=20 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle check root_top_readback rows=1048576 top_size=32 elapsed_us=119000 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=finalize_async check_group elapsed_us=124000 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=finalize_async eval_u_groups elapsed_us=0 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=finalize_async eval_u_check elapsed_us=0 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=finalize_async eval_u_readback elapsed_us=8000 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=finalize_async mix_poly_coeffs elapsed_us=0 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=finalize_async combos_prepare elapsed_us=0 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=finalize_async combos_divide elapsed_us=0 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=finalize_async bit_rev elapsed_us=0 gpu_active=true
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle fri_round0 hash_rows rows=65536 cols=64 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle fri_round0 hash_fold rows=65536 layers=16 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle fri_round0 root_top_readback rows=65536 top_size=32 elapsed_us=852000 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle fri_round1 hash_rows rows=4096 cols=64 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle fri_round1 hash_fold rows=4096 layers=12 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle fri_round1 root_top_readback rows=4096 top_size=32 elapsed_us=4000 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle fri_round2 hash_rows rows=256 cols=64 elapsed_us=1000 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle fri_round2 hash_fold rows=256 layers=8 elapsed_us=0 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=merkle fri_round2 root_top_readback rows=256 top_size=32 elapsed_us=3000 gpu_active=false
+browser-prove:webgpu-stage multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate: label=finalize_async fri_prove elapsed_us=902000 gpu_active=true
+test tests::recursion_witgen_gpu_verify_mem_candidate_busy_loop_e2e_verify ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 168 filtered out; finished in 5.97s
+                                                  
+Script done on 2026-05-22 11:00:34+03:00 [COMMAND_EXIT_CODE="0"]

@@ -1,3 +1,6 @@
+fn merge_ReadSourceRegsStruct(a: ReadSourceRegsStruct, b: ReadSourceRegsStruct) -> ReadSourceRegsStruct {
+  return ReadSourceRegsStruct(ValU32Struct((a.rs1.low | b.rs1.low), (a.rs1.high | b.rs1.high)), ValU32Struct((a.rs2.low | b.rs2.low), (a.rs2.high | b.rs2.high)));
+}
 fn exec_NondetReg(arg0: Val, layout1: BoundLayout_NondetRegLayout) -> NondetRegStruct {
 store(lookup_NondetRegLayout__super(layout1), arg0);
 let x2: NondetRegStruct = NondetRegStruct(load(lookup_NondetRegLayout__super(layout1), 0));
@@ -519,13 +522,50 @@ x9 = x14;
 }
 return x9;
 }
+fn exec_ReadSourceRegsChunk1(arg0: NondetRegStruct, arg1_0: InstInputStruct, arg2_0: DecoderStruct, layout3: BoundLayout_ReadSourceRegsLayout) -> ReadSourceRegsStruct {
+// builtin Isz
+// ReadSourceRegs(zirgen/circuit/rv32im/v2/dsl/inst.zir:47)
+let x4: Val = isz(sub(arg2_0.rs1, arg2_0.rs2));
+let x5: NondetRegStruct = exec_NondetReg(x4, lookup_ReadSourceRegsLayout_isSameReg(layout3));
+// builtin Sub
+// ReadSourceRegs(zirgen/circuit/rv32im/v2/dsl/inst.zir:49)
+let x6: Val = sub(268435454u, x5._super);
+eqz(mul(x5._super, x6));
+var x7: SourceRegsStruct;
+if ((x6) != 0u) {
+// ReadSourceRegs(zirgen/circuit/rv32im/v2/dsl/inst.zir:59)
+let x8: GetDataStruct = exec_ReadReg(arg0, arg1_0, arg2_0.rs1, lookup_ReadSourceRegsSourceRegsArm1_SuperLayout__0(lookup_ReadSourceRegsSourceRegsLayout_arm1(lookup_ReadSourceRegsLayout_sourceRegs(layout3))));
+// ReadSourceRegs(zirgen/circuit/rv32im/v2/dsl/inst.zir:60)
+let x9: GetDataStruct = exec_ReadReg(arg0, arg1_0, arg2_0.rs2, lookup_ReadSourceRegsSourceRegsArm1_SuperLayout__1(lookup_ReadSourceRegsSourceRegsLayout_arm1(lookup_ReadSourceRegsLayout_sourceRegs(layout3))));
+x7 = SourceRegsStruct(x8._super, x9._super);
+} else {
+  // TODO(wgsl): unreachable mux arm (no assert in WGSL)
+}
+var x10: ReadSourceRegsStruct;
+if ((x6) != 0u) {
+// ReadSourceRegs(zirgen/circuit/rv32im/v2/dsl/inst.zir:62)
+let x11: NondetRegStruct = exec_Reg(x7.rs1.low, lookup_ReadSourceRegsLayout_rs1Low(layout3));
+// ReadSourceRegs(zirgen/circuit/rv32im/v2/dsl/inst.zir:63)
+let x12: NondetRegStruct = exec_Reg(x7.rs1.high, lookup_ReadSourceRegsLayout_rs1High(layout3));
+// ReadSourceRegs(zirgen/circuit/rv32im/v2/dsl/inst.zir:64)
+let x13: NondetRegStruct = exec_Reg(x7.rs2.low, lookup_ReadSourceRegsLayout_rs2Low(layout3));
+// ReadSourceRegs(zirgen/circuit/rv32im/v2/dsl/inst.zir:65)
+let x14: NondetRegStruct = exec_Reg(x7.rs2.high, lookup_ReadSourceRegsLayout_rs2High(layout3));
+// ReadSourceRegs(zirgen/circuit/rv32im/v2/dsl/inst.zir:46)
+let x15: ReadSourceRegsStruct = ReadSourceRegsStruct(ValU32Struct(x11._super, x12._super), ValU32Struct(x13._super, x14._super));
+x10 = x15;
+} else {
+  // TODO(wgsl): unreachable mux arm (no assert in WGSL)
+}
+return x10;
+}
 fn exec_MemStoreInput(arg0: NondetRegStruct, arg1_0: InstInputStruct, layout2: BoundLayout_MemStoreInputLayout) -> MemStoreInputStruct {
 // MemStoreInput(zirgen/circuit/rv32im/v2/dsl/inst_mem.zir:18)
 eqz(sub(arg1_0.state, 805306266u));
 // MemStoreInput(zirgen/circuit/rv32im/v2/dsl/inst_mem.zir:20)
 let x3: DecoderStruct = exec_DecodeInst(arg0, arg1_0, lookup_MemStoreInputLayout_decoded(layout2));
 // MemStoreInput(zirgen/circuit/rv32im/v2/dsl/inst_mem.zir:21)
-let x4: ReadSourceRegsStruct = exec_ReadSourceRegsChunk0(arg0, arg1_0, x3, lookup_MemStoreInputLayout_sourceRegs(layout2));
+let x4: ReadSourceRegsStruct = exec_ReadSourceRegs_combined(arg0, arg1_0, x3, lookup_MemStoreInputLayout_sourceRegs(layout2));
 // builtin Add
 // AddU32(zirgen/circuit/rv32im/v2/dsl/u32.zir:27)
 // MemStoreInput(zirgen/circuit/rv32im/v2/dsl/inst_mem.zir:24)
@@ -624,4 +664,9 @@ x7 = InstOutputBaseStruct(x10._super, 805306266u, arg1_0.mode, x11);
   // TODO(wgsl): unreachable mux arm (no assert in WGSL)
 }
 return x7;
+}
+fn exec_ReadSourceRegs_combined(arg0: NondetRegStruct, arg1_0: InstInputStruct, arg2_0: DecoderStruct, layout3: BoundLayout_ReadSourceRegsLayout) -> ReadSourceRegsStruct {
+  let r0 = exec_ReadSourceRegsChunk0(arg0, arg1_0, arg2_0, layout3);
+  let r1 = exec_ReadSourceRegsChunk1(arg0, arg1_0, arg2_0, layout3);
+  return merge_ReadSourceRegsStruct(r0, r1);
 }

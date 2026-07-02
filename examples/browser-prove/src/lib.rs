@@ -24,7 +24,10 @@ mod tests {
             Elem as _, ExtElem as _, RootsOfUnity as _,
         },
         hal::{
-            webgpu::{WebGpuBindingLayout, WebGpuBuffer, WebGpuBufferBinding, WebGpuHal},
+            webgpu::{
+                WebGpuBindingLayout, WebGpuBuffer, WebGpuBufferBinding, WebGpuDiagnostics,
+                WebGpuHal,
+            },
             Buffer as _, Hal,
         },
         prove::Prover as ZkpProver,
@@ -46,6 +49,21 @@ mod tests {
         let prover = webgpu_prover().await.unwrap();
         assert_eq!(prover.get_name(), "webgpu");
         prover
+    }
+
+    fn assert_representative_webgpu_limits(prover: &WebGpuProver) {
+        const MIN_BUFFER_SIZE: u64 = 4 * 1024 * 1024 * 1024 - 4;
+        const MIN_STORAGE_BUFFER_BINDING_SIZE: u64 = 2 * 1024 * 1024 * 1024 - 4;
+        const MIN_WORKGROUP_STORAGE_SIZE: u32 = 48 * 1024;
+
+        let (max_buffer_size, max_storage_buffer_binding_size, max_compute_workgroup_storage_size) =
+            prover.webgpu_limits();
+        assert!(
+            max_buffer_size >= MIN_BUFFER_SIZE
+                && max_storage_buffer_binding_size >= MIN_STORAGE_BUFFER_BINDING_SIZE
+                && max_compute_workgroup_storage_size >= MIN_WORKGROUP_STORAGE_SIZE,
+            "representative performance proof gates require high WebGPU limits: max_buffer_size={max_buffer_size} max_storage_buffer_binding_size={max_storage_buffer_binding_size} max_compute_workgroup_storage_size={max_compute_workgroup_storage_size}"
+        );
     }
 
     async fn assert_gpu_buffer_matches_cpu<T>(hal: &WebGpuHal, name: &str, buffer: &WebGpuBuffer<T>)
@@ -217,16 +235,22 @@ mod tests {
     fn log_webgpu_diagnostics(prover: &WebGpuProver, name: &str) {
         let diagnostics = prover.diagnostics();
         assert!(
-            diagnostics.gpu_dispatches > 0,
+            diagnostics.gpu_dispatches > 0 || diagnostics.raw_compute_dispatches > 0,
             "{name}: WebGPU proof path did not dispatch any GPU work"
         );
         assert_eq!(
             diagnostics.cpu_only_ops, 0,
             "{name}: WebGPU proof path used CPU-only HAL operations"
         );
+        assert_eq!(
+            diagnostics.cpu_fallbacks, 0,
+            "{name}: WebGPU proof path used CPU fallbacks"
+        );
         console_log!(
-            "browser-prove:webgpu {name}: gpu_dispatches={} cpu_mirrors={} cpu_fallbacks={} cpu_only_ops={} uploads={} upload_bytes={} device_copies={} device_copy_bytes={} readbacks={} readback_bytes={} bind_group_layout_creations={} bind_group_layout_cache_hits={} bind_group_creations={} compute_pipeline_creations={} compute_pipeline_cache_hits={} buffers={} buffer_bytes={}",
+            "browser-prove:webgpu {name}: gpu_dispatches={} raw_compute_dispatches={} queue_submits={} cpu_mirrors={} cpu_fallbacks={} cpu_only_ops={} uploads={} upload_bytes={} device_copies={} device_copy_bytes={} readbacks={} readback_bytes={} bind_group_layout_creations={} bind_group_layout_cache_hits={} bind_group_creations={} compute_pipeline_creations={} compute_pipeline_cache_hits={} buffers={} buffer_bytes={}",
             diagnostics.gpu_dispatches,
+            diagnostics.raw_compute_dispatches,
+            diagnostics.queue_submits,
             diagnostics.cpu_mirrors,
             diagnostics.cpu_fallbacks,
             diagnostics.cpu_only_ops,
@@ -278,6 +302,235 @@ mod tests {
                 source.readback_bytes,
             );
         }
+        for stage in diagnostics.stages {
+            console_log!(
+                "browser-prove:webgpu-stage {name}: label={} elapsed_us={} gpu_active={}",
+                stage.label,
+                stage.elapsed_us,
+                stage.gpu_active,
+            );
+        }
+    }
+
+    fn readback_count(diagnostics: &WebGpuDiagnostics, name: &'static str) -> u64 {
+        diagnostics
+            .readback_sources
+            .iter()
+            .find(|source| source.name == name)
+            .map(|source| source.readbacks)
+            .unwrap_or(0)
+    }
+
+    fn readback_bytes(diagnostics: &WebGpuDiagnostics, name: &'static str) -> u64 {
+        diagnostics
+            .readback_sources
+            .iter()
+            .find(|source| source.name == name)
+            .map(|source| source.readback_bytes)
+            .unwrap_or(0)
+    }
+
+    fn upload_count(diagnostics: &WebGpuDiagnostics, name: &'static str) -> u64 {
+        diagnostics
+            .upload_sources
+            .iter()
+            .find(|source| source.name == name)
+            .map(|source| source.uploads)
+            .unwrap_or(0)
+    }
+
+    fn upload_bytes(diagnostics: &WebGpuDiagnostics, name: &'static str) -> u64 {
+        diagnostics
+            .upload_sources
+            .iter()
+            .find(|source| source.name == name)
+            .map(|source| source.upload_bytes)
+            .unwrap_or(0)
+    }
+
+    fn assert_upload_bytes_bounded(
+        name: &str,
+        before: &WebGpuDiagnostics,
+        after: &WebGpuDiagnostics,
+        source: &'static str,
+        max_bytes: u64,
+    ) {
+        let upload_bytes = upload_bytes(after, source).saturating_sub(upload_bytes(before, source));
+        assert!(
+            upload_bytes <= max_bytes,
+            "{name}: WebGPU upload source `{source}` exceeded bound: upload_bytes={upload_bytes} max_bytes={max_bytes} before={before:?} after={after:?}"
+        );
+    }
+
+    fn assert_upload_source_delta_absent(
+        name: &str,
+        before: &WebGpuDiagnostics,
+        after: &WebGpuDiagnostics,
+        source: &'static str,
+    ) {
+        let uploads = upload_count(after, source).saturating_sub(upload_count(before, source));
+        let bytes = upload_bytes(after, source).saturating_sub(upload_bytes(before, source));
+        assert_eq!(
+            uploads, 0,
+            "{name}: WebGPU upload source `{source}` should be absent in this proof delta: uploads={uploads} bytes={bytes} before={before:?} after={after:?}"
+        );
+    }
+
+    fn op_gpu_dispatches(diagnostics: &WebGpuDiagnostics, name: &'static str) -> u64 {
+        diagnostics
+            .ops
+            .iter()
+            .find(|op| op.name == name)
+            .map(|op| op.gpu_dispatches)
+            .unwrap_or(0)
+    }
+
+    fn assert_no_code_uploads(name: &str, diagnostics: &WebGpuDiagnostics) {
+        let code_uploads = upload_count(diagnostics, "code");
+        assert_eq!(
+            code_uploads, 0,
+            "{name}: zeroed code groups should not upload host-filled shadows: {diagnostics:?}"
+        );
+    }
+
+    fn assert_eval_u_readbacks_coalesced(name: &str, diagnostics: &WebGpuDiagnostics) {
+        let out_readbacks = readback_count(diagnostics, "out");
+        let final_coeffs_readbacks = readback_count(diagnostics, "final_coeffs");
+        assert!(
+            final_coeffs_readbacks > 0,
+            "{name}: expected one final_coeffs readback per proof"
+        );
+        assert!(
+            out_readbacks <= final_coeffs_readbacks,
+            "{name}: finalization should read group/check eval_u outputs with at most one out readback per proof: out={out_readbacks} final_coeffs={final_coeffs_readbacks} diagnostics={diagnostics:?}"
+        );
+    }
+
+    fn assert_merkle_query_readbacks_coalesced(name: &str, diagnostics: &WebGpuDiagnostics) {
+        let merkle_query_readbacks = readback_count(diagnostics, "merkle_query");
+        let final_coeffs_readbacks = readback_count(diagnostics, "final_coeffs");
+        assert!(
+            final_coeffs_readbacks > 0,
+            "{name}: expected one final_coeffs readback per proof"
+        );
+        assert!(
+            merkle_query_readbacks <= final_coeffs_readbacks * 2,
+            "{name}: FRI query openings should coalesce Merkle-tree reads across trees: merkle_query={merkle_query_readbacks} final_coeffs={final_coeffs_readbacks} diagnostics={diagnostics:?}"
+        );
+    }
+
+    fn assert_no_witgen_data_readback(name: &str, diagnostics: &WebGpuDiagnostics) {
+        let data_readbacks = readback_count(diagnostics, "data");
+        let data_readback_bytes = readback_bytes(diagnostics, "data");
+        assert_eq!(
+            data_readbacks, 0,
+            "{name}: GPU-witgen replacement must not read back the full data matrix: data_readbacks={data_readbacks} data_readback_bytes={data_readback_bytes} diagnostics={diagnostics:?}"
+        );
+    }
+
+    fn assert_witgen_seed_upload_elided(
+        name: &str,
+        before: &WebGpuDiagnostics,
+        after: &WebGpuDiagnostics,
+        max_data_upload_bytes: u64,
+    ) {
+        let data_upload_bytes =
+            upload_bytes(after, "data").saturating_sub(upload_bytes(before, "data"));
+        assert!(
+            data_upload_bytes <= max_data_upload_bytes,
+            "{name}: GPU-witgen replacement must not upload the full pre-witgen data matrix: data_upload_bytes={data_upload_bytes} max_data_upload_bytes={max_data_upload_bytes} before={before:?} after={after:?}"
+        );
+    }
+
+    fn assert_witgen_data_shadow_readback_elided(
+        name: &str,
+        before: &WebGpuDiagnostics,
+        after: &WebGpuDiagnostics,
+    ) {
+        let dense_readbacks = readback_count(after, "witgen_data_shadow_columns")
+            .saturating_sub(readback_count(before, "witgen_data_shadow_columns"));
+        let dense_readback_bytes = readback_bytes(after, "witgen_data_shadow_columns")
+            .saturating_sub(readback_bytes(before, "witgen_data_shadow_columns"));
+        let sparse_readbacks = readback_count(after, "witgen_data_shadow_rows")
+            .saturating_sub(readback_count(before, "witgen_data_shadow_rows"));
+        let sparse_readback_bytes = readback_bytes(after, "witgen_data_shadow_rows")
+            .saturating_sub(readback_bytes(before, "witgen_data_shadow_rows"));
+        assert_eq!(
+            dense_readbacks, 0,
+            "{name}: GPU-witgen replacement must not repair the CPU shadow by reading dense column prefixes: dense_readbacks={dense_readbacks} dense_readback_bytes={dense_readback_bytes} before={before:?} after={after:?}"
+        );
+        assert_eq!(
+            sparse_readbacks, 0,
+            "{name}: GPU-witgen replacement must not repair the CPU shadow by reading sparse rows: sparse_readbacks={sparse_readbacks} sparse_readback_bytes={sparse_readback_bytes} before={before:?} after={after:?}"
+        );
+    }
+
+    fn assert_witgen_accum_shadow_readbacks_coalesced(
+        name: &str,
+        before: &WebGpuDiagnostics,
+        after: &WebGpuDiagnostics,
+        max_readbacks: u64,
+    ) {
+        let readbacks = readback_count(after, "witgen_accum_shadow_rows")
+            .saturating_sub(readback_count(before, "witgen_accum_shadow_rows"));
+        let readback_bytes = readback_bytes(after, "witgen_accum_shadow_rows")
+            .saturating_sub(readback_bytes(before, "witgen_accum_shadow_rows"));
+        assert!(
+            readbacks <= max_readbacks,
+            "{name}: GPU-witgen accum shadow sync should coalesce row groups to at most one readback per segment: readbacks={readbacks} max_readbacks={max_readbacks} readback_bytes={readback_bytes} before={before:?} after={after:?}"
+        );
+    }
+
+    fn assert_witgen_accum_shadow_readback_bytes_bounded(
+        name: &str,
+        before: &WebGpuDiagnostics,
+        after: &WebGpuDiagnostics,
+        max_bytes: u64,
+    ) {
+        let readback_bytes = readback_bytes(after, "witgen_accum_shadow_rows")
+            .saturating_sub(readback_bytes(before, "witgen_accum_shadow_rows"));
+        assert!(
+            readback_bytes <= max_bytes,
+            "{name}: GPU-witgen accum shadow sync should not read broad row prefixes: readback_bytes={readback_bytes} max_bytes={max_bytes} before={before:?} after={after:?}"
+        );
+    }
+
+    fn assert_witgen_seed_scatter_elided(
+        name: &str,
+        before: &WebGpuDiagnostics,
+        after: &WebGpuDiagnostics,
+    ) {
+        let scatter_offset_upload_bytes = upload_bytes(after, "webgpu_scatter_offsets")
+            .saturating_sub(upload_bytes(before, "webgpu_scatter_offsets"));
+        let scatter_value_upload_bytes = upload_bytes(after, "webgpu_scatter_values")
+            .saturating_sub(upload_bytes(before, "webgpu_scatter_values"));
+        let scatter_dispatches = op_gpu_dispatches(after, "scatter")
+            .saturating_sub(op_gpu_dispatches(before, "scatter"));
+        assert_eq!(
+            scatter_offset_upload_bytes, 0,
+            "{name}: GPU-witgen replacement seed should not upload scatter offsets: scatter_offset_upload_bytes={scatter_offset_upload_bytes} before={before:?} after={after:?}"
+        );
+        assert_eq!(
+            scatter_value_upload_bytes, 0,
+            "{name}: GPU-witgen replacement seed should not upload scatter values: scatter_value_upload_bytes={scatter_value_upload_bytes} before={before:?} after={after:?}"
+        );
+        assert_eq!(
+            scatter_dispatches, 0,
+            "{name}: GPU-witgen replacement seed should not dispatch scatter: scatter_dispatches={scatter_dispatches} before={before:?} after={after:?}"
+        );
+    }
+
+    fn assert_witgen_replacement_pipeline_scope(
+        name: &str,
+        diagnostics: &WebGpuDiagnostics,
+        max_compute_pipeline_creations: u64,
+    ) {
+        assert!(
+            diagnostics.compute_pipeline_creations <= max_compute_pipeline_creations,
+            "{name}: GPU-witgen replacement should not compile unsupported replacement-arm pipelines: compute_pipeline_creations={} max_compute_pipeline_creations={} diagnostics={diagnostics:?}",
+            diagnostics.compute_pipeline_creations,
+            max_compute_pipeline_creations,
+        );
     }
 
     fn log_webgpu_pool_diagnostics(pool: &WebGpuProverPool, name: &str) {
@@ -291,8 +544,10 @@ mod tests {
             "{name}: WebGPU pool proof path used CPU-only HAL operations"
         );
         console_log!(
-            "browser-prove:webgpu-pool {name}: gpu_dispatches={} cpu_mirrors={} cpu_fallbacks={} cpu_only_ops={} uploads={} upload_bytes={} device_copies={} device_copy_bytes={} readbacks={} readback_bytes={} bind_group_layout_creations={} bind_group_layout_cache_hits={} bind_group_creations={} compute_pipeline_creations={} compute_pipeline_cache_hits={} buffers={} buffer_bytes={}",
+            "browser-prove:webgpu-pool {name}: gpu_dispatches={} raw_compute_dispatches={} queue_submits={} cpu_mirrors={} cpu_fallbacks={} cpu_only_ops={} uploads={} upload_bytes={} device_copies={} device_copy_bytes={} readbacks={} readback_bytes={} bind_group_layout_creations={} bind_group_layout_cache_hits={} bind_group_creations={} compute_pipeline_creations={} compute_pipeline_cache_hits={} buffers={} buffer_bytes={}",
             diagnostics.gpu_dispatches,
+            diagnostics.raw_compute_dispatches,
+            diagnostics.queue_submits,
             diagnostics.cpu_mirrors,
             diagnostics.cpu_fallbacks,
             diagnostics.cpu_only_ops,
@@ -553,7 +808,10 @@ mod tests {
         assert_gpu_buffer_matches_cpu(&hal, "batch_interpolate_ntt", &io).await;
 
         let diagnostics = hal.diagnostics();
-        assert_eq!(diagnostics.bind_group_creations, 4);
+        assert!(
+            diagnostics.bind_group_creations <= 4,
+            "NTT parity test should not create extra bind groups: {diagnostics:?}"
+        );
     }
 
     #[wasm_bindgen_test(async)]
@@ -606,6 +864,105 @@ mod tests {
         assert_eq!(diagnostics.gpu_dispatches, 0);
         assert_eq!(diagnostics.cpu_fallbacks, 0);
         assert_eq!(diagnostics.host_to_gpu_uploads, 0);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_hal_transpose_zero_pad_uploads_only_compact_rows() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        let rows = 3;
+        let cols = 4;
+        let total_rows = 8;
+        let compact = (0..rows * cols)
+            .map(|idx| elem(idx + 17_250))
+            .collect::<Vec<_>>();
+
+        hal.reset_diagnostics();
+        let ctrl = hal
+            .copy_from_elem_transpose_zero_pad(
+                "webgpu_hal_transpose_zero_pad_ctrl",
+                "webgpu_hal_transpose_zero_pad_compact",
+                compact.as_slice(),
+                rows,
+                cols,
+                total_rows,
+                None,
+            )
+            .unwrap();
+        assert_gpu_elem_buffer_matches_cpu(&hal, "transpose_zero_pad_ctrl", &ctrl).await;
+
+        let diagnostics = hal.diagnostics();
+        let full_ctrl_upload_bytes = diagnostics
+            .upload_sources
+            .iter()
+            .find(|source| source.name == "webgpu_hal_transpose_zero_pad_ctrl")
+            .map(|source| source.upload_bytes)
+            .unwrap_or(0);
+        let compact_upload_bytes = diagnostics
+            .upload_sources
+            .iter()
+            .find(|source| source.name == "webgpu_hal_transpose_zero_pad_compact")
+            .map(|source| source.upload_bytes)
+            .unwrap_or(0);
+        assert_eq!(
+            full_ctrl_upload_bytes, 0,
+            "transpose-zero-pad should not upload the full padded destination: {diagnostics:?}"
+        );
+        assert_eq!(
+            compact_upload_bytes,
+            (compact.len() * std::mem::size_of::<BabyBearElem>()) as u64,
+            "transpose-zero-pad should upload only compact source rows: {diagnostics:?}"
+        );
+        assert_eq!(
+            diagnostics.raw_compute_dispatches, 1,
+            "transpose-zero-pad should use one GPU dispatch: {diagnostics:?}"
+        );
+
+        hal.reset_diagnostics();
+        let cached_ctrl = hal
+            .copy_from_elem_transpose_zero_pad(
+                "webgpu_hal_transpose_zero_pad_ctrl",
+                "webgpu_hal_transpose_zero_pad_compact",
+                compact.as_slice(),
+                rows,
+                cols,
+                total_rows,
+                Some(Digest::new([0xace5; 8])),
+            )
+            .unwrap();
+        assert_gpu_elem_buffer_matches_cpu(&hal, "transpose_zero_pad_cached_first", &cached_ctrl)
+            .await;
+
+        hal.reset_diagnostics();
+        let cached_ctrl_again = hal
+            .copy_from_elem_transpose_zero_pad(
+                "webgpu_hal_transpose_zero_pad_ctrl",
+                "webgpu_hal_transpose_zero_pad_compact",
+                compact.as_slice(),
+                rows,
+                cols,
+                total_rows,
+                Some(Digest::new([0xace5; 8])),
+            )
+            .unwrap();
+        assert_gpu_elem_buffer_matches_cpu(
+            &hal,
+            "transpose_zero_pad_cached_second",
+            &cached_ctrl_again,
+        )
+        .await;
+        let diagnostics = hal.diagnostics();
+        assert_eq!(
+            diagnostics.host_to_gpu_uploads, 0,
+            "cached transpose-zero-pad should not upload compact rows again: {diagnostics:?}"
+        );
+        assert_eq!(
+            diagnostics.raw_compute_dispatches, 0,
+            "cached transpose-zero-pad should not dispatch again: {diagnostics:?}"
+        );
     }
 
     #[wasm_bindgen_test(async)]
@@ -815,6 +1172,75 @@ fn main() {
         hal.batch_evaluate_any(&coeffs, 3, &which, &xs, &eval_out);
         assert_gpu_buffer_matches_cpu(&hal, "batch_evaluate_any", &eval_out).await;
 
+        let chunked_coeffs = hal.copy_from_elem(
+            "webgpu_hal_eval_chunked_coeffs",
+            &(0..12288).map(|idx| elem(idx + 260)).collect::<Vec<_>>(),
+        );
+        let chunked_which = hal.copy_from_u32("webgpu_hal_eval_chunked_which", &[0, 2, 1]);
+        let chunked_xs = hal.copy_from_extelem(
+            "webgpu_hal_eval_chunked_xs",
+            &(0..3).map(|idx| ext_elem(idx + 360)).collect::<Vec<_>>(),
+        );
+        let expected_out = hal.alloc_extelem("webgpu_hal_eval_chunked_expected", 3);
+        hal.batch_evaluate_any(
+            &chunked_coeffs,
+            3,
+            &chunked_which,
+            &chunked_xs,
+            &expected_out,
+        );
+        let expected = expected_out.to_vec();
+
+        hal.reset_diagnostics();
+        let chunked_out = hal.alloc_extelem("webgpu_hal_eval_chunked_out", 3);
+        {
+            let _gpu_scope = hal.gpu_authoritative_scope(true);
+            assert!(
+                hal.debug_batch_evaluate_any_chunked(
+                    &chunked_coeffs,
+                    3,
+                    &chunked_which,
+                    &chunked_xs,
+                    &chunked_out,
+                )
+                .await
+                .expect("chunked batch_evaluate_any should dispatch"),
+                "chunked batch_evaluate_any should report a GPU dispatch"
+            );
+        }
+        chunked_out
+            .sync_gpu_to_cpu(&hal)
+            .await
+            .expect("chunked batch_evaluate_any readback");
+        assert_eq!(chunked_out.to_vec(), expected);
+        let diagnostics = hal.diagnostics();
+        assert!(
+            diagnostics
+                .readback_sources
+                .iter()
+                .all(|source| source.name != "batch_evaluate_partials"),
+            "chunked batch_evaluate_any should reduce partials on GPU instead of reading them back"
+        );
+        assert!(
+            diagnostics
+                .upload_sources
+                .iter()
+                .all(|source| source.name != "webgpu_batch_evaluate_any_partial_params"),
+            "chunked batch_evaluate_any should use one 2D partial dispatch instead of per-eval params"
+        );
+        assert_eq!(
+            diagnostics.gpu_dispatches, 1,
+            "chunked batch_evaluate_any should still report one logical HAL op"
+        );
+        assert_eq!(
+            diagnostics.raw_compute_dispatches, 2,
+            "chunked batch_evaluate_any should expose its partial and reduce compute dispatches"
+        );
+        assert!(
+            diagnostics.queue_submits >= diagnostics.raw_compute_dispatches,
+            "queue submits should include all raw compute dispatch command buffers"
+        );
+
         let fri_input = hal.copy_from_elem(
             "webgpu_hal_fri_input",
             &(0..192).map(|idx| elem(idx + 400)).collect::<Vec<_>>(),
@@ -933,8 +1359,21 @@ fn main() {
             &(0..30).map(|idx| elem(idx + 1400)).collect::<Vec<_>>(),
         );
         let copy_slice_from = (0..40).map(|idx| elem(idx + 1500)).collect::<Vec<_>>();
+        hal.reset_diagnostics();
         hal.eltwise_copy_elem_slice(&copy_slice_into, &copy_slice_from, 3, 4, 5, 8, 7, 6);
         assert_gpu_buffer_matches_cpu(&hal, "eltwise_copy_elem_slice", &copy_slice_into).await;
+        let diagnostics = hal.diagnostics();
+        assert_eq!(
+            diagnostics.raw_compute_dispatches, 0,
+            "eltwise_copy_elem_slice should use copy commands instead of a compute dispatch: {diagnostics:?}"
+        );
+        assert!(
+            diagnostics
+                .upload_sources
+                .iter()
+                .all(|source| source.name != "webgpu_eltwise_copy_elem_slice_params"),
+            "eltwise_copy_elem_slice copy-command path should not upload compute params: {diagnostics:?}"
+        );
 
         let zeroize = hal.copy_from_elem(
             "webgpu_hal_zeroize",
@@ -948,13 +1387,87 @@ fn main() {
         hal.eltwise_zeroize_elem(&zeroize);
         assert_gpu_buffer_matches_cpu(&hal, "eltwise_zeroize_elem", &zeroize).await;
 
+        hal.reset_diagnostics();
+        let zeroize_fresh_invalid = hal.alloc_elem_init("data", 4096, BabyBearElem::INVALID);
+        zeroize_fresh_invalid.view_mut(|cpu| {
+            cpu[3] = elem(1701);
+            cpu[1024] = elem(1702);
+            cpu[1025] = elem(1703);
+            cpu[2047] = BabyBearElem::ZERO;
+            cpu[3071] = elem(1704);
+        });
+        hal.eltwise_zeroize_elem(&zeroize_fresh_invalid);
+        assert_gpu_buffer_matches_cpu(
+            &hal,
+            "eltwise_zeroize_elem_fresh_invalid_sparse_upload",
+            &zeroize_fresh_invalid,
+        )
+        .await;
+        let diagnostics = hal.diagnostics();
+        assert_eq!(
+            diagnostics.raw_compute_dispatches, 1,
+            "fresh invalid sparse zeroize should upload valid values without a redundant full-buffer zeroize dispatch: {diagnostics:?}"
+        );
+        assert_eq!(
+            diagnostics.cpu_fallbacks, 0,
+            "fresh invalid sparse zeroize must not use CPU fallback"
+        );
+        assert_eq!(
+            diagnostics.cpu_only_ops, 0,
+            "fresh invalid sparse zeroize must not use CPU-only ops"
+        );
+        assert_eq!(
+            upload_count(&diagnostics, "webgpu_zeroize_sparse_values"),
+            1,
+            "fresh invalid sparse zeroize should use the sparse valid-value upload path: {diagnostics:?}"
+        );
+
+        hal.reset_diagnostics();
+        let zero_gap_sparse = hal.alloc_elem_init("data", 128, BabyBearElem::INVALID);
+        zero_gap_sparse.view_mut(|cpu| {
+            for idx in 0..32 {
+                cpu[idx] = if idx % 2 == 0 {
+                    elem(19_000 + idx)
+                } else {
+                    BabyBearElem::ZERO
+                };
+            }
+        });
+        hal.eltwise_zeroize_elem(&zero_gap_sparse);
+        assert_gpu_buffer_matches_cpu(
+            &hal,
+            "eltwise_zeroize_elem_zero_gap_sparse_upload",
+            &zero_gap_sparse,
+        )
+        .await;
+        let diagnostics = hal.diagnostics();
+        assert_eq!(
+            upload_bytes(&diagnostics, "webgpu_zeroize_sparse_ranges"),
+            8,
+            "single-cell zero gaps should coalesce into one sparse zeroize range while INVALID gaps remain boundaries: {diagnostics:?}"
+        );
+        assert_eq!(
+            upload_bytes(&diagnostics, "webgpu_zeroize_sparse_values"),
+            124,
+            "coalesced sparse zeroize range should upload explicit zero fillers only inside the merged zero-gap run, not the trailing zero before INVALID: {diagnostics:?}"
+        );
+
         let gather_src = hal.copy_from_elem(
             "webgpu_hal_gather_src",
             &(0..80).map(|idx| elem(idx + 1700)).collect::<Vec<_>>(),
         );
         let gather_dst = hal.alloc_elem("webgpu_hal_gather_dst", 10);
+        hal.reset_diagnostics();
         hal.gather_sample(&gather_dst, &gather_src, 3, 10, 8);
         assert_gpu_buffer_matches_cpu(&hal, "gather_sample", &gather_dst).await;
+        let diagnostics = hal.diagnostics();
+        assert!(
+            diagnostics
+                .upload_sources
+                .iter()
+                .all(|source| source.name != "webgpu_hal_gather_dst"),
+            "gather_sample fully overwrites dst and should not upload it: {diagnostics:?}"
+        );
 
         let scatter_into = hal.copy_from_elem(
             "webgpu_hal_scatter_into",
@@ -1027,6 +1540,30 @@ fn main() {
             "copy-preserving commit must not mutate the witness"
         );
         let diagnostics = hal.diagnostics();
+        let stage_labels = diagnostics
+            .stages
+            .iter()
+            .map(|stage| stage.label.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            stage_labels.iter().any(|label| label.starts_with(
+                "poly_group webgpu_fused_commit_witness batch_expand_into_evaluate_ntt"
+            )),
+            "fused commit diagnostics should split PolyGroup NTT expansion: {stage_labels:?}"
+        );
+        assert!(
+            stage_labels
+                .iter()
+                .any(|label| label.starts_with("merkle webgpu_fused_commit_witness hash_rows")),
+            "fused commit diagnostics should split Merkle row hashing: {stage_labels:?}"
+        );
+        assert!(
+            stage_labels
+                .iter()
+                .any(|label| label
+                    .starts_with("merkle webgpu_fused_commit_witness root_top_readback")),
+            "fused commit diagnostics should split Merkle root/top readback: {stage_labels:?}"
+        );
         assert_eq!(
             diagnostics.device_copies, 0,
             "fused copy/interpolate commit should not record a coeffs device copy: {diagnostics:?}"
@@ -1034,6 +1571,144 @@ fn main() {
         assert!(
             diagnostics.device_copy_sources.is_empty(),
             "fused copy/interpolate commit should not record device-copy sources: {diagnostics:?}"
+        );
+        let nodes_readbacks = diagnostics
+            .readback_sources
+            .iter()
+            .find(|source| source.name == "nodes")
+            .map(|source| source.readbacks)
+            .unwrap_or(0);
+        assert_eq!(
+            nodes_readbacks, 1,
+            "committed WebGPU Merkle construction should read root and top layer in one nodes readback: {diagnostics:?}"
+        );
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_prover_commit_group_drain_diagnostic_splits_queue_waits() {
+        use risc0_zkp::hal::webgpu::set_poly_group_drain_diagnostic_enabled;
+
+        struct DrainDiagnosticGuard;
+        impl Drop for DrainDiagnosticGuard {
+            fn drop(&mut self) {
+                set_poly_group_drain_diagnostic_enabled(false);
+            }
+        }
+
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        let witness = hal.copy_from_elem(
+            "webgpu_drain_diag_commit_witness",
+            &(0..8).map(|idx| elem(idx + 21_000)).collect::<Vec<_>>(),
+        );
+        let _gpu_scope = hal.gpu_authoritative_scope(true);
+        let mut prover = ZkpProver::new(&hal, &TINY_EVAL_TAPSET);
+        prover.set_po2(3);
+
+        let _guard = DrainDiagnosticGuard;
+        set_poly_group_drain_diagnostic_enabled(true);
+        hal.reset_diagnostics();
+        prover
+            .commit_group_async(0, &witness)
+            .await
+            .expect("drain diagnostic commit must succeed");
+
+        let diagnostics = hal.diagnostics();
+        let stage_labels = diagnostics
+            .stages
+            .iter()
+            .map(|stage| stage.label.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            stage_labels.iter().any(|label| label.starts_with(
+                "poly_group webgpu_drain_diag_commit_witness drain_after_batch_expand_into_evaluate_ntt"
+            )),
+            "drain diagnostics should time the queued NTT drain: {stage_labels:?}"
+        );
+        assert!(
+            stage_labels.iter().any(|label| label.starts_with(
+                "poly_group webgpu_drain_diag_commit_witness drain_after_batch_bit_reverse"
+            )),
+            "drain diagnostics should time the queued bit-reverse drain: {stage_labels:?}"
+        );
+        assert!(
+            stage_labels.iter().any(|label| label
+                .starts_with("merkle webgpu_drain_diag_commit_witness drain_after_hash_rows")),
+            "drain diagnostics should time the queued Merkle row-hash drain: {stage_labels:?}"
+        );
+        assert!(
+            stage_labels.iter().any(|label| label
+                .starts_with("merkle webgpu_drain_diag_commit_witness drain_after_hash_fold")),
+            "drain diagnostics should time the queued Merkle fold-chain drain: {stage_labels:?}"
+        );
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_prover_fri_drain_diagnostic_splits_round_work() {
+        use risc0_zkp::hal::webgpu::set_poly_group_drain_diagnostic_enabled;
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        struct DrainDiagnosticGuard;
+        impl Drop for DrainDiagnosticGuard {
+            fn drop(&mut self) {
+                set_poly_group_drain_diagnostic_enabled(false);
+            }
+        }
+
+        console_error_panic_hook::set_once();
+
+        let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+        let _guard = DrainDiagnosticGuard;
+        set_poly_group_drain_diagnostic_enabled(true);
+
+        let env = ExecutorEnv::builder()
+            .write(&MultiTestSpec::Poseidon2Basic)
+            .unwrap()
+            .build()
+            .unwrap();
+        prove_succinct_async(
+            prover.as_ref(),
+            "multi_test/poseidon2_basic_fri_drain_diag",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+
+        let diagnostics = prover.diagnostics();
+        assert_eq!(
+            diagnostics.cpu_fallbacks, 0,
+            "FRI drain diagnostic proof must not use CPU fallback: {diagnostics:?}"
+        );
+        assert_eq!(
+            diagnostics.cpu_only_ops, 0,
+            "FRI drain diagnostic proof must not use CPU-only HAL ops: {diagnostics:?}"
+        );
+        let stage_labels = diagnostics
+            .stages
+            .iter()
+            .map(|stage| stage.label.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            stage_labels.iter().any(|label| label
+                .starts_with("fri_prove round=0 drain_after_expand_evaluate_ntt")),
+            "FRI drain diagnostics should split round-0 NTT work before Merkle hashing: {stage_labels:?}"
+        );
+        assert!(
+            stage_labels
+                .iter()
+                .any(|label| label.starts_with("merkle fri_round0 drain_after_hash_rows")),
+            "FRI drain diagnostics should still expose round-0 Merkle row hashing: {stage_labels:?}"
+        );
+        assert!(
+            stage_labels
+                .iter()
+                .any(|label| label.starts_with("fri_prove round=0 drain_after_fri_fold")),
+            "FRI drain diagnostics should split round-0 fri_fold work: {stage_labels:?}"
         );
     }
 
@@ -1151,6 +1826,35 @@ fn main() {
                 }
             }
         });
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_eval_check_reuses_instruction_upload() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+
+        hal.reset_diagnostics();
+        risc0_circuit_recursion::testutil::eval_check_webgpu_matches_portable(&hal)
+            .await
+            .unwrap();
+        risc0_circuit_recursion::testutil::eval_check_webgpu_matches_portable(&hal)
+            .await
+            .unwrap();
+
+        let diagnostics = hal.diagnostics();
+        let instruction_uploads = diagnostics
+            .upload_sources
+            .iter()
+            .find(|source| source.name == "webgpu_eval_check_base_interpreter_instructions")
+            .map(|source| source.uploads)
+            .unwrap_or(0);
+        assert_eq!(
+            instruction_uploads, 1,
+            "eval_check interpreter instructions are immutable for this DEF and should be uploaded once per HAL: {diagnostics:?}"
+        );
     }
 
     #[wasm_bindgen_test(async)]
@@ -1309,6 +2013,177 @@ fn main() {
                 .iter()
                 .any(|op| op.name == "combos_divide" && op.gpu_dispatches == 1),
             "combos_divide should dispatch on WebGPU"
+        );
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_alloc_extelem_zeroed_skips_host_zero_upload() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        let cycles = 16;
+        let combo_count = 2;
+        let reg_sizes = [3u32, 2u32];
+        let reg_combo_ids = [0u32, 1u32];
+        let coeff_len = reg_sizes.iter().map(|size| *size as usize).sum::<usize>()
+            + <WebGpuHal as Hal>::CHECK_SIZE;
+        let coeff_u = (0..coeff_len)
+            .map(|idx| ext_elem(12000 + idx))
+            .collect::<Vec<_>>();
+        let mix = ext_elem(12100);
+        let mut expected = vec![BabyBearExtElem::ZERO; (combo_count + 1) * cycles];
+        combos_prepare_expected(
+            &mut expected,
+            &coeff_u,
+            combo_count,
+            cycles,
+            &reg_sizes,
+            &reg_combo_ids,
+            mix,
+        );
+
+        let combos = hal.alloc_extelem_zeroed("combos", (combo_count + 1) * cycles);
+        hal.reset_diagnostics();
+        {
+            let _gpu_scope = hal.gpu_authoritative_scope(true);
+            hal.combos_prepare(
+                &combos,
+                &coeff_u,
+                combo_count,
+                cycles,
+                &reg_sizes,
+                &reg_combo_ids,
+                &mix,
+            );
+        }
+        combos.sync_gpu_to_cpu(&hal).await.unwrap();
+        assert_eq!(combos.to_vec(), expected);
+
+        let diagnostics = hal.diagnostics();
+        let combos_uploads = diagnostics
+            .upload_sources
+            .iter()
+            .find(|source| source.name == "combos")
+            .map(|source| source.uploads)
+            .unwrap_or(0);
+        assert_eq!(
+            combos_uploads, 0,
+            "zeroed ExtElem allocations should rely on WebGPU zero-fill instead of uploading host zeros: {diagnostics:?}"
+        );
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_alloc_elem_init_zeroed_skips_host_zero_upload() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        let zeroed = hal.alloc_elem_init("webgpu_hal_alloc_elem_zeroed", 1024, BabyBearElem::ZERO);
+        let copied = hal.alloc_elem("webgpu_hal_alloc_elem_zeroed_copy", 1024);
+
+        hal.reset_diagnostics();
+        hal.eltwise_copy_elem(&copied, &zeroed);
+        assert_gpu_elem_buffer_matches_cpu(&hal, "alloc_elem_init_zeroed_copy", &copied).await;
+
+        let diagnostics = hal.diagnostics();
+        let zeroed_uploads = upload_count(&diagnostics, "webgpu_hal_alloc_elem_zeroed");
+        assert_eq!(
+            zeroed_uploads, 0,
+            "zeroed Elem allocations should rely on WebGPU zero-fill instead of uploading host zeros: {diagnostics:?}"
+        );
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_fri_fold_skips_output_upload() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        let count = 8;
+        let output_size = count * BabyBearExtElem::EXT_SIZE;
+        let input = hal.copy_from_elem(
+            "webgpu_fri_fold_input",
+            &(0..output_size * risc0_zkp::FRI_FOLD)
+                .map(|idx| elem(12200 + idx))
+                .collect::<Vec<_>>(),
+        );
+        let mix = ext_elem(12300);
+        let expected_output = hal.alloc_elem("webgpu_fri_fold_expected", output_size);
+        hal.fri_fold(&expected_output, &input, &mix);
+        let expected = expected_output.to_vec();
+
+        let output = hal.alloc_elem("out_coeffs", output_size);
+        hal.reset_diagnostics();
+        {
+            let _gpu_scope = hal.gpu_authoritative_scope(true);
+            hal.fri_fold(&output, &input, &mix);
+        }
+        output.sync_gpu_to_cpu(&hal).await.unwrap();
+        assert_eq!(output.to_vec(), expected);
+
+        let diagnostics = hal.diagnostics();
+        let out_coeffs_uploads = diagnostics
+            .upload_sources
+            .iter()
+            .find(|source| source.name == "out_coeffs")
+            .map(|source| source.uploads)
+            .unwrap_or(0);
+        assert_eq!(
+            out_coeffs_uploads, 0,
+            "fri_fold fully overwrites out_coeffs and should not upload the destination first: {diagnostics:?}"
+        );
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn webgpu_batch_evaluate_any_skips_output_upload() {
+        console_error_panic_hook::set_once();
+
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .unwrap();
+        let poly_count = 3;
+        let deg = 16;
+        let eval_count = 5;
+        let coeffs = hal.copy_from_elem(
+            "webgpu_batch_evaluate_any_coeffs",
+            &(0..poly_count * deg)
+                .map(|idx| elem(12400 + idx))
+                .collect::<Vec<_>>(),
+        );
+        let which = hal.copy_from_u32("webgpu_batch_evaluate_any_which", &[0, 2, 1, 0, 2]);
+        let xs = hal.copy_from_extelem(
+            "webgpu_batch_evaluate_any_xs",
+            &(0..eval_count)
+                .map(|idx| ext_elem(12500 + idx))
+                .collect::<Vec<_>>(),
+        );
+        let expected_output = hal.alloc_extelem("webgpu_batch_evaluate_any_expected", eval_count);
+        hal.batch_evaluate_any(&coeffs, poly_count, &which, &xs, &expected_output);
+        let expected = expected_output.to_vec();
+
+        let output = hal.alloc_extelem("out", eval_count);
+        hal.reset_diagnostics();
+        {
+            let _gpu_scope = hal.gpu_authoritative_scope(true);
+            hal.batch_evaluate_any(&coeffs, poly_count, &which, &xs, &output);
+        }
+        output.sync_gpu_to_cpu(&hal).await.unwrap();
+        assert_eq!(output.to_vec(), expected);
+
+        let diagnostics = hal.diagnostics();
+        let out_uploads = diagnostics
+            .upload_sources
+            .iter()
+            .find(|source| source.name == "out")
+            .map(|source| source.uploads)
+            .unwrap_or(0);
+        assert_eq!(
+            out_uploads, 0,
+            "batch_evaluate_any fully overwrites out and should not upload the destination first: {diagnostics:?}"
         );
     }
 
@@ -1483,23 +2358,15 @@ fn main() {
         // four 32-col tiles). Production callers will use the actual
         // device's `max_storage_binding_bytes()`.
         let max_binding = 128u64 * 1024 * 1024;
-        let layout = TileLayout::new(
-            rows,
-            cols,
-            std::mem::size_of::<BabyBearElem>(),
-            max_binding,
-        )
-        .expect("recursion-sized layout must fit at 128 MiB-per-tile");
+        let layout = TileLayout::new(rows, cols, std::mem::size_of::<BabyBearElem>(), max_binding)
+            .expect("recursion-sized layout must fit at 128 MiB-per-tile");
         assert!(
             layout.num_tiles() > 1,
             "expected multi-tile layout to exercise the tiled gather path"
         );
-        let pool = BufferPool::new::<BabyBearElem>(
-            &hal,
-            "webgpu_hal_recursion_sized_gather_pool",
-            layout,
-        )
-        .expect("pool allocation must succeed at recursion size");
+        let pool =
+            BufferPool::new::<BabyBearElem>(&hal, "webgpu_hal_recursion_sized_gather_pool", layout)
+                .expect("pool allocation must succeed at recursion size");
 
         // Populate the pool from a CPU staging buffer.
         let staging: Vec<BabyBearElem> = (0..source_elems).map(|i| elem(i + 9000)).collect();
@@ -1527,7 +2394,9 @@ fn main() {
             // Pull the GPU result back to CPU for comparison. (The
             // dispatch marks `dst` GPU-dirty; `to_vec` requires a
             // current CPU shadow.)
-            dst.sync_gpu_to_cpu(&hal).await.expect("readback must succeed");
+            dst.sync_gpu_to_cpu(&hal)
+                .await
+                .expect("readback must succeed");
             assert_eq!(dst.to_vec(), expected, "idx={idx}");
         }
 
@@ -1806,11 +2675,7 @@ fn main() {
         // image id by wrapping it in a full Receipt.
         let wrapped = risc0_zkvm::Receipt::new(
             InnerReceipt::Succinct(succinct),
-            composite_info
-                .receipt
-                .journal
-                .bytes
-                .clone(),
+            composite_info.receipt.journal.bytes.clone(),
         );
         wrapped
             .verify(MULTI_TEST_ID)
@@ -2262,7 +3127,9 @@ fn buf_load(col: u32, cycle: u32, back: u32) -> u32 {
         for li in 0..3u32 {
             let col = next(&mut rng) % 200 + 1;
             let back = next(&mut rng) % 4;
-            s.push_str(&format!("  let l{li} = buf_load({col}u, cycle, {back}u);\n"));
+            s.push_str(&format!(
+                "  let l{li} = buf_load({col}u, cycle, {back}u);\n"
+            ));
         }
         for _ in 0..ops {
             let opsel = next(&mut rng) % 3;
@@ -2286,9 +3153,7 @@ fn buf_load(col: u32, cycle: u32, back: u32) -> u32 {
         s.push_str("  if ((l0 & 1u) == 0u) { a = add(a, l1); } else { a = sub(a, l2); }\n");
         // non-elidable store of `a` to the function's own column
         if let Some(col) = store_col {
-            s.push_str(&format!(
-                "  data[{col}u * params.n_rows + cycle] = a;\n"
-            ));
+            s.push_str(&format!("  data[{col}u * params.n_rows + cycle] = a;\n"));
         }
         s.push_str(tail);
         s.push_str("  return a;\n}\n");
@@ -2394,14 +3259,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let mut stages = Vec::with_capacity(n_stages as usize);
         for s in 0..n_stages {
             let mut out = sp7_field_prelude();
-            out.push_str(
-                "@group(0) @binding(2) var<storage, read_write> scratch: array<u32>;\n",
-            );
+            out.push_str("@group(0) @binding(2) var<storage, read_write> scratch: array<u32>;\n");
             let lo = s * fns_per_stage;
             let hi = (s + 1) * fns_per_stage; // exclusive
-            // Emit this stage's hot functions leaf-first (highest index
-            // first), so each callee precedes its caller. A function
-            // calls the next ONLY if the next is still in this stage.
+                                              // Emit this stage's hot functions leaf-first (highest index
+                                              // first), so each callee precedes its caller. A function
+                                              // calls the next ONLY if the next is still in this stage.
             for idx in (lo..hi).rev() {
                 let tail = if idx + 1 < hi {
                     format!("  a = hot_{}(cycle, a);\n", idx + 1)
@@ -2826,12 +3689,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let mut compile_ok = true;
             for (si, src) in sources.iter().enumerate() {
                 total_bytes += src.len();
-                match hal.create_compute_kernel(
-                    "sp7_chunk_stage",
-                    src,
-                    "main",
-                    &[layout.clone()],
-                ) {
+                match hal.create_compute_kernel("sp7_chunk_stage", src, "main", &[layout.clone()]) {
                     Ok(k) => kernels.push(k),
                     Err(e) => {
                         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
@@ -3182,14 +4040,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 ],
             )
             .expect("layout");
-        let kernel = match hal.create_compute_kernel("sp7_probe_kernel", module, entry, &[layout.clone()])
-        {
-            Ok(k) => k,
-            Err(e) => {
-                log(&format!("compile_FAILED err={e:?}"));
-                return false;
-            }
-        };
+        let kernel =
+            match hal.create_compute_kernel("sp7_probe_kernel", module, entry, &[layout.clone()]) {
+                Ok(k) => k,
+                Err(e) => {
+                    log(&format!("compile_FAILED err={e:?}"));
+                    return false;
+                }
+            };
         let data_buf = hal
             .create_storage_buffer("sp7_probe_data", STORAGE_BYTES)
             .expect("data buf");
@@ -3229,6 +4087,1979 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 false
             }
         }
+    }
+
+    async fn recursion_accum_probe(module: &str, entry: &'static str) -> bool {
+        const STORAGE_BYTES: u64 = 4096;
+        let module_bytes = module.len();
+        let params: [u32; 8] = [1, 1, 1, 1, 1, 1, 0, 1];
+        let params_bytes: &[u8] = bytemuck::cast_slice(&params);
+        let log = |phase: &str| {
+            risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                "recursion_accum_probe {entry} module_bytes={module_bytes} phase={phase}"
+            ));
+        };
+
+        let hal = match WebGpuHal::new(Poseidon2HashSuite::new_suite()).await {
+            Ok(hal) => hal,
+            Err(err) => {
+                log(&format!("hal_FAILED err={err:?}"));
+                return false;
+            }
+        };
+        let layout = hal
+            .create_bind_group_layout(
+                "recursion_accum_probe_layout",
+                &[
+                    WebGpuBindingLayout::storage(0, 0),
+                    WebGpuBindingLayout::storage(1, 0),
+                    WebGpuBindingLayout::storage(2, 0),
+                    WebGpuBindingLayout::storage(3, 0),
+                    WebGpuBindingLayout::storage(4, 0),
+                    WebGpuBindingLayout::storage(5, 0),
+                    WebGpuBindingLayout::uniform(6, params_bytes.len() as u64),
+                ],
+            )
+            .expect("recursion_accum_probe layout");
+        let kernel = match hal.create_compute_kernel(
+            "recursion_accum_probe_kernel",
+            module,
+            entry,
+            &[layout.clone()],
+        ) {
+            Ok(kernel) => kernel,
+            Err(err) => {
+                log(&format!("compile_FAILED err={err:?}"));
+                return false;
+            }
+        };
+
+        let ctrl_buf = hal
+            .create_storage_buffer("recursion_accum_probe_ctrl", STORAGE_BYTES)
+            .expect("recursion_accum_probe ctrl");
+        let global_buf = hal
+            .create_storage_buffer("recursion_accum_probe_global", STORAGE_BYTES)
+            .expect("recursion_accum_probe global");
+        let data_buf = hal
+            .create_storage_buffer("recursion_accum_probe_data", STORAGE_BYTES)
+            .expect("recursion_accum_probe data");
+        let mix_buf = hal
+            .create_storage_buffer("recursion_accum_probe_mix", STORAGE_BYTES)
+            .expect("recursion_accum_probe mix");
+        let wom_buf = hal
+            .create_storage_buffer("recursion_accum_probe_wom", STORAGE_BYTES)
+            .expect("recursion_accum_probe wom");
+        let accum_buf = hal
+            .create_storage_buffer("recursion_accum_probe_accum", STORAGE_BYTES)
+            .expect("recursion_accum_probe accum");
+        let params_buf = hal
+            .create_uniform_buffer("recursion_accum_probe_params", params_bytes)
+            .expect("recursion_accum_probe params");
+        let bind_group = hal
+            .create_bind_group(
+                "recursion_accum_probe_bg",
+                &layout,
+                &[
+                    WebGpuBufferBinding::new(0, &ctrl_buf),
+                    WebGpuBufferBinding::new(1, &global_buf),
+                    WebGpuBufferBinding::new(2, &data_buf),
+                    WebGpuBufferBinding::new(3, &mix_buf),
+                    WebGpuBufferBinding::new(4, &wom_buf),
+                    WebGpuBufferBinding::new(5, &accum_buf),
+                    WebGpuBufferBinding::new(6, &params_buf),
+                ],
+            )
+            .expect("recursion_accum_probe bind group");
+        hal.dispatch_compute_1d(&kernel, &bind_group, 1);
+        match hal.read_buffer(&ctrl_buf, 4).await {
+            Ok(_) => {
+                log("OK");
+                true
+            }
+            Err(err) => {
+                log(&format!("dispatch_FAILED err={err:?}"));
+                false
+            }
+        }
+    }
+
+    const RECURSION_POSEIDON2_CHAIN_ENTRY: &str = "recursion_step_exec_poseidon2_chain_main";
+    const RECURSION_MICRO_OPS_ENTRY: &str = "recursion_step_exec_micro_ops_main";
+    const RECURSION_MICRO_OPS_SCATTER_ENTRY: &str = "recursion_micro_ops_wom_scatter_main";
+    const RECURSION_MICRO_OPS_BACKFILL_ENTRY: &str = "recursion_micro_ops_wom_backfill_main";
+    const RECURSION_MACRO_OPS_ENTRY: &str = "recursion_step_exec_macro_ops_main";
+    const RECURSION_MACRO_OPS_SCATTER_ENTRY: &str = "recursion_macro_ops_wom_scatter_main";
+    const RECURSION_MACRO_OPS_BACKFILL_ENTRY: &str = "recursion_macro_ops_wom_backfill_main";
+    const RECURSION_CHECKED_BYTES_ENTRY: &str = "recursion_checked_bytes_wom_rows_main";
+    const RECURSION_WOM_PROBE_MAX_ROWS: usize = 9;
+    const RECURSION_CHECKED_BYTES_WOM_PROBE_MAX_ROWS: usize = 2;
+    const RECURSION_WOM_PROBE_ROW_WORDS: usize = 5;
+    const RECURSION_WOM_PROBE_CTRL_COLS: usize = 23;
+    const RECURSION_WOM_PROBE_DATA_COLS: usize = 128;
+
+    struct RecursionWomProbeOutput {
+        wom_write_rows: Vec<u32>,
+        plonk_rows: Vec<u32>,
+        cursors: Vec<u32>,
+    }
+
+    struct RecursionWomScatterProbeOutput {
+        unsorted_plonk_rows: Vec<u32>,
+        sorted_plonk_rows: Vec<u32>,
+        sorted_counters: Vec<u32>,
+        data_after_backfill: Vec<u32>,
+        cursors: Vec<u32>,
+    }
+
+    struct RecursionVerifyMemProbeOutput {
+        data_after_verify: Vec<u32>,
+        cursors: Vec<u32>,
+    }
+
+    fn mont(value: BabyBearElem) -> u32 {
+        value.as_u32_montgomery()
+    }
+
+    fn mont_u32(value: u32) -> u32 {
+        mont(BabyBearElem::new(value))
+    }
+
+    fn set_probe_col(buffer: &mut [u32], rows: usize, col: usize, row: usize, value: u32) {
+        buffer[col * rows + row] = value;
+    }
+
+    fn assert_probe_row(
+        label: &str,
+        buffer: &[u32],
+        cycle: usize,
+        row: usize,
+        expected: [u32; RECURSION_WOM_PROBE_ROW_WORDS],
+    ) {
+        let base = (cycle * RECURSION_WOM_PROBE_MAX_ROWS + row) * RECURSION_WOM_PROBE_ROW_WORDS;
+        assert_eq!(
+            &buffer[base..base + RECURSION_WOM_PROBE_ROW_WORDS],
+            expected.as_slice(),
+            "{label}: mismatch at cycle={cycle} row={row}"
+        );
+    }
+
+    fn probe_row_slice(buffer: &[u32], row: usize) -> &[u32] {
+        let base = row * RECURSION_WOM_PROBE_ROW_WORDS;
+        &buffer[base..base + RECURSION_WOM_PROBE_ROW_WORDS]
+    }
+
+    fn bucket_bases_from_counts(counts: &[usize]) -> Vec<u32> {
+        let mut running = 0u32;
+        counts
+            .iter()
+            .map(|count| {
+                let base = running;
+                running += *count as u32;
+                base
+            })
+            .collect()
+    }
+
+    async fn read_u32_buffer(
+        hal: &WebGpuHal,
+        buffer: &web_sys::GpuBuffer,
+        words: usize,
+        label: &'static str,
+    ) -> Vec<u32> {
+        let bytes = hal
+            .read_buffer_range_named(
+                buffer,
+                0,
+                (words * std::mem::size_of::<u32>()) as u64,
+                label,
+            )
+            .await
+            .unwrap_or_else(|err| panic!("{label}: readback failed: {err}"));
+        bytemuck::checked::try_cast_slice::<u8, u32>(bytes.as_slice())
+            .unwrap_or_else(|err| panic!("{label}: readback cast failed: {err}"))
+            .to_vec()
+    }
+
+    async fn run_recursion_poseidon2_wom_probe(
+        rows: usize,
+        work_cycles: usize,
+        ctrl: &[u32],
+        data: &[u32],
+        preflight_wom: &[u32],
+    ) -> RecursionWomProbeOutput {
+        let module =
+            risc0_circuit_recursion::prove::recursion_exec_poseidon2_chain_wom_probe_wgsl_module_for_test();
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .expect("recursion WOM probe HAL");
+        let row_words = rows * RECURSION_WOM_PROBE_MAX_ROWS * RECURSION_WOM_PROBE_ROW_WORDS;
+        let cursor_words = rows * 2;
+        let zero_rows = vec![0u32; row_words];
+        let zero_cursors = vec![0u32; cursor_words];
+        let params = [
+            rows as u32,
+            1,
+            rows as u32,
+            1,
+            rows as u32,
+            rows as u32,
+            0,
+            work_cycles as u32,
+        ];
+        let params_bytes: &[u8] = bytemuck::cast_slice(&params);
+
+        let layout = hal
+            .create_bind_group_layout(
+                "recursion_poseidon2_wom_probe_layout",
+                &[
+                    WebGpuBindingLayout::storage(0, 0),
+                    WebGpuBindingLayout::storage(1, 0),
+                    WebGpuBindingLayout::storage(2, 0),
+                    WebGpuBindingLayout::storage(3, 0),
+                    WebGpuBindingLayout::storage(4, 0),
+                    WebGpuBindingLayout::storage(5, 0),
+                    WebGpuBindingLayout::uniform(6, params_bytes.len() as u64),
+                    WebGpuBindingLayout::storage(7, 0),
+                    WebGpuBindingLayout::storage(8, 0),
+                    WebGpuBindingLayout::storage(9, 0),
+                    WebGpuBindingLayout::storage(10, 0),
+                ],
+            )
+            .expect("recursion WOM probe layout");
+        let kernel = hal
+            .create_compute_kernel(
+                "recursion_poseidon2_wom_probe_kernel",
+                &module,
+                RECURSION_POSEIDON2_CHAIN_ENTRY,
+                &[layout.clone()],
+            )
+            .expect("recursion WOM probe kernel");
+
+        let bytes = |words: usize| (words * std::mem::size_of::<u32>()) as u64;
+        let ctrl_buf = hal
+            .create_storage_buffer("recursion_poseidon2_wom_probe_ctrl", bytes(ctrl.len()))
+            .expect("recursion WOM probe ctrl");
+        let global_buf = hal
+            .create_storage_buffer("recursion_poseidon2_wom_probe_global", bytes(1))
+            .expect("recursion WOM probe global");
+        let data_buf = hal
+            .create_storage_buffer("recursion_poseidon2_wom_probe_data", bytes(data.len()))
+            .expect("recursion WOM probe data");
+        let mix_buf = hal
+            .create_storage_buffer("recursion_poseidon2_wom_probe_mix", bytes(1))
+            .expect("recursion WOM probe mix");
+        let wom_buf = hal
+            .create_storage_buffer("recursion_poseidon2_wom_probe_wom", bytes(rows * 4))
+            .expect("recursion WOM probe wom");
+        let accum_buf = hal
+            .create_storage_buffer("recursion_poseidon2_wom_probe_accum", bytes(rows * 4))
+            .expect("recursion WOM probe accum");
+        let preflight_wom_buf = hal
+            .create_storage_buffer(
+                "recursion_poseidon2_wom_probe_preflight_wom",
+                bytes(preflight_wom.len()),
+            )
+            .expect("recursion WOM probe preflight wom");
+        let wom_write_rows_buf = hal
+            .create_storage_buffer("recursion_poseidon2_wom_probe_wom_rows", bytes(row_words))
+            .expect("recursion WOM probe wom rows");
+        let plonk_rows_buf = hal
+            .create_storage_buffer("recursion_poseidon2_wom_probe_plonk_rows", bytes(row_words))
+            .expect("recursion WOM probe plonk rows");
+        let cursors_buf = hal
+            .create_storage_buffer("recursion_poseidon2_wom_probe_cursors", bytes(cursor_words))
+            .expect("recursion WOM probe cursors");
+        let params_buf = hal
+            .create_uniform_buffer("recursion_poseidon2_wom_probe_params", params_bytes)
+            .expect("recursion WOM probe params");
+
+        hal.write_buffer_named(
+            &ctrl_buf,
+            "recursion_poseidon2_wom_probe_ctrl",
+            0,
+            bytemuck::cast_slice(ctrl),
+        )
+        .expect("recursion WOM probe ctrl upload");
+        hal.write_buffer_named(
+            &data_buf,
+            "recursion_poseidon2_wom_probe_data",
+            0,
+            bytemuck::cast_slice(data),
+        )
+        .expect("recursion WOM probe data upload");
+        hal.write_buffer_named(
+            &preflight_wom_buf,
+            "recursion_poseidon2_wom_probe_preflight_wom",
+            0,
+            bytemuck::cast_slice(preflight_wom),
+        )
+        .expect("recursion WOM probe preflight upload");
+        hal.write_buffer_named(
+            &wom_write_rows_buf,
+            "recursion_poseidon2_wom_probe_wom_rows",
+            0,
+            bytemuck::cast_slice(zero_rows.as_slice()),
+        )
+        .expect("recursion WOM probe wom rows clear");
+        hal.write_buffer_named(
+            &plonk_rows_buf,
+            "recursion_poseidon2_wom_probe_plonk_rows",
+            0,
+            bytemuck::cast_slice(zero_rows.as_slice()),
+        )
+        .expect("recursion WOM probe plonk rows clear");
+        hal.write_buffer_named(
+            &cursors_buf,
+            "recursion_poseidon2_wom_probe_cursors",
+            0,
+            bytemuck::cast_slice(zero_cursors.as_slice()),
+        )
+        .expect("recursion WOM probe cursors clear");
+
+        let bind_group = hal
+            .create_bind_group(
+                "recursion_poseidon2_wom_probe_bg",
+                &layout,
+                &[
+                    WebGpuBufferBinding::new(0, &ctrl_buf),
+                    WebGpuBufferBinding::new(1, &global_buf),
+                    WebGpuBufferBinding::new(2, &data_buf),
+                    WebGpuBufferBinding::new(3, &mix_buf),
+                    WebGpuBufferBinding::new(4, &wom_buf),
+                    WebGpuBufferBinding::new(5, &accum_buf),
+                    WebGpuBufferBinding::new(6, &params_buf),
+                    WebGpuBufferBinding::new(7, &preflight_wom_buf),
+                    WebGpuBufferBinding::new(8, &wom_write_rows_buf),
+                    WebGpuBufferBinding::new(9, &plonk_rows_buf),
+                    WebGpuBufferBinding::new(10, &cursors_buf),
+                ],
+            )
+            .expect("recursion WOM probe bind group");
+        hal.dispatch_compute_1d(&kernel, &bind_group, (work_cycles as u32).div_ceil(64));
+
+        RecursionWomProbeOutput {
+            wom_write_rows: read_u32_buffer(
+                &hal,
+                &wom_write_rows_buf,
+                row_words,
+                "recursion_poseidon2_wom_probe_wom_rows",
+            )
+            .await,
+            plonk_rows: read_u32_buffer(
+                &hal,
+                &plonk_rows_buf,
+                row_words,
+                "recursion_poseidon2_wom_probe_plonk_rows",
+            )
+            .await,
+            cursors: read_u32_buffer(
+                &hal,
+                &cursors_buf,
+                cursor_words,
+                "recursion_poseidon2_wom_probe_cursors",
+            )
+            .await,
+        }
+    }
+
+    async fn run_recursion_exec_wom_scatter_probe(
+        module: String,
+        exec_entry: &str,
+        scatter_entry: &str,
+        backfill_entry: &str,
+        rows: usize,
+        work_cycles: usize,
+        ctrl: &[u32],
+        data: &[u32],
+        preflight_wom: &[u32],
+        bucket_bases: &[u32],
+        cycle_prefixes: &[u32],
+        sorted_rows: usize,
+    ) -> RecursionWomScatterProbeOutput {
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .expect("recursion WOM scatter probe HAL");
+        let unsorted_row_words =
+            rows * RECURSION_WOM_PROBE_MAX_ROWS * RECURSION_WOM_PROBE_ROW_WORDS;
+        let sorted_row_words = sorted_rows * RECURSION_WOM_PROBE_ROW_WORDS;
+        let cursor_words = rows;
+        let counter_words = bucket_bases.len();
+        let zero_unsorted_rows = vec![0u32; unsorted_row_words];
+        let zero_sorted_rows = vec![0u32; sorted_row_words];
+        let zero_cursors = vec![0u32; cursor_words];
+        let zero_counters = vec![0u32; counter_words];
+        let params = [
+            rows as u32,
+            1,
+            rows as u32,
+            1,
+            rows as u32,
+            rows as u32,
+            0,
+            work_cycles as u32,
+        ];
+        let params_bytes: &[u8] = bytemuck::cast_slice(&params);
+
+        let layout = hal
+            .create_bind_group_layout(
+                "recursion_poseidon2_wom_scatter_probe_layout",
+                &[
+                    WebGpuBindingLayout::storage(0, 0),
+                    WebGpuBindingLayout::storage(1, 0),
+                    WebGpuBindingLayout::storage(2, 0),
+                    WebGpuBindingLayout::storage(3, 0),
+                    WebGpuBindingLayout::storage(4, 0),
+                    WebGpuBindingLayout::storage(5, 0),
+                    WebGpuBindingLayout::uniform(6, params_bytes.len() as u64),
+                    WebGpuBindingLayout::storage(7, 0),
+                    WebGpuBindingLayout::storage(8, 0),
+                    WebGpuBindingLayout::storage(9, 0),
+                    WebGpuBindingLayout::storage(10, 0),
+                    WebGpuBindingLayout::storage(11, 0),
+                    WebGpuBindingLayout::storage(12, 0),
+                    WebGpuBindingLayout::storage(13, 0),
+                ],
+            )
+            .expect("recursion WOM scatter probe layout");
+        let exec_kernel = hal
+            .create_compute_kernel(
+                "recursion_poseidon2_wom_scatter_exec_kernel",
+                &module,
+                exec_entry,
+                &[layout.clone()],
+            )
+            .expect("recursion WOM scatter exec kernel");
+        let scatter_kernel = hal
+            .create_compute_kernel(
+                "recursion_poseidon2_wom_scatter_kernel",
+                &module,
+                scatter_entry,
+                &[layout.clone()],
+            )
+            .expect("recursion WOM scatter kernel");
+        let backfill_kernel = hal
+            .create_compute_kernel(
+                "recursion_poseidon2_wom_backfill_kernel",
+                &module,
+                backfill_entry,
+                &[layout.clone()],
+            )
+            .expect("recursion WOM backfill kernel");
+
+        let bytes = |words: usize| (words * std::mem::size_of::<u32>()) as u64;
+        let ctrl_buf = hal
+            .create_storage_buffer("recursion_poseidon2_wom_scatter_ctrl", bytes(ctrl.len()))
+            .expect("recursion WOM scatter ctrl");
+        let global_buf = hal
+            .create_storage_buffer(
+                "recursion_poseidon2_wom_scatter_global",
+                bytes(RECURSION_WOM_PROBE_DATA_COLS),
+            )
+            .expect("recursion WOM scatter global");
+        let data_buf = hal
+            .create_storage_buffer("recursion_poseidon2_wom_scatter_data", bytes(data.len()))
+            .expect("recursion WOM scatter data");
+        let mix_buf = hal
+            .create_storage_buffer("recursion_poseidon2_wom_scatter_mix", bytes(1))
+            .expect("recursion WOM scatter mix");
+        let wom_buf = hal
+            .create_storage_buffer("recursion_poseidon2_wom_scatter_wom", bytes(rows * 4))
+            .expect("recursion WOM scatter wom");
+        let accum_buf = hal
+            .create_storage_buffer("recursion_poseidon2_wom_scatter_accum", bytes(rows * 4))
+            .expect("recursion WOM scatter accum");
+        let preflight_wom_buf = hal
+            .create_storage_buffer(
+                "recursion_poseidon2_wom_scatter_preflight_wom",
+                bytes(preflight_wom.len()),
+            )
+            .expect("recursion WOM scatter preflight wom");
+        let unsorted_rows_buf = hal
+            .create_storage_buffer(
+                "recursion_poseidon2_wom_scatter_unsorted_rows",
+                bytes(unsorted_row_words),
+            )
+            .expect("recursion WOM scatter unsorted rows");
+        let cursors_buf = hal
+            .create_storage_buffer(
+                "recursion_poseidon2_wom_scatter_cursors",
+                bytes(cursor_words),
+            )
+            .expect("recursion WOM scatter cursors");
+        let sorted_rows_buf = hal
+            .create_storage_buffer(
+                "recursion_poseidon2_wom_scatter_sorted_rows",
+                bytes(sorted_row_words),
+            )
+            .expect("recursion WOM scatter sorted rows");
+        let counters_buf = hal
+            .create_storage_buffer(
+                "recursion_poseidon2_wom_scatter_counters",
+                bytes(counter_words),
+            )
+            .expect("recursion WOM scatter counters");
+        let bucket_bases_buf = hal
+            .create_storage_buffer(
+                "recursion_poseidon2_wom_scatter_bucket_bases",
+                bytes(bucket_bases.len()),
+            )
+            .expect("recursion WOM scatter bucket bases");
+        let cycle_prefixes_buf = hal
+            .create_storage_buffer(
+                "recursion_poseidon2_wom_scatter_cycle_prefixes",
+                bytes(cycle_prefixes.len()),
+            )
+            .expect("recursion WOM scatter cycle prefixes");
+        let params_buf = hal
+            .create_uniform_buffer("recursion_poseidon2_wom_scatter_params", params_bytes)
+            .expect("recursion WOM scatter params");
+
+        hal.write_buffer_named(
+            &ctrl_buf,
+            "recursion_poseidon2_wom_scatter_ctrl",
+            0,
+            bytemuck::cast_slice(ctrl),
+        )
+        .expect("recursion WOM scatter ctrl upload");
+        hal.write_buffer_named(
+            &data_buf,
+            "recursion_poseidon2_wom_scatter_data",
+            0,
+            bytemuck::cast_slice(data),
+        )
+        .expect("recursion WOM scatter data upload");
+        hal.write_buffer_named(
+            &preflight_wom_buf,
+            "recursion_poseidon2_wom_scatter_preflight_wom",
+            0,
+            bytemuck::cast_slice(preflight_wom),
+        )
+        .expect("recursion WOM scatter preflight upload");
+        hal.write_buffer_named(
+            &unsorted_rows_buf,
+            "recursion_poseidon2_wom_scatter_unsorted_rows",
+            0,
+            bytemuck::cast_slice(zero_unsorted_rows.as_slice()),
+        )
+        .expect("recursion WOM scatter unsorted rows clear");
+        hal.write_buffer_named(
+            &cursors_buf,
+            "recursion_poseidon2_wom_scatter_cursors",
+            0,
+            bytemuck::cast_slice(zero_cursors.as_slice()),
+        )
+        .expect("recursion WOM scatter cursors clear");
+        hal.write_buffer_named(
+            &sorted_rows_buf,
+            "recursion_poseidon2_wom_scatter_sorted_rows",
+            0,
+            bytemuck::cast_slice(zero_sorted_rows.as_slice()),
+        )
+        .expect("recursion WOM scatter sorted rows clear");
+        hal.write_buffer_named(
+            &counters_buf,
+            "recursion_poseidon2_wom_scatter_counters",
+            0,
+            bytemuck::cast_slice(zero_counters.as_slice()),
+        )
+        .expect("recursion WOM scatter counters clear");
+        hal.write_buffer_named(
+            &bucket_bases_buf,
+            "recursion_poseidon2_wom_scatter_bucket_bases",
+            0,
+            bytemuck::cast_slice(bucket_bases),
+        )
+        .expect("recursion WOM scatter bucket bases upload");
+        hal.write_buffer_named(
+            &cycle_prefixes_buf,
+            "recursion_poseidon2_wom_scatter_cycle_prefixes",
+            0,
+            bytemuck::cast_slice(cycle_prefixes),
+        )
+        .expect("recursion WOM scatter cycle prefixes upload");
+
+        let bind_group = hal
+            .create_bind_group(
+                "recursion_poseidon2_wom_scatter_bg",
+                &layout,
+                &[
+                    WebGpuBufferBinding::new(0, &ctrl_buf),
+                    WebGpuBufferBinding::new(1, &global_buf),
+                    WebGpuBufferBinding::new(2, &data_buf),
+                    WebGpuBufferBinding::new(3, &mix_buf),
+                    WebGpuBufferBinding::new(4, &wom_buf),
+                    WebGpuBufferBinding::new(5, &accum_buf),
+                    WebGpuBufferBinding::new(6, &params_buf),
+                    WebGpuBufferBinding::new(7, &preflight_wom_buf),
+                    WebGpuBufferBinding::new(8, &unsorted_rows_buf),
+                    WebGpuBufferBinding::new(9, &cursors_buf),
+                    WebGpuBufferBinding::new(10, &sorted_rows_buf),
+                    WebGpuBufferBinding::new(11, &counters_buf),
+                    WebGpuBufferBinding::new(12, &bucket_bases_buf),
+                    WebGpuBufferBinding::new(13, &cycle_prefixes_buf),
+                ],
+            )
+            .expect("recursion WOM scatter bind group");
+        hal.dispatch_compute_1d(&exec_kernel, &bind_group, (work_cycles as u32).div_ceil(64));
+        hal.dispatch_compute_1d(
+            &scatter_kernel,
+            &bind_group,
+            ((work_cycles * RECURSION_WOM_PROBE_MAX_ROWS) as u32).div_ceil(64),
+        );
+        hal.dispatch_compute_1d(
+            &backfill_kernel,
+            &bind_group,
+            (work_cycles.saturating_sub(1) as u32).div_ceil(64),
+        );
+
+        RecursionWomScatterProbeOutput {
+            unsorted_plonk_rows: read_u32_buffer(
+                &hal,
+                &unsorted_rows_buf,
+                unsorted_row_words,
+                "recursion_poseidon2_wom_scatter_unsorted_rows",
+            )
+            .await,
+            sorted_plonk_rows: read_u32_buffer(
+                &hal,
+                &sorted_rows_buf,
+                sorted_row_words,
+                "recursion_poseidon2_wom_scatter_sorted_rows",
+            )
+            .await,
+            sorted_counters: read_u32_buffer(
+                &hal,
+                &counters_buf,
+                counter_words,
+                "recursion_poseidon2_wom_scatter_counters",
+            )
+            .await,
+            data_after_backfill: read_u32_buffer(
+                &hal,
+                &data_buf,
+                data.len(),
+                "recursion_poseidon2_wom_scatter_data",
+            )
+            .await,
+            cursors: read_u32_buffer(
+                &hal,
+                &cursors_buf,
+                cursor_words,
+                "recursion_poseidon2_wom_scatter_cursors",
+            )
+            .await,
+        }
+    }
+
+    async fn run_recursion_checked_bytes_wom_scatter_probe(
+        rows: usize,
+        work_cycles: usize,
+        ctrl: &[u32],
+        data: &[u32],
+        bucket_bases: &[u32],
+        cycle_prefixes: &[u32],
+        sorted_rows: usize,
+    ) -> RecursionWomScatterProbeOutput {
+        let module =
+            risc0_circuit_recursion::prove::recursion_checked_bytes_wom_scatter_probe_wgsl_module_for_test();
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .expect("recursion checked-bytes WOM scatter probe HAL");
+        let unsorted_row_words =
+            rows * RECURSION_CHECKED_BYTES_WOM_PROBE_MAX_ROWS * RECURSION_WOM_PROBE_ROW_WORDS;
+        let sorted_row_words = sorted_rows * RECURSION_WOM_PROBE_ROW_WORDS;
+        let cursor_words = rows;
+        let counter_words = bucket_bases.len();
+        let zero_unsorted_rows = vec![0u32; unsorted_row_words];
+        let zero_sorted_rows = vec![0u32; sorted_row_words];
+        let zero_cursors = vec![0u32; cursor_words];
+        let zero_counters = vec![0u32; counter_words];
+        let params = [
+            rows as u32,
+            1,
+            rows as u32,
+            1,
+            rows as u32,
+            rows as u32,
+            0,
+            work_cycles as u32,
+        ];
+        let params_bytes: &[u8] = bytemuck::cast_slice(&params);
+
+        let layout = hal
+            .create_bind_group_layout(
+                "recursion_checked_bytes_wom_scatter_probe_layout",
+                &[
+                    WebGpuBindingLayout::storage(0, 0),
+                    WebGpuBindingLayout::storage(1, 0),
+                    WebGpuBindingLayout::storage(2, 0),
+                    WebGpuBindingLayout::storage(3, 0),
+                    WebGpuBindingLayout::storage(4, 0),
+                    WebGpuBindingLayout::storage(5, 0),
+                    WebGpuBindingLayout::uniform(6, params_bytes.len() as u64),
+                    WebGpuBindingLayout::storage(7, 0),
+                    WebGpuBindingLayout::storage(8, 0),
+                    WebGpuBindingLayout::storage(9, 0),
+                    WebGpuBindingLayout::storage(10, 0),
+                    WebGpuBindingLayout::storage(11, 0),
+                    WebGpuBindingLayout::storage(12, 0),
+                ],
+            )
+            .expect("recursion checked-bytes WOM scatter probe layout");
+        let exec_kernel = hal
+            .create_compute_kernel(
+                "recursion_checked_bytes_wom_rows_kernel",
+                &module,
+                RECURSION_CHECKED_BYTES_ENTRY,
+                &[layout.clone()],
+            )
+            .expect("recursion checked-bytes WOM rows kernel");
+        let scatter_kernel = hal
+            .create_compute_kernel(
+                "recursion_checked_bytes_wom_scatter_kernel",
+                &module,
+                "recursion_checked_bytes_wom_scatter_main",
+                &[layout.clone()],
+            )
+            .expect("recursion checked-bytes WOM scatter kernel");
+        let backfill_kernel = hal
+            .create_compute_kernel(
+                "recursion_checked_bytes_wom_backfill_kernel",
+                &module,
+                "recursion_checked_bytes_wom_backfill_main",
+                &[layout.clone()],
+            )
+            .expect("recursion checked-bytes WOM backfill kernel");
+
+        let bytes = |words: usize| (words * std::mem::size_of::<u32>()) as u64;
+        let ctrl_buf = hal
+            .create_storage_buffer(
+                "recursion_checked_bytes_wom_scatter_ctrl",
+                bytes(ctrl.len()),
+            )
+            .expect("recursion checked-bytes WOM scatter ctrl");
+        let global_buf = hal
+            .create_storage_buffer("recursion_checked_bytes_wom_scatter_global", bytes(1))
+            .expect("recursion checked-bytes WOM scatter global");
+        let data_buf = hal
+            .create_storage_buffer(
+                "recursion_checked_bytes_wom_scatter_data",
+                bytes(data.len()),
+            )
+            .expect("recursion checked-bytes WOM scatter data");
+        let mix_buf = hal
+            .create_storage_buffer("recursion_checked_bytes_wom_scatter_mix", bytes(1))
+            .expect("recursion checked-bytes WOM scatter mix");
+        let wom_buf = hal
+            .create_storage_buffer("recursion_checked_bytes_wom_scatter_wom", bytes(rows * 4))
+            .expect("recursion checked-bytes WOM scatter wom");
+        let accum_buf = hal
+            .create_storage_buffer("recursion_checked_bytes_wom_scatter_accum", bytes(rows * 4))
+            .expect("recursion checked-bytes WOM scatter accum");
+        let unsorted_rows_buf = hal
+            .create_storage_buffer(
+                "recursion_checked_bytes_wom_scatter_unsorted_rows",
+                bytes(unsorted_row_words),
+            )
+            .expect("recursion checked-bytes WOM scatter unsorted rows");
+        let cursors_buf = hal
+            .create_storage_buffer(
+                "recursion_checked_bytes_wom_scatter_cursors",
+                bytes(cursor_words),
+            )
+            .expect("recursion checked-bytes WOM scatter cursors");
+        let sorted_rows_buf = hal
+            .create_storage_buffer(
+                "recursion_checked_bytes_wom_scatter_sorted_rows",
+                bytes(sorted_row_words),
+            )
+            .expect("recursion checked-bytes WOM scatter sorted rows");
+        let counters_buf = hal
+            .create_storage_buffer(
+                "recursion_checked_bytes_wom_scatter_counters",
+                bytes(counter_words),
+            )
+            .expect("recursion checked-bytes WOM scatter counters");
+        let bucket_bases_buf = hal
+            .create_storage_buffer(
+                "recursion_checked_bytes_wom_scatter_bucket_bases",
+                bytes(bucket_bases.len()),
+            )
+            .expect("recursion checked-bytes WOM scatter bucket bases");
+        let cycle_prefixes_buf = hal
+            .create_storage_buffer(
+                "recursion_checked_bytes_wom_scatter_cycle_prefixes",
+                bytes(cycle_prefixes.len()),
+            )
+            .expect("recursion checked-bytes WOM scatter cycle prefixes");
+        let params_buf = hal
+            .create_uniform_buffer("recursion_checked_bytes_wom_scatter_params", params_bytes)
+            .expect("recursion checked-bytes WOM scatter params");
+
+        hal.write_buffer_named(
+            &ctrl_buf,
+            "recursion_checked_bytes_wom_scatter_ctrl",
+            0,
+            bytemuck::cast_slice(ctrl),
+        )
+        .expect("recursion checked-bytes WOM scatter ctrl upload");
+        hal.write_buffer_named(
+            &data_buf,
+            "recursion_checked_bytes_wom_scatter_data",
+            0,
+            bytemuck::cast_slice(data),
+        )
+        .expect("recursion checked-bytes WOM scatter data upload");
+        hal.write_buffer_named(
+            &unsorted_rows_buf,
+            "recursion_checked_bytes_wom_scatter_unsorted_rows",
+            0,
+            bytemuck::cast_slice(zero_unsorted_rows.as_slice()),
+        )
+        .expect("recursion checked-bytes WOM scatter unsorted rows clear");
+        hal.write_buffer_named(
+            &cursors_buf,
+            "recursion_checked_bytes_wom_scatter_cursors",
+            0,
+            bytemuck::cast_slice(zero_cursors.as_slice()),
+        )
+        .expect("recursion checked-bytes WOM scatter cursors clear");
+        hal.write_buffer_named(
+            &sorted_rows_buf,
+            "recursion_checked_bytes_wom_scatter_sorted_rows",
+            0,
+            bytemuck::cast_slice(zero_sorted_rows.as_slice()),
+        )
+        .expect("recursion checked-bytes WOM scatter sorted rows clear");
+        hal.write_buffer_named(
+            &counters_buf,
+            "recursion_checked_bytes_wom_scatter_counters",
+            0,
+            bytemuck::cast_slice(zero_counters.as_slice()),
+        )
+        .expect("recursion checked-bytes WOM scatter counters clear");
+        hal.write_buffer_named(
+            &bucket_bases_buf,
+            "recursion_checked_bytes_wom_scatter_bucket_bases",
+            0,
+            bytemuck::cast_slice(bucket_bases),
+        )
+        .expect("recursion checked-bytes WOM scatter bucket bases upload");
+        hal.write_buffer_named(
+            &cycle_prefixes_buf,
+            "recursion_checked_bytes_wom_scatter_cycle_prefixes",
+            0,
+            bytemuck::cast_slice(cycle_prefixes),
+        )
+        .expect("recursion checked-bytes WOM scatter cycle prefixes upload");
+
+        let bind_group = hal
+            .create_bind_group(
+                "recursion_checked_bytes_wom_scatter_bg",
+                &layout,
+                &[
+                    WebGpuBufferBinding::new(0, &ctrl_buf),
+                    WebGpuBufferBinding::new(1, &global_buf),
+                    WebGpuBufferBinding::new(2, &data_buf),
+                    WebGpuBufferBinding::new(3, &mix_buf),
+                    WebGpuBufferBinding::new(4, &wom_buf),
+                    WebGpuBufferBinding::new(5, &accum_buf),
+                    WebGpuBufferBinding::new(6, &params_buf),
+                    WebGpuBufferBinding::new(7, &unsorted_rows_buf),
+                    WebGpuBufferBinding::new(8, &cursors_buf),
+                    WebGpuBufferBinding::new(9, &sorted_rows_buf),
+                    WebGpuBufferBinding::new(10, &counters_buf),
+                    WebGpuBufferBinding::new(11, &bucket_bases_buf),
+                    WebGpuBufferBinding::new(12, &cycle_prefixes_buf),
+                ],
+            )
+            .expect("recursion checked-bytes WOM scatter bind group");
+        hal.dispatch_compute_1d(&exec_kernel, &bind_group, (work_cycles as u32).div_ceil(64));
+        hal.dispatch_compute_1d(
+            &scatter_kernel,
+            &bind_group,
+            ((work_cycles * RECURSION_CHECKED_BYTES_WOM_PROBE_MAX_ROWS) as u32).div_ceil(64),
+        );
+        hal.dispatch_compute_1d(
+            &backfill_kernel,
+            &bind_group,
+            (work_cycles.saturating_sub(1) as u32).div_ceil(64),
+        );
+
+        RecursionWomScatterProbeOutput {
+            unsorted_plonk_rows: read_u32_buffer(
+                &hal,
+                &unsorted_rows_buf,
+                unsorted_row_words,
+                "recursion_checked_bytes_wom_scatter_unsorted_rows",
+            )
+            .await,
+            sorted_plonk_rows: read_u32_buffer(
+                &hal,
+                &sorted_rows_buf,
+                sorted_row_words,
+                "recursion_checked_bytes_wom_scatter_sorted_rows",
+            )
+            .await,
+            sorted_counters: read_u32_buffer(
+                &hal,
+                &counters_buf,
+                counter_words,
+                "recursion_checked_bytes_wom_scatter_counters",
+            )
+            .await,
+            data_after_backfill: read_u32_buffer(
+                &hal,
+                &data_buf,
+                data.len(),
+                "recursion_checked_bytes_wom_scatter_data",
+            )
+            .await,
+            cursors: read_u32_buffer(
+                &hal,
+                &cursors_buf,
+                cursor_words,
+                "recursion_checked_bytes_wom_scatter_cursors",
+            )
+            .await,
+        }
+    }
+
+    async fn run_recursion_verify_mem_wom_probe(
+        rows: usize,
+        work_cycles: usize,
+        ctrl: &[u32],
+        data: &[u32],
+        sorted_rows: &[u32],
+        cycle_prefixes: &[u32],
+    ) -> RecursionVerifyMemProbeOutput {
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .expect("recursion verify_mem WOM probe HAL");
+        let module =
+            risc0_circuit_recursion::prove::recursion_verify_mem_wom_probe_wgsl_module_for_test();
+        let cursor_words = rows;
+        let zero_cursors = vec![0u32; cursor_words];
+        let params = [
+            rows as u32,
+            1,
+            rows as u32,
+            1,
+            rows as u32,
+            rows as u32,
+            0,
+            work_cycles as u32,
+        ];
+        let params_bytes: &[u8] = bytemuck::cast_slice(&params);
+
+        let layout = hal
+            .create_bind_group_layout(
+                "recursion_verify_mem_wom_probe_layout",
+                &[
+                    WebGpuBindingLayout::storage(0, 0),
+                    WebGpuBindingLayout::storage(1, 0),
+                    WebGpuBindingLayout::storage(2, 0),
+                    WebGpuBindingLayout::storage(3, 0),
+                    WebGpuBindingLayout::storage(4, 0),
+                    WebGpuBindingLayout::storage(5, 0),
+                    WebGpuBindingLayout::uniform(6, params_bytes.len() as u64),
+                    WebGpuBindingLayout::read_only_storage(7, 0),
+                    WebGpuBindingLayout::storage(8, 0),
+                    WebGpuBindingLayout::read_only_storage(9, 0),
+                ],
+            )
+            .expect("recursion verify_mem WOM probe layout");
+        let kernel = hal
+            .create_compute_kernel(
+                "recursion_verify_mem_wom_probe_kernel",
+                &module,
+                "recursion_step_verify_mem_main",
+                &[layout.clone()],
+            )
+            .expect("recursion verify_mem WOM probe kernel");
+
+        let bytes = |words: usize| (words * std::mem::size_of::<u32>()) as u64;
+        let ctrl_buf = hal
+            .create_storage_buffer("recursion_verify_mem_ctrl", bytes(ctrl.len()))
+            .expect("recursion verify_mem ctrl");
+        let global_buf = hal
+            .create_storage_buffer("recursion_verify_mem_global", bytes(1))
+            .expect("recursion verify_mem global");
+        let data_buf = hal
+            .create_storage_buffer("recursion_verify_mem_data", bytes(data.len()))
+            .expect("recursion verify_mem data");
+        let mix_buf = hal
+            .create_storage_buffer("recursion_verify_mem_mix", bytes(1))
+            .expect("recursion verify_mem mix");
+        let wom_buf = hal
+            .create_storage_buffer("recursion_verify_mem_wom", bytes(rows * 4))
+            .expect("recursion verify_mem wom");
+        let accum_buf = hal
+            .create_storage_buffer("recursion_verify_mem_accum", bytes(rows * 4))
+            .expect("recursion verify_mem accum");
+        let sorted_rows_buf = hal
+            .create_storage_buffer("recursion_verify_mem_sorted_rows", bytes(sorted_rows.len()))
+            .expect("recursion verify_mem sorted rows");
+        let cursors_buf = hal
+            .create_storage_buffer("recursion_verify_mem_cursors", bytes(cursor_words))
+            .expect("recursion verify_mem cursors");
+        let cycle_prefixes_buf = hal
+            .create_storage_buffer(
+                "recursion_verify_mem_cycle_prefixes",
+                bytes(cycle_prefixes.len()),
+            )
+            .expect("recursion verify_mem cycle prefixes");
+        let params_buf = hal
+            .create_uniform_buffer("recursion_verify_mem_params", params_bytes)
+            .expect("recursion verify_mem params");
+
+        hal.write_buffer_named(
+            &ctrl_buf,
+            "recursion_verify_mem_ctrl",
+            0,
+            bytemuck::cast_slice(ctrl),
+        )
+        .expect("recursion verify_mem ctrl upload");
+        hal.write_buffer_named(
+            &data_buf,
+            "recursion_verify_mem_data",
+            0,
+            bytemuck::cast_slice(data),
+        )
+        .expect("recursion verify_mem data upload");
+        hal.write_buffer_named(
+            &sorted_rows_buf,
+            "recursion_verify_mem_sorted_rows",
+            0,
+            bytemuck::cast_slice(sorted_rows),
+        )
+        .expect("recursion verify_mem sorted rows upload");
+        hal.write_buffer_named(
+            &cursors_buf,
+            "recursion_verify_mem_cursors",
+            0,
+            bytemuck::cast_slice(zero_cursors.as_slice()),
+        )
+        .expect("recursion verify_mem cursors clear");
+        hal.write_buffer_named(
+            &cycle_prefixes_buf,
+            "recursion_verify_mem_cycle_prefixes",
+            0,
+            bytemuck::cast_slice(cycle_prefixes),
+        )
+        .expect("recursion verify_mem cycle prefixes upload");
+
+        let bind_group = hal
+            .create_bind_group(
+                "recursion_verify_mem_wom_probe_bg",
+                &layout,
+                &[
+                    WebGpuBufferBinding::new(0, &ctrl_buf),
+                    WebGpuBufferBinding::new(1, &global_buf),
+                    WebGpuBufferBinding::new(2, &data_buf),
+                    WebGpuBufferBinding::new(3, &mix_buf),
+                    WebGpuBufferBinding::new(4, &wom_buf),
+                    WebGpuBufferBinding::new(5, &accum_buf),
+                    WebGpuBufferBinding::new(6, &params_buf),
+                    WebGpuBufferBinding::new(7, &sorted_rows_buf),
+                    WebGpuBufferBinding::new(8, &cursors_buf),
+                    WebGpuBufferBinding::new(9, &cycle_prefixes_buf),
+                ],
+            )
+            .expect("recursion verify_mem bind group");
+        hal.dispatch_compute_1d(&kernel, &bind_group, (work_cycles as u32).div_ceil(64));
+
+        RecursionVerifyMemProbeOutput {
+            data_after_verify: read_u32_buffer(
+                &hal,
+                &data_buf,
+                data.len(),
+                "recursion_verify_mem_data",
+            )
+            .await,
+            cursors: read_u32_buffer(
+                &hal,
+                &cursors_buf,
+                cursor_words,
+                "recursion_verify_mem_cursors",
+            )
+            .await,
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn recursion_wom_generated_row_coverage_is_stable() {
+        console_error_panic_hook::set_once();
+
+        let coverage =
+            risc0_circuit_recursion::prove::recursion_wom_generated_row_coverage_for_test();
+        let expected = vec![
+            ("checked_bytes(recursion::CheckedBytes)".to_string(), 2, 2),
+            (
+                "macro_ops(recursion::MacroOp)/mux(Mux)/bit_and_elem(recursion::BitAndElem)"
+                    .to_string(),
+                3,
+                3,
+            ),
+            (
+                "macro_ops(recursion::MacroOp)/mux(Mux)/bit_op_shorts(recursion::BitOpShorts)"
+                    .to_string(),
+                3,
+                3,
+            ),
+            (
+                "macro_ops(recursion::MacroOp)/mux(Mux)/set_global(recursion::SetGlobal)"
+                    .to_string(),
+                4,
+                4,
+            ),
+            (
+                "macro_ops(recursion::MacroOp)/mux(Mux)/sha_fini(recursion::ShaWrap)/sha_cycle(recursion::ShaCycle)"
+                    .to_string(),
+                2,
+                2,
+            ),
+            (
+                "macro_ops(recursion::MacroOp)/mux(Mux)/sha_init(recursion::ShaWrap)/sha_cycle(recursion::ShaCycle)"
+                    .to_string(),
+                2,
+                2,
+            ),
+            (
+                "macro_ops(recursion::MacroOp)/mux(Mux)/sha_load(recursion::ShaWrap)/sha_cycle(recursion::ShaCycle)"
+                    .to_string(),
+                2,
+                2,
+            ),
+            (
+                "macro_ops(recursion::MacroOp)/mux(Mux)/sha_mix(recursion::ShaWrap)/sha_cycle(recursion::ShaCycle)"
+                    .to_string(),
+                2,
+                2,
+            ),
+            ("micro_ops(recursion::MicroOps)".to_string(), 9, 9),
+            ("poseidon2_load(recursion::Poseidon2Load)".to_string(), 9, 9),
+            (
+                "poseidon2_store(recursion::Poseidon2Store)".to_string(),
+                9,
+                9,
+            ),
+        ];
+        let total_rows: usize = coverage.iter().map(|(_, writes, _)| writes).sum();
+        let poseidon2_rows: usize = coverage
+            .iter()
+            .filter(|(family, _, _)| family.starts_with("poseidon2_"))
+            .map(|(_, writes, _)| writes)
+            .sum();
+
+        assert_eq!(coverage, expected);
+        assert_eq!(total_rows, 47);
+        assert_eq!(poseidon2_rows, 18);
+        assert_eq!(total_rows - poseidon2_rows, 29);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn recursion_accum_wgsl_compiles_on_chrome() {
+        console_error_panic_hook::set_once();
+
+        let (compute_module, verify_module) =
+            risc0_circuit_recursion::prove::recursion_accum_wgsl_modules_for_test();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "recursion_accum_wgsl compute_bytes={} verify_bytes={}",
+            compute_module.len(),
+            verify_module.len()
+        ));
+        assert!(
+            recursion_accum_probe(&compute_module, "recursion_step_compute_accum_main").await,
+            "generated recursion step_compute_accum WGSL must compile and dispatch on Chrome"
+        );
+        assert!(
+            recursion_accum_probe(&verify_module, "recursion_step_verify_accum_main").await,
+            "generated recursion step_verify_accum WGSL must compile and dispatch on Chrome"
+        );
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn recursion_exec_poseidon2_chain_wgsl_compiles_on_chrome() {
+        console_error_panic_hook::set_once();
+
+        let module =
+            risc0_circuit_recursion::prove::recursion_exec_poseidon2_chain_wgsl_module_for_test();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "recursion_exec_poseidon2_chain_wgsl module_bytes={}",
+            module.len()
+        ));
+        assert!(
+            recursion_accum_probe(&module, "recursion_step_exec_poseidon2_chain_main").await,
+            "generated recursion Poseidon2-chain exec WGSL must compile and dispatch on Chrome"
+        );
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn recursion_exec_poseidon2_chain_wom_externs_match_layout() {
+        console_error_panic_hook::set_once();
+
+        let mut ctrl = vec![0u32; RECURSION_WOM_PROBE_CTRL_COLS];
+        let data = vec![0u32; RECURSION_WOM_PROBE_DATA_COLS];
+        set_probe_col(&mut ctrl, 1, 3, 0, mont_u32(1));
+        for addr in 0..8 {
+            set_probe_col(&mut ctrl, 1, 15 + addr, 0, mont_u32(addr as u32));
+        }
+        let preflight_wom = (0..8)
+            .flat_map(|addr| (0..4).map(move |limb| mont(elem(30_000 + addr * 10 + limb))))
+            .collect::<Vec<_>>();
+
+        let load = run_recursion_poseidon2_wom_probe(1, 1, &ctrl, &data, &preflight_wom).await;
+        assert_eq!(load.cursors, vec![0, 9]);
+        for addr in 0..8 {
+            let base = addr * 4;
+            assert_probe_row(
+                "poseidon2_load plonk rows",
+                &load.plonk_rows,
+                0,
+                addr,
+                [
+                    mont_u32(addr as u32),
+                    preflight_wom[base],
+                    preflight_wom[base + 1],
+                    preflight_wom[base + 2],
+                    preflight_wom[base + 3],
+                ],
+            );
+        }
+        assert_probe_row(
+            "poseidon2_load terminal plonk row",
+            &load.plonk_rows,
+            0,
+            8,
+            [0, 0, 0, 0, 0],
+        );
+
+        let rows = 2;
+        let mut ctrl = vec![0u32; RECURSION_WOM_PROBE_CTRL_COLS * rows];
+        let mut data = vec![0u32; RECURSION_WOM_PROBE_DATA_COLS * rows];
+        set_probe_col(&mut ctrl, rows, 6, 1, mont_u32(1));
+        set_probe_col(&mut ctrl, rows, 12, 1, mont_u32(1));
+        set_probe_col(&mut ctrl, rows, 0, 1, mont_u32(100));
+        let store_values = (0..8)
+            .map(|idx| mont(elem(31_000 + idx)))
+            .collect::<Vec<_>>();
+        for (idx, value) in store_values.iter().copied().enumerate() {
+            set_probe_col(&mut data, rows, 90 + idx, 0, value);
+        }
+
+        let store =
+            run_recursion_poseidon2_wom_probe(rows, rows, &ctrl, &data, &[0, 0, 0, 0]).await;
+        assert_eq!(store.cursors, vec![0, 0, 8, 9]);
+        for (idx, value) in store_values.iter().copied().enumerate() {
+            let expected = [mont_u32(100 + idx as u32), value, 0, 0, 0];
+            assert_probe_row(
+                "poseidon2_store wom writes",
+                &store.wom_write_rows,
+                1,
+                idx,
+                expected,
+            );
+            assert_probe_row(
+                "poseidon2_store plonk rows",
+                &store.plonk_rows,
+                1,
+                idx,
+                expected,
+            );
+        }
+        assert_probe_row(
+            "poseidon2_store terminal plonk row",
+            &store.plonk_rows,
+            1,
+            8,
+            [0, 0, 0, 0, 0],
+        );
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn recursion_exec_poseidon2_chain_wom_scatter_sorts_rows_on_gpu() {
+        console_error_panic_hook::set_once();
+
+        let rows = 3;
+        let mut ctrl = vec![0u32; RECURSION_WOM_PROBE_CTRL_COLS * rows];
+        let mut data = vec![0u32; RECURSION_WOM_PROBE_DATA_COLS * rows];
+        let load_addrs = [5u32, 3, 1, 0, 4, 2, 6, 7];
+        set_probe_col(&mut ctrl, rows, 3, 0, mont_u32(1));
+        for (idx, addr) in load_addrs.iter().copied().enumerate() {
+            set_probe_col(&mut ctrl, rows, 15 + idx, 0, mont_u32(addr));
+        }
+        set_probe_col(&mut ctrl, rows, 6, 2, mont_u32(1));
+        set_probe_col(&mut ctrl, rows, 12, 2, mont_u32(1));
+        set_probe_col(&mut ctrl, rows, 0, 2, mont_u32(100));
+
+        let preflight_wom = (0..8)
+            .flat_map(|addr| (0..4).map(move |limb| mont(elem(40_000 + addr * 10 + limb))))
+            .collect::<Vec<_>>();
+        let store_values = (0..8)
+            .map(|idx| mont(elem(41_000 + idx)))
+            .collect::<Vec<_>>();
+        for (idx, value) in store_values.iter().copied().enumerate() {
+            set_probe_col(&mut data, rows, 90 + idx, 1, value);
+        }
+
+        let mut bucket_counts = vec![0usize; 109];
+        bucket_counts[0] = 2;
+        for addr in load_addrs {
+            bucket_counts[addr as usize + 1] += 1;
+        }
+        for addr in 100..108 {
+            bucket_counts[addr + 1] += 1;
+        }
+        let bucket_bases = bucket_bases_from_counts(&bucket_counts);
+        let cycle_prefixes = [0u32, 9, 9];
+        let sorted_rows = bucket_counts.iter().sum::<usize>();
+
+        let scatter = run_recursion_exec_wom_scatter_probe(
+            risc0_circuit_recursion::prove::recursion_exec_poseidon2_chain_wom_scatter_probe_wgsl_module_for_test(),
+            RECURSION_POSEIDON2_CHAIN_ENTRY,
+            "recursion_poseidon2_wom_scatter_main",
+            "recursion_poseidon2_wom_backfill_main",
+            rows,
+            rows,
+            &ctrl,
+            &data,
+            &preflight_wom,
+            &bucket_bases,
+            &cycle_prefixes,
+            sorted_rows,
+        )
+        .await;
+
+        assert_eq!(scatter.cursors, vec![9, 0, 9]);
+        assert_eq!(
+            scatter.sorted_counters,
+            bucket_counts
+                .iter()
+                .map(|count| *count as u32)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            probe_row_slice(&scatter.unsorted_plonk_rows, 0),
+            [
+                mont_u32(5),
+                preflight_wom[5 * 4],
+                preflight_wom[5 * 4 + 1],
+                preflight_wom[5 * 4 + 2],
+                preflight_wom[5 * 4 + 3],
+            ]
+        );
+
+        let mut expected_rows = Vec::new();
+        expected_rows.push([0, 0, 0, 0, 0]);
+        expected_rows.push([0, 0, 0, 0, 0]);
+        for addr in 0..8 {
+            let base = addr * 4;
+            expected_rows.push([
+                mont_u32(addr as u32),
+                preflight_wom[base],
+                preflight_wom[base + 1],
+                preflight_wom[base + 2],
+                preflight_wom[base + 3],
+            ]);
+        }
+        for (idx, value) in store_values.iter().copied().enumerate() {
+            expected_rows.push([mont_u32(100 + idx as u32), value, 0, 0, 0]);
+        }
+
+        for (idx, expected) in expected_rows.iter().enumerate() {
+            assert_eq!(
+                probe_row_slice(&scatter.sorted_plonk_rows, idx),
+                expected,
+                "sorted row mismatch at {idx}"
+            );
+        }
+
+        let expected_backfill = expected_rows[8];
+        for row in 0..2 {
+            for (col, expected) in expected_backfill.iter().copied().enumerate() {
+                assert_eq!(
+                    scatter.data_after_backfill[col * rows + row],
+                    expected,
+                    "backfilled data mismatch at row={row} col={col}"
+                );
+            }
+        }
+        for col in 0..5 {
+            assert_eq!(
+                scatter.data_after_backfill[col * rows + 2],
+                0,
+                "backfill should not write current row 2 at col={col}"
+            );
+        }
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn recursion_exec_micro_ops_wom_scatter_sorts_rows_on_gpu() {
+        console_error_panic_hook::set_once();
+
+        let rows = 2;
+        let mut ctrl = vec![0u32; RECURSION_WOM_PROBE_CTRL_COLS * rows];
+        let data = vec![0u32; RECURSION_WOM_PROBE_DATA_COLS * rows];
+        set_probe_col(&mut ctrl, rows, 1, 0, mont_u32(1));
+        set_probe_col(&mut ctrl, rows, 0, 0, mont_u32(4));
+        for (col, value) in [
+            (9usize, 60_000u32),
+            (10, 60_001),
+            (11, 60_002),
+            (13, 60_100),
+            (14, 60_101),
+            (15, 60_102),
+            (17, 60_200),
+            (18, 60_201),
+            (19, 60_202),
+        ] {
+            set_probe_col(&mut ctrl, rows, col, 0, mont_u32(value));
+        }
+
+        let expected_cycle_rows = [
+            [0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0],
+            [
+                mont_u32(4),
+                mont_u32(60_000),
+                mont_u32(60_001),
+                mont_u32(60_002),
+                0,
+            ],
+            [0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0],
+            [
+                mont_u32(5),
+                mont_u32(60_100),
+                mont_u32(60_101),
+                mont_u32(60_102),
+                0,
+            ],
+            [0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0],
+            [
+                mont_u32(6),
+                mont_u32(60_200),
+                mont_u32(60_201),
+                mont_u32(60_202),
+                0,
+            ],
+        ];
+        let mut bucket_counts = vec![0usize; 8];
+        bucket_counts[0] = 6;
+        for addr in 4..=6 {
+            bucket_counts[addr + 1] += 1;
+        }
+        let bucket_bases = bucket_bases_from_counts(&bucket_counts);
+        let cycle_prefixes = [0u32, 9];
+        let preflight_wom = vec![0u32; 32];
+        let sorted_rows = bucket_counts.iter().sum::<usize>();
+
+        let scatter = run_recursion_exec_wom_scatter_probe(
+            risc0_circuit_recursion::prove::recursion_exec_micro_ops_wom_scatter_probe_wgsl_module_for_test(),
+            RECURSION_MICRO_OPS_ENTRY,
+            RECURSION_MICRO_OPS_SCATTER_ENTRY,
+            RECURSION_MICRO_OPS_BACKFILL_ENTRY,
+            rows,
+            rows,
+            &ctrl,
+            &data,
+            &preflight_wom,
+            &bucket_bases,
+            &cycle_prefixes,
+            sorted_rows,
+        )
+        .await;
+
+        assert_eq!(scatter.cursors, vec![9, 0]);
+        assert_eq!(
+            scatter.sorted_counters,
+            bucket_counts
+                .iter()
+                .map(|count| *count as u32)
+                .collect::<Vec<_>>()
+        );
+        for (idx, expected) in expected_cycle_rows.iter().enumerate() {
+            assert_eq!(
+                probe_row_slice(&scatter.unsorted_plonk_rows, idx),
+                expected,
+                "micro_ops unsorted row mismatch at {idx}"
+            );
+        }
+
+        let expected_sorted_rows = [
+            [0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0],
+            expected_cycle_rows[2],
+            expected_cycle_rows[5],
+            expected_cycle_rows[8],
+        ];
+        for (idx, expected) in expected_sorted_rows.iter().enumerate() {
+            assert_eq!(
+                probe_row_slice(&scatter.sorted_plonk_rows, idx),
+                expected,
+                "micro_ops sorted row mismatch at {idx}"
+            );
+        }
+
+        for (col, value) in expected_sorted_rows[8].iter().copied().enumerate() {
+            assert_eq!(
+                scatter.data_after_backfill[col * rows],
+                value,
+                "micro_ops backfilled data mismatch at col={col}"
+            );
+            assert_eq!(
+                scatter.data_after_backfill[col * rows + 1],
+                0,
+                "micro_ops backfill should not write current row 1 at col={col}"
+            );
+        }
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn recursion_exec_macro_ops_wom_scatter_sorts_rows_on_gpu() {
+        console_error_panic_hook::set_once();
+
+        let rows = 7;
+        let mut ctrl = vec![0u32; RECURSION_WOM_PROBE_CTRL_COLS * rows];
+        let data = vec![0u32; RECURSION_WOM_PROBE_DATA_COLS * rows];
+        let expected_addr_row = |addr: u32| [mont_u32(addr), 0, 0, 0, 0];
+
+        for row in 0..rows {
+            set_probe_col(&mut ctrl, rows, 2, row, mont_u32(1));
+        }
+
+        set_probe_col(&mut ctrl, rows, 11, 0, mont_u32(1));
+        set_probe_col(&mut ctrl, rows, 0, 0, mont_u32(3));
+        set_probe_col(&mut ctrl, rows, 18, 0, mont_u32(1));
+        set_probe_col(&mut ctrl, rows, 19, 0, mont_u32(2));
+
+        set_probe_col(&mut ctrl, rows, 12, 1, mont_u32(1));
+        set_probe_col(&mut ctrl, rows, 0, 1, mont_u32(6));
+        set_probe_col(&mut ctrl, rows, 18, 1, mont_u32(4));
+        set_probe_col(&mut ctrl, rows, 19, 1, mont_u32(5));
+        set_probe_col(&mut ctrl, rows, 20, 1, mont_u32(1));
+
+        set_probe_col(&mut ctrl, rows, 13, 2, mont_u32(1));
+        set_probe_col(&mut ctrl, rows, 18, 2, mont_u32(7));
+        set_probe_col(&mut ctrl, rows, 19, 2, mont_u32(8));
+
+        set_probe_col(&mut ctrl, rows, 14, 3, mont_u32(1));
+
+        set_probe_col(&mut ctrl, rows, 15, 4, mont_u32(1));
+        set_probe_col(&mut ctrl, rows, 18, 4, mont_u32(9));
+        set_probe_col(&mut ctrl, rows, 19, 4, mont_u32(10));
+
+        set_probe_col(&mut ctrl, rows, 16, 5, mont_u32(1));
+        set_probe_col(&mut ctrl, rows, 19, 5, mont_u32(11));
+
+        set_probe_col(&mut ctrl, rows, 17, 6, mont_u32(1));
+        set_probe_col(&mut ctrl, rows, 18, 6, mont_u32(12));
+
+        let mut bucket_counts = vec![0usize; 17];
+        bucket_counts[0] = 3;
+        for addr in 1..=15 {
+            bucket_counts[addr + 1] += 1;
+        }
+        let bucket_bases = bucket_bases_from_counts(&bucket_counts);
+        let cycle_prefixes = [0u32, 6, 9, 11, 11, 13, 14];
+        let preflight_wom = vec![0u32; 16 * 4];
+        let sorted_rows = bucket_counts.iter().sum::<usize>();
+
+        let scatter = run_recursion_exec_wom_scatter_probe(
+            risc0_circuit_recursion::prove::recursion_exec_macro_ops_wom_scatter_probe_wgsl_module_for_test(),
+            RECURSION_MACRO_OPS_ENTRY,
+            RECURSION_MACRO_OPS_SCATTER_ENTRY,
+            RECURSION_MACRO_OPS_BACKFILL_ENTRY,
+            rows,
+            rows,
+            &ctrl,
+            &data,
+            &preflight_wom,
+            &bucket_bases,
+            &cycle_prefixes,
+            sorted_rows,
+        )
+        .await;
+
+        assert_eq!(scatter.cursors, vec![3, 3, 2, 2, 2, 2, 4]);
+        assert_eq!(
+            scatter.sorted_counters,
+            bucket_counts
+                .iter()
+                .map(|count| *count as u32)
+                .collect::<Vec<_>>()
+        );
+
+        let expected_cycle_rows = [
+            vec![
+                expected_addr_row(1),
+                expected_addr_row(2),
+                expected_addr_row(3),
+            ],
+            vec![
+                expected_addr_row(4),
+                expected_addr_row(5),
+                expected_addr_row(6),
+            ],
+            vec![expected_addr_row(7), expected_addr_row(8)],
+            vec![[0, 0, 0, 0, 0], [0, 0, 0, 0, 0]],
+            vec![expected_addr_row(9), expected_addr_row(10)],
+            vec![[0, 0, 0, 0, 0], expected_addr_row(11)],
+            vec![
+                expected_addr_row(12),
+                expected_addr_row(13),
+                expected_addr_row(14),
+                expected_addr_row(15),
+            ],
+        ];
+        for (cycle, rows_for_cycle) in expected_cycle_rows.iter().enumerate() {
+            for (row, expected) in rows_for_cycle.iter().copied().enumerate() {
+                assert_probe_row(
+                    "macro_ops unsorted plonk rows",
+                    &scatter.unsorted_plonk_rows,
+                    cycle,
+                    row,
+                    expected,
+                );
+            }
+        }
+
+        let mut expected_sorted_rows = vec![[0, 0, 0, 0, 0]; 3];
+        for addr in 1..=15 {
+            expected_sorted_rows.push(expected_addr_row(addr));
+        }
+        for (idx, expected) in expected_sorted_rows.iter().enumerate() {
+            assert_eq!(
+                probe_row_slice(&scatter.sorted_plonk_rows, idx),
+                expected,
+                "macro_ops sorted row mismatch at {idx}"
+            );
+        }
+
+        for (row, expected) in [
+            (0usize, expected_addr_row(3)),
+            (1, expected_addr_row(6)),
+            (2, expected_addr_row(8)),
+            (3, expected_addr_row(8)),
+            (4, expected_addr_row(10)),
+            (5, expected_addr_row(11)),
+        ] {
+            for (col, value) in expected.iter().copied().enumerate() {
+                assert_eq!(
+                    scatter.data_after_backfill[col * rows + row],
+                    value,
+                    "macro_ops backfilled data mismatch at row={row} col={col}"
+                );
+            }
+        }
+        for col in 0..5 {
+            assert_eq!(
+                scatter.data_after_backfill[col * rows + 6],
+                0,
+                "macro_ops backfill should not write current row 6 at col={col}"
+            );
+        }
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn recursion_checked_bytes_wom_scatter_sorts_rows_on_gpu() {
+        console_error_panic_hook::set_once();
+
+        let rows = 4;
+        let mut ctrl = vec![0u32; RECURSION_WOM_PROBE_CTRL_COLS * rows];
+        let mut data = vec![0u32; RECURSION_WOM_PROBE_DATA_COLS * rows];
+        set_probe_col(&mut ctrl, rows, 7, 0, mont_u32(1));
+        set_probe_col(&mut ctrl, rows, 7, 2, mont_u32(1));
+
+        let checked_bytes_row = |addr: u32, seed: usize| {
+            [
+                mont_u32(addr),
+                mont(elem(seed)),
+                mont(elem(seed + 1)),
+                mont(elem(seed + 2)),
+                mont(elem(seed + 3)),
+            ]
+        };
+        let cycle0_first = checked_bytes_row(8, 50_000);
+        let cycle0_second = checked_bytes_row(3, 50_100);
+        let cycle2_first = checked_bytes_row(1, 50_200);
+        let cycle2_second = checked_bytes_row(6, 50_300);
+        for (offset, value) in cycle0_first.iter().copied().enumerate() {
+            set_probe_col(&mut data, rows, 5 + offset, 0, value);
+        }
+        for (offset, value) in cycle0_second.iter().copied().enumerate() {
+            set_probe_col(&mut data, rows, 10 + offset, 0, value);
+        }
+        for (offset, value) in cycle2_first.iter().copied().enumerate() {
+            set_probe_col(&mut data, rows, 5 + offset, 2, value);
+        }
+        for (offset, value) in cycle2_second.iter().copied().enumerate() {
+            set_probe_col(&mut data, rows, 10 + offset, 2, value);
+        }
+
+        let mut bucket_counts = vec![0usize; 10];
+        for addr in [8usize, 3, 1, 6] {
+            bucket_counts[addr + 1] += 1;
+        }
+        let bucket_bases = bucket_bases_from_counts(&bucket_counts);
+        let cycle_prefixes = [0u32, 2, 2, 4];
+        let sorted_rows = bucket_counts.iter().sum::<usize>();
+
+        let scatter = run_recursion_checked_bytes_wom_scatter_probe(
+            rows,
+            rows,
+            &ctrl,
+            &data,
+            &bucket_bases,
+            &cycle_prefixes,
+            sorted_rows,
+        )
+        .await;
+
+        assert_eq!(scatter.cursors, vec![2, 0, 2, 0]);
+        assert_eq!(
+            scatter.sorted_counters,
+            bucket_counts
+                .iter()
+                .map(|count| *count as u32)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            probe_row_slice(&scatter.unsorted_plonk_rows, 0),
+            cycle0_first
+        );
+        assert_eq!(
+            probe_row_slice(&scatter.unsorted_plonk_rows, 1),
+            cycle0_second
+        );
+        assert_eq!(
+            probe_row_slice(&scatter.unsorted_plonk_rows, 4),
+            cycle2_first
+        );
+        assert_eq!(
+            probe_row_slice(&scatter.unsorted_plonk_rows, 5),
+            cycle2_second
+        );
+
+        let expected_rows = [cycle2_first, cycle0_second, cycle2_second, cycle0_first];
+        for (idx, expected) in expected_rows.iter().enumerate() {
+            assert_eq!(
+                probe_row_slice(&scatter.sorted_plonk_rows, idx),
+                expected,
+                "checked-bytes sorted row mismatch at {idx}"
+            );
+        }
+
+        for (row, expected) in [
+            (0usize, expected_rows[1]),
+            (1, expected_rows[1]),
+            (2, expected_rows[3]),
+        ] {
+            for (col, value) in expected.iter().copied().enumerate() {
+                assert_eq!(
+                    scatter.data_after_backfill[col * rows + row],
+                    value,
+                    "checked-bytes backfilled data mismatch at row={row} col={col}"
+                );
+            }
+        }
+        for col in 0..5 {
+            assert_eq!(
+                scatter.data_after_backfill[col * rows + 3],
+                0,
+                "checked-bytes backfill should not write current row 3 at col={col}"
+            );
+        }
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn recursion_verify_mem_reads_sorted_rows_on_gpu() {
+        console_error_panic_hook::set_once();
+
+        let rows = 2;
+        let mut ctrl = vec![0u32; RECURSION_WOM_PROBE_CTRL_COLS * rows];
+        let mut data = vec![0u32; RECURSION_WOM_PROBE_DATA_COLS * rows];
+        set_probe_col(&mut ctrl, rows, 1, 0, mont_u32(1));
+        for col in 0..5 {
+            set_probe_col(&mut data, rows, col, 1, mont_u32(90_000 + col as u32));
+        }
+
+        let mut sorted_rows = Vec::new();
+        for row in 0..9u32 {
+            sorted_rows.extend([
+                mont_u32(10 + row),
+                mont_u32(70_000 + row * 10),
+                mont_u32(70_001 + row * 10),
+                mont_u32(70_002 + row * 10),
+                mont_u32(70_003 + row * 10),
+            ]);
+        }
+        let verify =
+            run_recursion_verify_mem_wom_probe(rows, 1, &ctrl, &data, &sorted_rows, &[0, 9]).await;
+
+        assert_eq!(verify.cursors, vec![9, 0]);
+        for read_idx in 0..9 {
+            let dst_col = if read_idx == 8 { 0 } else { 50 + read_idx * 5 };
+            for word in 0..5 {
+                assert_eq!(
+                    verify.data_after_verify[(dst_col + word) * rows],
+                    sorted_rows[read_idx * 5 + word],
+                    "verify_mem store mismatch at read_idx={read_idx} word={word}"
+                );
+            }
+        }
+    }
+
+    const SP7_EXT_INV_PLACEHOLDER: &str = "fn ext_inv(x: ExtVal) -> ExtVal {\n  return x;\n}";
+
+    const SP7_EXT_INV_FORMULA_FN: &str = r#"fn ext_inv(x: ExtVal) -> ExtVal {
+  let beta = sub(0u, NBETA);
+  var b0 = add(mul(x.x, x.x), mul(beta, sub(mul(x.y, add(x.w, x.w)), mul(x.z, x.z))));
+  var b2 = add(sub(mul(x.x, add(x.z, x.z)), mul(x.y, x.y)), mul(beta, mul(x.w, x.w)));
+  let c = add(mul(b0, b0), mul(beta, mul(b2, b2)));
+  let ic = inv(c);
+  b0 = mul(b0, ic);
+  b2 = mul(b2, ic);
+  return ExtVal(
+    add(mul(x.x, b0), mul(beta, mul(x.z, b2))),
+    add(sub(0u, mul(x.y, b0)), mul(NBETA, mul(x.w, b2))),
+    add(sub(0u, mul(x.x, b2)), mul(x.z, b0)),
+    sub(mul(x.y, b2), mul(x.w, b0)),
+  );
+}
+"#;
+
+    const SP7_EXT_INV_FORMULA_PROBE: &str = r#"
+@compute @workgroup_size(1)
+fn sp7_ext_inv_formula_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x != 0u) {
+    return;
+  }
+  let x = ExtVal(TEST_EXT_INV_X0, TEST_EXT_INV_X1, TEST_EXT_INV_X2, TEST_EXT_INV_X3);
+  let inv_x = ext_inv(x);
+  let product = ext_mul(x, inv_x);
+  data_buf[0u] = inv_x.x;
+  data_buf[1u] = inv_x.y;
+  data_buf[2u] = inv_x.z;
+  data_buf[3u] = inv_x.w;
+  data_buf[4u] = product.x;
+  data_buf[5u] = product.y;
+  data_buf[6u] = product.z;
+  data_buf[7u] = product.w;
+}
+"#;
+
+    fn sp7_witgen_prelude_with_ext_inv_formula() -> String {
+        let prelude = include_str!("sp7_wgsl/witgen_prelude.wgsl");
+        assert!(
+            prelude.contains(SP7_EXT_INV_PLACEHOLDER),
+            "SP7 ext_inv placeholder changed; revisit formula replacement"
+        );
+        prelude.replace(SP7_EXT_INV_PLACEHOLDER, SP7_EXT_INV_FORMULA_FN)
+    }
+
+    async fn sp7_read_ext_inv_formula_probe(x: BabyBearExtElem) -> Vec<u32> {
+        let x_words = x.to_u32_words();
+        let constants = format!(
+            "const TEST_EXT_INV_X0: u32 = {}u;\n\
+             const TEST_EXT_INV_X1: u32 = {}u;\n\
+             const TEST_EXT_INV_X2: u32 = {}u;\n\
+             const TEST_EXT_INV_X3: u32 = {}u;",
+            x_words[0], x_words[1], x_words[2], x_words[3]
+        );
+        let module = format!(
+            "{}\n{}\n{}",
+            sp7_witgen_prelude_with_ext_inv_formula(),
+            constants,
+            SP7_EXT_INV_FORMULA_PROBE
+        );
+        let params: [u32; 8] = [1, 1, 1, 1, 0, 0, 0, 0];
+        let params_bytes: &[u8] = bytemuck::cast_slice(&params);
+        let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
+            .await
+            .expect("sp7_ext_inv_formula hal");
+        let layout = hal
+            .create_bind_group_layout(
+                "sp7_ext_inv_formula_layout",
+                &[
+                    WebGpuBindingLayout::storage(0, 0),
+                    WebGpuBindingLayout::storage(1, 0),
+                    WebGpuBindingLayout::storage(2, 0),
+                    WebGpuBindingLayout::storage(3, 0),
+                    WebGpuBindingLayout::uniform(4, params_bytes.len() as u64),
+                ],
+            )
+            .expect("sp7_ext_inv_formula layout");
+        let kernel = hal
+            .create_compute_kernel(
+                "sp7_ext_inv_formula_kernel",
+                &module,
+                "sp7_ext_inv_formula_main",
+                &[layout.clone()],
+            )
+            .expect("sp7_ext_inv_formula kernel");
+        let data_buf = hal
+            .create_storage_buffer("sp7_ext_inv_formula_data", 32)
+            .expect("sp7_ext_inv_formula data");
+        let global_buf = hal
+            .create_storage_buffer("sp7_ext_inv_formula_global", 4)
+            .expect("sp7_ext_inv_formula global");
+        let accum_buf = hal
+            .create_storage_buffer("sp7_ext_inv_formula_accum", 4)
+            .expect("sp7_ext_inv_formula accum");
+        let mix_buf = hal
+            .create_storage_buffer("sp7_ext_inv_formula_mix", 4)
+            .expect("sp7_ext_inv_formula mix");
+        let params_buf = hal
+            .create_uniform_buffer("sp7_ext_inv_formula_params", params_bytes)
+            .expect("sp7_ext_inv_formula params");
+        let bind_group = hal
+            .create_bind_group(
+                "sp7_ext_inv_formula_bg",
+                &layout,
+                &[
+                    WebGpuBufferBinding::new(0, &data_buf),
+                    WebGpuBufferBinding::new(1, &global_buf),
+                    WebGpuBufferBinding::new(2, &accum_buf),
+                    WebGpuBufferBinding::new(3, &mix_buf),
+                    WebGpuBufferBinding::new(4, &params_buf),
+                ],
+            )
+            .expect("sp7_ext_inv_formula bind group");
+        hal.dispatch_compute_1d(&kernel, &bind_group, 1);
+        let gpu_bytes = hal
+            .read_buffer(&data_buf, 32)
+            .await
+            .expect("sp7_ext_inv_formula readback");
+        bytemuck::checked::try_cast_slice::<u8, u32>(gpu_bytes.as_slice())
+            .expect("sp7_ext_inv_formula readback cast")
+            .to_vec()
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn sp7_ext_inv_formula_matches_baby_bear_on_chrome() {
+        console_error_panic_hook::set_once();
+
+        let x = ext_elem(0x307);
+        let expected_inv = x.inv().to_u32_words();
+        let expected_product = BabyBearExtElem::ONE.to_u32_words();
+        let gpu_words = sp7_read_ext_inv_formula_probe(x).await;
+        assert_eq!(
+            &gpu_words[0..4],
+            expected_inv.as_slice(),
+            "WGSL ExtElem inverse formula must match BabyBearExtElem::inv()"
+        );
+        assert_eq!(
+            &gpu_words[4..8],
+            expected_product.as_slice(),
+            "x * WGSL ExtElem inverse must equal extension-field one"
+        );
     }
 
     /// SP7 iter 5c — `@compute` entries for the pruned-module probes.
@@ -3377,7 +6208,8 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         const ARM5: &str =
             include_str!("../../../risc0/circuit/rv32im/src/zirgen/topaccum_arm5_probe.wgsl");
 
-        let arm5 = format!("{PRELUDE}\n{TYPES}\n{LAYOUT}\n{ARM5}\n{SP7_TOPACCUM_ARM5_GUARDED_ENTRY}");
+        let arm5 =
+            format!("{PRELUDE}\n{TYPES}\n{LAYOUT}\n{ARM5}\n{SP7_TOPACCUM_ARM5_GUARDED_ENTRY}");
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
             "sp7_topaccum_arm5 split module assembled: {} bytes",
             arm5.len()
@@ -3411,8 +6243,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         let prover = init_prover().await;
         let model: GradientBooster =
-            serde_json::from_str(include_str!("../../xgboost/res/trained_model.json"))
-                .unwrap();
+            serde_json::from_str(include_str!("../../xgboost/res/trained_model.json")).unwrap();
         let model_bytes = rmp_serde::to_vec(&model).unwrap();
         let data: Vec<f64> = vec![18511304.0, 117.0];
         let env = ExecutorEnv::builder()
@@ -3428,23 +6259,1650 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         set_witgen_gpu_probe_enabled(false);
     }
 
-    /// SP7 iter 6d-g step 6.2.3 -- short-circuit validation. Enables
-    /// both the probe (so prewarm + shadow_init + per-arm dispatch
-    /// runs) AND the replace flag (so rust_steps skips its step_Top
-    /// for the 8 zero-back_Reg arms). If the synthesized per-arm
-    /// wrappers produce correct data_buf cells, the receipt verifies.
-    /// If any wrapper has a bug, the receipt fails verification.
-    ///
-    /// Expected wall savings on xgboost: ~4.5 s vs probe-only baseline
-    /// (~102.6 s -> ~98 s), pulling effective CUDA ratio from 18.0x
-    /// to ~17.4x. Architectural 5-8x floor remains gated on
-    /// multi-device / Chrome-Dawn improvements outside per-kernel
-    /// scope, but this validates the synthesis correctness.
+    /// SP7 iter 6d-g step 6.2.3 -- authoritative replacement validation.
+    /// Enables the probe and replace flags so WebGPU writes the MISC0
+    /// witness slice and rust_steps skips that CPU step_Top slice while
+    /// replaying the lookup-table side effects required by later Control0
+    /// rows. Both representative receipts must verify.
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_replace_busy_loop_e2e_verify() {
+        use risc0_circuit_rv32im::prove::{
+            accum_gpu_mem0_direct_rows, accum_gpu_mem1_direct_rows, accum_gpu_misc0_direct_rows,
+            accum_gpu_misc1_direct_rows, accum_gpu_misc2_direct_rows,
+            set_accum_gpu_mem0_direct_enabled, set_accum_gpu_mem1_direct_enabled,
+            set_accum_gpu_misc0_direct_enabled, set_accum_gpu_misc1_direct_enabled,
+            set_accum_gpu_misc2_direct_enabled, set_witgen_gpu_mem0_replace_candidate_enabled,
+            set_witgen_gpu_probe_enabled, set_witgen_gpu_replace_enabled,
+            witgen_accum_shadow_replay_rows, witgen_gpu_mem0_extra_prewarm_requests,
+            witgen_gpu_mem0_replace_minor_mask, witgen_gpu_replace_arm_mask,
+            witgen_gpu_replace_nonblocking_pending_skips,
+            witgen_gpu_replace_on_demand_kernel_compiles, witgen_gpu_short_circuit_cycles,
+        };
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        console_error_panic_hook::set_once();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(
+            "iter6d_g replace=on fixture=busy_loop+keccak_union",
+        );
+        set_witgen_gpu_probe_enabled(true);
+        set_witgen_gpu_replace_enabled(true);
+        set_accum_gpu_misc0_direct_enabled(true);
+        set_accum_gpu_misc1_direct_enabled(true);
+        set_accum_gpu_misc2_direct_enabled(true);
+
+        let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+        assert_eq!(
+            witgen_gpu_mem0_replace_minor_mask(),
+            1u16 << 2,
+            "default WebGPU replacement should select only MEM0 LW rows"
+        );
+        let busy_loop_short_before = witgen_gpu_short_circuit_cycles();
+        let busy_loop_direct_accum_before = accum_gpu_misc0_direct_rows();
+        let busy_loop_misc1_direct_accum_before = accum_gpu_misc1_direct_rows();
+        let busy_loop_misc2_direct_accum_before = accum_gpu_misc2_direct_rows();
+        let busy_loop_mem0_direct_accum_before = accum_gpu_mem0_direct_rows();
+        let busy_loop_mem1_direct_accum_before = accum_gpu_mem1_direct_rows();
+        let busy_loop_on_demand_before = witgen_gpu_replace_on_demand_kernel_compiles();
+        let busy_loop_nonblocking_skip_before = witgen_gpu_replace_nonblocking_pending_skips();
+        let busy_loop_shadow_replay_before = witgen_accum_shadow_replay_rows();
+        let busy_loop_diag_before = prover.diagnostics();
+        let env = ExecutorEnv::builder()
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let receipt = prove_succinct_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_witgen_replace",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        receipt
+            .verify(MULTI_TEST_ID)
+            .expect("GPU-witgen replacement BusyLoop receipt verifies");
+        let busy_loop_diag_after = prover.diagnostics();
+        let busy_loop_nonblocking_skipped =
+            witgen_gpu_replace_nonblocking_pending_skips() > busy_loop_nonblocking_skip_before;
+        if !busy_loop_nonblocking_skipped {
+            assert_no_witgen_data_readback(
+                "multi_test/busy_loop_po2_18_witgen_replace",
+                &busy_loop_diag_after,
+            );
+            assert_witgen_seed_upload_elided(
+                "multi_test/busy_loop_po2_18_witgen_replace",
+                &busy_loop_diag_before,
+                &busy_loop_diag_after,
+                400_000_000,
+            );
+            assert_witgen_seed_scatter_elided(
+                "multi_test/busy_loop_po2_18_witgen_replace",
+                &busy_loop_diag_before,
+                &busy_loop_diag_after,
+            );
+            assert_witgen_data_shadow_readback_elided(
+                "multi_test/busy_loop_po2_18_witgen_replace",
+                &busy_loop_diag_before,
+                &busy_loop_diag_after,
+            );
+            assert!(
+                witgen_gpu_short_circuit_cycles() > busy_loop_short_before,
+                "GPU-witgen replacement must short-circuit BusyLoop CPU cycles once kernels are ready"
+            );
+            assert!(
+                accum_gpu_misc0_direct_rows() > busy_loop_direct_accum_before,
+                "GPU direct MISC0 accumulator must cover BusyLoop GPU-owned rows once kernels are ready"
+            );
+            assert!(
+                (witgen_gpu_replace_arm_mask() & (1u16 << 5)) != 0,
+                "default replacement should include the MEM0 LW direct-accum path once kernels are ready"
+            );
+            assert!(
+                accum_gpu_mem0_direct_rows() > busy_loop_mem0_direct_accum_before,
+                "GPU direct MEM0 accumulator must cover BusyLoop MEM0 LW rows once kernels are ready"
+            );
+        } else {
+            assert!(
+                accum_gpu_misc0_direct_rows() > busy_loop_direct_accum_before,
+                "GPU direct MISC0 accumulator should still cover CPU-witgen-owned BusyLoop rows when cold replacement is skipped"
+            );
+            assert!(
+                accum_gpu_mem0_direct_rows() > busy_loop_mem0_direct_accum_before,
+                "GPU direct MEM0 accumulator should still cover CPU-witgen-owned BusyLoop MEM0 LW rows when cold replacement is skipped"
+            );
+        }
+        assert_witgen_replacement_pipeline_scope(
+            "multi_test/busy_loop_po2_18_witgen_replace",
+            &busy_loop_diag_after,
+            52,
+        );
+        assert!(
+            accum_gpu_misc1_direct_rows() > busy_loop_misc1_direct_accum_before,
+            "GPU direct MISC1 accumulator must cover BusyLoop CPU-witgen-owned rows"
+        );
+        assert!(
+            accum_gpu_misc2_direct_rows() > busy_loop_misc2_direct_accum_before,
+            "GPU direct MISC2 accumulator must cover BusyLoop CPU-witgen-owned rows"
+        );
+        assert!(
+            (witgen_gpu_replace_arm_mask() & (1u16 << 2)) == 0,
+            "MISC2 is currently correctness-positive but wall-negative; replacement should exclude it until shadow repair is cheaper"
+        );
+        assert!(
+            accum_gpu_mem1_direct_rows() > busy_loop_mem1_direct_accum_before,
+            "GPU direct MEM1 accumulator must cover BusyLoop MEM1 rows"
+        );
+        assert!(
+            witgen_gpu_mem0_extra_prewarm_requests() <= 1,
+            "default replacement should prewarm only the selected MEM0 extra minor"
+        );
+        assert_upload_bytes_bounded(
+            "multi_test/busy_loop_po2_18_witgen_replace",
+            &busy_loop_diag_before,
+            &busy_loop_diag_after,
+            "recursion_data",
+            100_000_000,
+        );
+        assert_upload_bytes_bounded(
+            "multi_test/busy_loop_po2_18_witgen_replace",
+            &busy_loop_diag_before,
+            &busy_loop_diag_after,
+            "accum",
+            100_000_000,
+        );
+        assert_eq!(
+            witgen_gpu_replace_on_demand_kernel_compiles(),
+            busy_loop_on_demand_before,
+            "GPU-witgen replacement prewarm should cover BusyLoop's first segment without on-demand replacement kernel compiles"
+        );
+        assert_eq!(
+            witgen_accum_shadow_replay_rows(),
+            busy_loop_shadow_replay_before,
+            "GPU-witgen replacement must not rerun CPU step_Top for BusyLoop accum shadow repair"
+        );
+        assert_witgen_accum_shadow_readbacks_coalesced(
+            "multi_test/busy_loop_po2_18_witgen_replace",
+            &busy_loop_diag_before,
+            &busy_loop_diag_after,
+            1,
+        );
+
+        let keccak_union_short_before = witgen_gpu_short_circuit_cycles();
+        let keccak_union_direct_accum_before = accum_gpu_misc0_direct_rows();
+        let keccak_union_misc1_direct_accum_before = accum_gpu_misc1_direct_rows();
+        let keccak_union_misc2_direct_accum_before = accum_gpu_misc2_direct_rows();
+        let keccak_union_mem0_direct_accum_before = accum_gpu_mem0_direct_rows();
+        let keccak_union_mem1_direct_accum_before = accum_gpu_mem1_direct_rows();
+        let keccak_union_on_demand_before = witgen_gpu_replace_on_demand_kernel_compiles();
+        let keccak_union_shadow_replay_before = witgen_accum_shadow_replay_rows();
+        let keccak_union_proof_count = 1;
+        assert_keccak_union_representative_shape(keccak_union_proof_count);
+        let keccak_union_diag_before = prover.diagnostics();
+        let keccak_union_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/keccak_union_witgen_replace",
+            keccak_union_env_with_count(keccak_union_proof_count),
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert!(keccak_union_info.stats.segments >= 1);
+        assert_no_witgen_data_readback(
+            "multi_test/keccak_union_witgen_replace",
+            &prover.diagnostics(),
+        );
+        assert_witgen_seed_upload_elided(
+            "multi_test/keccak_union_witgen_replace",
+            &keccak_union_diag_before,
+            &prover.diagnostics(),
+            4_500_000_000,
+        );
+        assert_witgen_seed_scatter_elided(
+            "multi_test/keccak_union_witgen_replace",
+            &keccak_union_diag_before,
+            &prover.diagnostics(),
+        );
+        assert_witgen_data_shadow_readback_elided(
+            "multi_test/keccak_union_witgen_replace",
+            &keccak_union_diag_before,
+            &prover.diagnostics(),
+        );
+        assert!(
+            witgen_gpu_short_circuit_cycles() > keccak_union_short_before,
+            "GPU-witgen replacement must short-circuit KeccakUnion CPU cycles"
+        );
+        assert!(
+            accum_gpu_misc0_direct_rows() > keccak_union_direct_accum_before,
+            "GPU direct MISC0 accumulator must cover KeccakUnion GPU-owned rows"
+        );
+        assert!(
+            accum_gpu_misc1_direct_rows() > keccak_union_misc1_direct_accum_before,
+            "GPU direct MISC1 accumulator must cover KeccakUnion CPU-witgen-owned rows"
+        );
+        assert!(
+            accum_gpu_misc2_direct_rows() > keccak_union_misc2_direct_accum_before,
+            "GPU direct MISC2 accumulator must cover KeccakUnion CPU-witgen-owned rows"
+        );
+        assert!(
+            (witgen_gpu_replace_arm_mask() & (1u16 << 5)) != 0,
+            "default replacement should include the MEM0 LW direct-accum path for KeccakUnion"
+        );
+        assert!(
+            accum_gpu_mem0_direct_rows() > keccak_union_mem0_direct_accum_before,
+            "GPU direct MEM0 accumulator must cover KeccakUnion MEM0 LW rows"
+        );
+        assert!(
+            accum_gpu_mem1_direct_rows() > keccak_union_mem1_direct_accum_before,
+            "GPU direct MEM1 accumulator must cover KeccakUnion MEM1 rows"
+        );
+        assert!(
+            witgen_gpu_mem0_extra_prewarm_requests() <= 1,
+            "default replacement should keep MEM0 prewarm narrowed to the selected extra minor"
+        );
+        assert_eq!(
+            witgen_gpu_replace_on_demand_kernel_compiles(),
+            keccak_union_on_demand_before,
+            "GPU-witgen replacement prewarm should cover KeccakUnion without on-demand replacement kernel compiles"
+        );
+        assert_eq!(
+            witgen_accum_shadow_replay_rows(),
+            keccak_union_shadow_replay_before,
+            "GPU-witgen replacement must not rerun CPU step_Top for KeccakUnion accum shadow repair"
+        );
+        assert_upload_bytes_bounded(
+            "multi_test/keccak_union_witgen_replace",
+            &keccak_union_diag_before,
+            &prover.diagnostics(),
+            "recursion_data",
+            100_000_000,
+        );
+        assert_upload_bytes_bounded(
+            "multi_test/keccak_union_witgen_replace",
+            &keccak_union_diag_before,
+            &prover.diagnostics(),
+            "accum",
+            100_000_000,
+        );
+        assert_witgen_accum_shadow_readbacks_coalesced(
+            "multi_test/keccak_union_witgen_replace",
+            &keccak_union_diag_before,
+            &prover.diagnostics(),
+            4,
+        );
+        set_witgen_gpu_replace_enabled(false);
+        set_accum_gpu_misc0_direct_enabled(false);
+        set_accum_gpu_misc1_direct_enabled(false);
+        set_accum_gpu_misc2_direct_enabled(false);
+        set_accum_gpu_mem0_direct_enabled(false);
+        set_accum_gpu_mem1_direct_enabled(false);
+        set_witgen_gpu_mem0_replace_candidate_enabled(false);
+        set_witgen_gpu_probe_enabled(false);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_preflight_meta_reuse_busy_loop_e2e_verify() {
+        use risc0_circuit_rv32im::prove::{
+            set_accum_gpu_mem0_direct_enabled, set_accum_gpu_mem1_direct_enabled,
+            set_accum_gpu_misc0_direct_enabled, set_accum_gpu_misc1_direct_enabled,
+            set_accum_gpu_misc2_direct_enabled, set_witgen_gpu_mem0_replace_candidate_enabled,
+            set_witgen_gpu_probe_enabled, set_witgen_gpu_replace_enabled,
+            set_witgen_gpu_replace_nonblocking_pending_enabled, witgen_gpu_short_circuit_cycles,
+        };
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        console_error_panic_hook::set_once();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(
+            "iter6d_g preflight_meta_reuse fixture=busy_loop",
+        );
+        set_witgen_gpu_probe_enabled(true);
+        set_witgen_gpu_replace_enabled(true);
+        set_witgen_gpu_mem0_replace_candidate_enabled(true);
+        set_accum_gpu_misc0_direct_enabled(true);
+        set_accum_gpu_misc1_direct_enabled(true);
+        set_accum_gpu_misc2_direct_enabled(true);
+        set_accum_gpu_mem0_direct_enabled(true);
+        set_accum_gpu_mem1_direct_enabled(true);
+
+        let prover = init_prover().await;
+        set_witgen_gpu_replace_nonblocking_pending_enabled(false);
+        assert_representative_webgpu_limits(prover.as_ref());
+        let short_before = witgen_gpu_short_circuit_cycles();
+        let diag_before = prover.diagnostics();
+        let env = ExecutorEnv::builder()
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let receipt = prove_succinct_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_preflight_meta_reuse",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        receipt
+            .verify(MULTI_TEST_ID)
+            .expect("preflight metadata reuse BusyLoop receipt verifies");
+        let diag_after = prover.diagnostics();
+        assert!(
+            witgen_gpu_short_circuit_cycles() > short_before,
+            "preflight metadata reuse gate must exercise GPU-witgen replacement"
+        );
+        assert_upload_bytes_bounded(
+            "multi_test/busy_loop_po2_18_preflight_meta_reuse",
+            &diag_before,
+            &diag_after,
+            "iter6d_g_arm_preflight",
+            5_000_000,
+        );
+        assert_upload_source_delta_absent(
+            "multi_test/busy_loop_po2_18_preflight_meta_reuse",
+            &diag_before,
+            &diag_after,
+            "iter6d_g_shadow_meta",
+        );
+
+        set_witgen_gpu_replace_nonblocking_pending_enabled(true);
+        set_witgen_gpu_replace_enabled(false);
+        set_accum_gpu_misc0_direct_enabled(false);
+        set_accum_gpu_misc1_direct_enabled(false);
+        set_accum_gpu_misc2_direct_enabled(false);
+        set_accum_gpu_mem0_direct_enabled(false);
+        set_accum_gpu_mem1_direct_enabled(false);
+        set_witgen_gpu_mem0_replace_candidate_enabled(false);
+        set_witgen_gpu_probe_enabled(false);
+    }
+
+    /// SP7do follow-up: MEM0 replacement is only viable if its accumulator
+    /// path avoids the broad shadow repair that made the correctness-clean
+    /// production candidate wall-negative.
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_mem0_direct_accum_candidate_e2e_verify() {
+        use risc0_circuit_rv32im::prove::{
+            accum_gpu_mem0_direct_rows, set_accum_gpu_mem0_direct_enabled,
+            set_witgen_gpu_mem0_replace_candidate_enabled, set_witgen_gpu_probe_enabled,
+            set_witgen_gpu_replace_enabled, witgen_gpu_replace_arm_mask,
+        };
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        console_error_panic_hook::set_once();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(
+            "iter6d_g replace=mem0_direct_accum_candidate fixture=busy_loop+keccak_union",
+        );
+        set_witgen_gpu_probe_enabled(true);
+        set_witgen_gpu_replace_enabled(true);
+        set_witgen_gpu_mem0_replace_candidate_enabled(true);
+        set_accum_gpu_mem0_direct_enabled(true);
+
+        let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+
+        let busy_loop_mem0_before = accum_gpu_mem0_direct_rows();
+        let busy_loop_diag_before = prover.diagnostics();
+        let env = ExecutorEnv::builder()
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let receipt = prove_succinct_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_mem0_direct_accum_candidate",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        receipt
+            .verify(MULTI_TEST_ID)
+            .expect("MEM0 direct-accum BusyLoop receipt verifies");
+        assert!(
+            (witgen_gpu_replace_arm_mask() & (1u16 << 5)) != 0,
+            "MEM0 candidate replacement must short-circuit BusyLoop MEM0 rows"
+        );
+        assert!(
+            accum_gpu_mem0_direct_rows() > busy_loop_mem0_before,
+            "MEM0 direct accumulator must cover BusyLoop GPU-owned MEM0 rows"
+        );
+        assert_witgen_accum_shadow_readback_bytes_bounded(
+            "multi_test/busy_loop_po2_18_mem0_direct_accum_candidate",
+            &busy_loop_diag_before,
+            &prover.diagnostics(),
+            2_000_000,
+        );
+
+        let keccak_union_proof_count = 1;
+        assert_keccak_union_representative_shape(keccak_union_proof_count);
+        let keccak_union_mem0_before = accum_gpu_mem0_direct_rows();
+        let keccak_union_diag_before = prover.diagnostics();
+        let keccak_union_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/keccak_union_mem0_direct_accum_candidate",
+            keccak_union_env_with_count(keccak_union_proof_count),
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert!(keccak_union_info.stats.segments >= 1);
+        assert!(
+            accum_gpu_mem0_direct_rows() > keccak_union_mem0_before,
+            "MEM0 direct accumulator must cover KeccakUnion GPU-owned MEM0 rows"
+        );
+        assert_witgen_accum_shadow_readback_bytes_bounded(
+            "multi_test/keccak_union_mem0_direct_accum_candidate",
+            &keccak_union_diag_before,
+            &prover.diagnostics(),
+            8_000_000,
+        );
+
+        set_accum_gpu_mem0_direct_enabled(false);
+        set_witgen_gpu_mem0_replace_candidate_enabled(false);
+        set_witgen_gpu_replace_enabled(false);
+        set_witgen_gpu_probe_enabled(false);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_mem0_direct_accum_candidate_xgboost_e2e_verify() {
+        use forust_ml::GradientBooster;
+        use risc0_circuit_rv32im::prove::{
+            accum_gpu_mem0_direct_rows, set_accum_gpu_mem0_direct_enabled,
+            set_witgen_gpu_mem0_replace_candidate_enabled, set_witgen_gpu_probe_enabled,
+            set_witgen_gpu_replace_enabled,
+        };
+        use xgboost_methods::{XGBOOST_ELF, XGBOOST_ID};
+
+        console_error_panic_hook::set_once();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(
+            "iter6d_g replace=mem0_direct_accum_candidate fixture=xgboost",
+        );
+        set_witgen_gpu_probe_enabled(true);
+        set_witgen_gpu_replace_enabled(true);
+        set_witgen_gpu_mem0_replace_candidate_enabled(true);
+        set_accum_gpu_mem0_direct_enabled(true);
+
+        let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+        let mem0_before = accum_gpu_mem0_direct_rows();
+        let diag_before = prover.diagnostics();
+
+        let model: GradientBooster =
+            serde_json::from_str(include_str!("../../xgboost/res/trained_model.json")).unwrap();
+        let model_bytes = rmp_serde::to_vec(&model).unwrap();
+        let data: Vec<f64> = vec![18511304.0, 117.0];
+        let env = ExecutorEnv::builder()
+            .write(&data)
+            .unwrap()
+            .write(&model_bytes)
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "xgboost_mem0_direct_accum_candidate",
+            env,
+            XGBOOST_ELF,
+            XGBOOST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert_eq!(
+            prove_info.receipt.journal.decode::<f64>().unwrap(),
+            30.528042544062632
+        );
+        assert!(
+            accum_gpu_mem0_direct_rows() > mem0_before,
+            "MEM0 direct accumulator must cover xgboost GPU-owned MEM0 rows"
+        );
+        assert_witgen_accum_shadow_readback_bytes_bounded(
+            "xgboost_mem0_direct_accum_candidate",
+            &diag_before,
+            &prover.diagnostics(),
+            1_000_000,
+        );
+
+        set_accum_gpu_mem0_direct_enabled(false);
+        set_witgen_gpu_mem0_replace_candidate_enabled(false);
+        set_witgen_gpu_replace_enabled(false);
+        set_witgen_gpu_probe_enabled(false);
+    }
+
+    /// SP7dq: constrain the MEM0 replacement candidate to LW rows first.
+    /// Prior evidence showed the all-minor candidate helped xgboost but hurt
+    /// BusyLoop+KeccakUnion; the immediate test is whether avoiding tiny
+    /// per-minor work keeps correctness while reducing that overhead.
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_mem0_lw_direct_accum_candidate_e2e_verify() {
+        use risc0_circuit_rv32im::prove::{
+            accum_gpu_mem0_direct_rows, set_accum_gpu_mem0_direct_enabled,
+            set_witgen_gpu_mem0_replace_candidate_enabled, set_witgen_gpu_mem0_replace_minor_mask,
+            set_witgen_gpu_probe_enabled, set_witgen_gpu_replace_enabled,
+            witgen_gpu_mem0_extra_prewarm_requests, witgen_gpu_mem0_replace_minor_mask,
+            witgen_gpu_replace_arm_mask,
+        };
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        console_error_panic_hook::set_once();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(
+            "iter6d_g replace=mem0_lw_direct_accum_candidate fixture=busy_loop+keccak_union",
+        );
+        set_witgen_gpu_probe_enabled(true);
+        set_witgen_gpu_replace_enabled(true);
+        set_witgen_gpu_mem0_replace_candidate_enabled(true);
+        set_witgen_gpu_mem0_replace_minor_mask(1u16 << 2);
+        set_accum_gpu_mem0_direct_enabled(true);
+        assert_eq!(
+            witgen_gpu_mem0_replace_minor_mask(),
+            1u16 << 2,
+            "MEM0 LW candidate must only select load-word rows"
+        );
+
+        let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+
+        let busy_loop_mem0_before = accum_gpu_mem0_direct_rows();
+        let busy_loop_diag_before = prover.diagnostics();
+        let env = ExecutorEnv::builder()
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let receipt = prove_succinct_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_mem0_lw_direct_accum_candidate",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        receipt
+            .verify(MULTI_TEST_ID)
+            .expect("MEM0 LW direct-accum BusyLoop receipt verifies");
+        let busy_loop_diagnostics = prover.diagnostics();
+        assert_eq!(
+            busy_loop_diagnostics.cpu_fallbacks, 0,
+            "MEM0 LW BusyLoop proof must not use CPU fallbacks"
+        );
+        assert_eq!(
+            busy_loop_diagnostics.cpu_only_ops, 0,
+            "MEM0 LW BusyLoop proof must not use CPU-only WebGPU HAL ops"
+        );
+        assert!(
+            (witgen_gpu_replace_arm_mask() & (1u16 << 5)) != 0,
+            "MEM0 LW candidate replacement must short-circuit BusyLoop MEM0 rows"
+        );
+        assert!(
+            accum_gpu_mem0_direct_rows() > busy_loop_mem0_before,
+            "MEM0 LW direct accumulator must cover BusyLoop GPU-owned MEM0 rows"
+        );
+        assert!(
+            witgen_gpu_mem0_extra_prewarm_requests() <= 1,
+            "MEM0 LW candidate should prewarm only the selected MEM0 extra minor"
+        );
+        assert_witgen_accum_shadow_readback_bytes_bounded(
+            "multi_test/busy_loop_po2_18_mem0_lw_direct_accum_candidate",
+            &busy_loop_diag_before,
+            &busy_loop_diagnostics,
+            2_000_000,
+        );
+
+        let keccak_union_proof_count = 1;
+        assert_keccak_union_representative_shape(keccak_union_proof_count);
+        let keccak_union_mem0_before = accum_gpu_mem0_direct_rows();
+        let keccak_union_diag_before = prover.diagnostics();
+        let keccak_union_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/keccak_union_mem0_lw_direct_accum_candidate",
+            keccak_union_env_with_count(keccak_union_proof_count),
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert!(keccak_union_info.stats.segments >= 1);
+        let keccak_union_diagnostics = prover.diagnostics();
+        assert_eq!(
+            keccak_union_diagnostics.cpu_fallbacks, 0,
+            "MEM0 LW KeccakUnion proof must not use CPU fallbacks"
+        );
+        assert_eq!(
+            keccak_union_diagnostics.cpu_only_ops, 0,
+            "MEM0 LW KeccakUnion proof must not use CPU-only WebGPU HAL ops"
+        );
+        assert!(
+            accum_gpu_mem0_direct_rows() > keccak_union_mem0_before,
+            "MEM0 LW direct accumulator must cover KeccakUnion GPU-owned MEM0 rows"
+        );
+        assert_witgen_accum_shadow_readback_bytes_bounded(
+            "multi_test/keccak_union_mem0_lw_direct_accum_candidate",
+            &keccak_union_diag_before,
+            &keccak_union_diagnostics,
+            8_000_000,
+        );
+
+        set_witgen_gpu_mem0_replace_minor_mask(0x001f);
+        set_accum_gpu_mem0_direct_enabled(false);
+        set_witgen_gpu_mem0_replace_candidate_enabled(false);
+        set_witgen_gpu_replace_enabled(false);
+        set_witgen_gpu_probe_enabled(false);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_mem0_lw_direct_accum_candidate_xgboost_e2e_verify() {
+        use forust_ml::GradientBooster;
+        use risc0_circuit_rv32im::prove::{
+            accum_gpu_mem0_direct_rows, set_accum_gpu_mem0_direct_enabled,
+            set_witgen_gpu_mem0_replace_candidate_enabled, set_witgen_gpu_mem0_replace_minor_mask,
+            set_witgen_gpu_probe_enabled, set_witgen_gpu_replace_enabled,
+            witgen_gpu_mem0_extra_prewarm_requests, witgen_gpu_mem0_replace_minor_mask,
+        };
+        use xgboost_methods::{XGBOOST_ELF, XGBOOST_ID};
+
+        console_error_panic_hook::set_once();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(
+            "iter6d_g replace=mem0_lw_direct_accum_candidate fixture=xgboost",
+        );
+        set_witgen_gpu_probe_enabled(true);
+        set_witgen_gpu_replace_enabled(true);
+        set_witgen_gpu_mem0_replace_candidate_enabled(true);
+        set_witgen_gpu_mem0_replace_minor_mask(1u16 << 2);
+        set_accum_gpu_mem0_direct_enabled(true);
+        assert_eq!(
+            witgen_gpu_mem0_replace_minor_mask(),
+            1u16 << 2,
+            "MEM0 LW candidate must only select load-word rows"
+        );
+
+        let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+        let mem0_before = accum_gpu_mem0_direct_rows();
+        let diag_before = prover.diagnostics();
+
+        let model: GradientBooster =
+            serde_json::from_str(include_str!("../../xgboost/res/trained_model.json")).unwrap();
+        let model_bytes = rmp_serde::to_vec(&model).unwrap();
+        let data: Vec<f64> = vec![18511304.0, 117.0];
+        let env = ExecutorEnv::builder()
+            .write(&data)
+            .unwrap()
+            .write(&model_bytes)
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "xgboost_mem0_lw_direct_accum_candidate",
+            env,
+            XGBOOST_ELF,
+            XGBOOST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert_eq!(
+            prove_info.receipt.journal.decode::<f64>().unwrap(),
+            30.528042544062632
+        );
+        let diagnostics = prover.diagnostics();
+        assert_eq!(
+            diagnostics.cpu_fallbacks, 0,
+            "MEM0 LW xgboost proof must not use CPU fallbacks"
+        );
+        assert_eq!(
+            diagnostics.cpu_only_ops, 0,
+            "MEM0 LW xgboost proof must not use CPU-only WebGPU HAL ops"
+        );
+        assert!(
+            accum_gpu_mem0_direct_rows() > mem0_before,
+            "MEM0 LW direct accumulator must cover xgboost GPU-owned MEM0 rows"
+        );
+        assert!(
+            witgen_gpu_mem0_extra_prewarm_requests() <= 1,
+            "MEM0 LW candidate should prewarm only the selected MEM0 extra minor"
+        );
+        assert_witgen_accum_shadow_readback_bytes_bounded(
+            "xgboost_mem0_lw_direct_accum_candidate",
+            &diag_before,
+            &diagnostics,
+            1_000_000,
+        );
+
+        set_witgen_gpu_mem0_replace_minor_mask(0x001f);
+        set_accum_gpu_mem0_direct_enabled(false);
+        set_witgen_gpu_mem0_replace_candidate_enabled(false);
+        set_witgen_gpu_replace_enabled(false);
+        set_witgen_gpu_probe_enabled(false);
+    }
+
+    /// SP7dr: candidate direct accumulator for MEM1/store rows. This should
+    /// remove another full major from CPU TopAccum without requiring GPU
+    /// witgen ownership of the MEM1 data rows.
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_mem1_direct_accum_candidate_e2e_verify() {
+        use risc0_circuit_rv32im::prove::{
+            accum_gpu_mem1_direct_rows, set_accum_gpu_mem1_direct_enabled,
+        };
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        console_error_panic_hook::set_once();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(
+            "iter6d_g replace=mem1_direct_accum_candidate fixture=busy_loop+keccak_union",
+        );
+        set_accum_gpu_mem1_direct_enabled(true);
+
+        let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+
+        let busy_loop_mem1_before = accum_gpu_mem1_direct_rows();
+        let busy_loop_diag_before = prover.diagnostics();
+        let env = ExecutorEnv::builder()
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let receipt = prove_succinct_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_mem1_direct_accum_candidate",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        receipt
+            .verify(MULTI_TEST_ID)
+            .expect("MEM1 direct-accum BusyLoop receipt verifies");
+        let busy_loop_diagnostics = prover.diagnostics();
+        assert_eq!(
+            busy_loop_diagnostics.cpu_fallbacks, 0,
+            "MEM1 BusyLoop proof must not use CPU fallbacks"
+        );
+        assert_eq!(
+            busy_loop_diagnostics.cpu_only_ops, 0,
+            "MEM1 BusyLoop proof must not use CPU-only WebGPU HAL ops"
+        );
+        assert!(
+            accum_gpu_mem1_direct_rows() > busy_loop_mem1_before,
+            "MEM1 direct accumulator must cover BusyLoop MEM1 rows"
+        );
+        assert_witgen_accum_shadow_readback_bytes_bounded(
+            "multi_test/busy_loop_po2_18_mem1_direct_accum_candidate",
+            &busy_loop_diag_before,
+            &busy_loop_diagnostics,
+            2_000_000,
+        );
+
+        let keccak_union_proof_count = 1;
+        assert_keccak_union_representative_shape(keccak_union_proof_count);
+        let keccak_union_mem1_before = accum_gpu_mem1_direct_rows();
+        let keccak_union_diag_before = prover.diagnostics();
+        let keccak_union_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/keccak_union_mem1_direct_accum_candidate",
+            keccak_union_env_with_count(keccak_union_proof_count),
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert!(keccak_union_info.stats.segments >= 1);
+        let keccak_union_diagnostics = prover.diagnostics();
+        assert_eq!(
+            keccak_union_diagnostics.cpu_fallbacks, 0,
+            "MEM1 KeccakUnion proof must not use CPU fallbacks"
+        );
+        assert_eq!(
+            keccak_union_diagnostics.cpu_only_ops, 0,
+            "MEM1 KeccakUnion proof must not use CPU-only WebGPU HAL ops"
+        );
+        assert!(
+            accum_gpu_mem1_direct_rows() > keccak_union_mem1_before,
+            "MEM1 direct accumulator must cover KeccakUnion MEM1 rows"
+        );
+        assert_witgen_accum_shadow_readback_bytes_bounded(
+            "multi_test/keccak_union_mem1_direct_accum_candidate",
+            &keccak_union_diag_before,
+            &keccak_union_diagnostics,
+            8_000_000,
+        );
+
+        set_accum_gpu_mem1_direct_enabled(false);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_mem1_direct_accum_candidate_xgboost_e2e_verify() {
+        use forust_ml::GradientBooster;
+        use risc0_circuit_rv32im::prove::{
+            accum_gpu_mem1_direct_rows, set_accum_gpu_mem1_direct_enabled,
+        };
+        use xgboost_methods::{XGBOOST_ELF, XGBOOST_ID};
+
+        console_error_panic_hook::set_once();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(
+            "iter6d_g replace=mem1_direct_accum_candidate fixture=xgboost",
+        );
+        set_accum_gpu_mem1_direct_enabled(true);
+
+        let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+        let mem1_before = accum_gpu_mem1_direct_rows();
+        let diag_before = prover.diagnostics();
+
+        let model: GradientBooster =
+            serde_json::from_str(include_str!("../../xgboost/res/trained_model.json")).unwrap();
+        let model_bytes = rmp_serde::to_vec(&model).unwrap();
+        let data: Vec<f64> = vec![18511304.0, 117.0];
+        let env = ExecutorEnv::builder()
+            .write(&data)
+            .unwrap()
+            .write(&model_bytes)
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "xgboost_mem1_direct_accum_candidate",
+            env,
+            XGBOOST_ELF,
+            XGBOOST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert_eq!(
+            prove_info.receipt.journal.decode::<f64>().unwrap(),
+            30.528042544062632
+        );
+        let diagnostics = prover.diagnostics();
+        assert_eq!(
+            diagnostics.cpu_fallbacks, 0,
+            "MEM1 xgboost proof must not use CPU fallbacks"
+        );
+        assert_eq!(
+            diagnostics.cpu_only_ops, 0,
+            "MEM1 xgboost proof must not use CPU-only WebGPU HAL ops"
+        );
+        assert!(
+            accum_gpu_mem1_direct_rows() > mem1_before,
+            "MEM1 direct accumulator must cover xgboost MEM1 rows"
+        );
+        assert_witgen_accum_shadow_readback_bytes_bounded(
+            "xgboost_mem1_direct_accum_candidate",
+            &diag_before,
+            &diagnostics,
+            1_000_000,
+        );
+
+        set_accum_gpu_mem1_direct_enabled(false);
+    }
+
+    /// SP7em: candidate direct accumulator for CONTROL0 rows. Generated
+    /// CONTROL0 TopAccum is rejected by inverse pressure, but this narrow path
+    /// keeps witness generation CPU-owned and only moves the lookup accumulator
+    /// prefixes for major 7 to WebGPU.
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_control0_direct_accum_candidate_e2e_verify() {
+        use risc0_circuit_rv32im::prove::{
+            accum_gpu_control0_direct_rows, set_accum_gpu_control0_direct_enabled,
+        };
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        console_error_panic_hook::set_once();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(
+            "iter6d_g replace=control0_direct_accum_candidate fixture=busy_loop+keccak_union",
+        );
+        set_accum_gpu_control0_direct_enabled(true);
+
+        let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+
+        let busy_loop_control0_before = accum_gpu_control0_direct_rows();
+        let busy_loop_diag_before = prover.diagnostics();
+        let env = ExecutorEnv::builder()
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let receipt = prove_succinct_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_control0_direct_accum_candidate",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        receipt
+            .verify(MULTI_TEST_ID)
+            .expect("CONTROL0 direct-accum BusyLoop receipt verifies");
+        let busy_loop_diagnostics = prover.diagnostics();
+        assert_eq!(
+            busy_loop_diagnostics.cpu_fallbacks, 0,
+            "CONTROL0 BusyLoop proof must not use CPU fallbacks"
+        );
+        assert_eq!(
+            busy_loop_diagnostics.cpu_only_ops, 0,
+            "CONTROL0 BusyLoop proof must not use CPU-only WebGPU HAL ops"
+        );
+        assert!(
+            accum_gpu_control0_direct_rows() > busy_loop_control0_before,
+            "CONTROL0 direct accumulator must cover BusyLoop CONTROL0 rows"
+        );
+        assert_witgen_accum_shadow_readback_bytes_bounded(
+            "multi_test/busy_loop_po2_18_control0_direct_accum_candidate",
+            &busy_loop_diag_before,
+            &busy_loop_diagnostics,
+            2_000_000,
+        );
+
+        let keccak_union_proof_count = 1;
+        assert_keccak_union_representative_shape(keccak_union_proof_count);
+        let keccak_union_control0_before = accum_gpu_control0_direct_rows();
+        let keccak_union_diag_before = prover.diagnostics();
+        let keccak_union_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/keccak_union_control0_direct_accum_candidate",
+            keccak_union_env_with_count(keccak_union_proof_count),
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert!(keccak_union_info.stats.segments >= 1);
+        let keccak_union_diagnostics = prover.diagnostics();
+        assert_eq!(
+            keccak_union_diagnostics.cpu_fallbacks, 0,
+            "CONTROL0 KeccakUnion proof must not use CPU fallbacks"
+        );
+        assert_eq!(
+            keccak_union_diagnostics.cpu_only_ops, 0,
+            "CONTROL0 KeccakUnion proof must not use CPU-only WebGPU HAL ops"
+        );
+        assert!(
+            accum_gpu_control0_direct_rows() > keccak_union_control0_before,
+            "CONTROL0 direct accumulator must cover KeccakUnion CONTROL0 rows"
+        );
+        assert_witgen_accum_shadow_readback_bytes_bounded(
+            "multi_test/keccak_union_control0_direct_accum_candidate",
+            &keccak_union_diag_before,
+            &keccak_union_diagnostics,
+            8_000_000,
+        );
+
+        set_accum_gpu_control0_direct_enabled(false);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_control0_direct_accum_candidate_xgboost_e2e_verify() {
+        use forust_ml::GradientBooster;
+        use risc0_circuit_rv32im::prove::{
+            accum_gpu_control0_direct_rows, set_accum_gpu_control0_direct_enabled,
+        };
+        use xgboost_methods::{XGBOOST_ELF, XGBOOST_ID};
+
+        console_error_panic_hook::set_once();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(
+            "iter6d_g replace=control0_direct_accum_candidate fixture=xgboost",
+        );
+        set_accum_gpu_control0_direct_enabled(true);
+
+        let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+        let control0_before = accum_gpu_control0_direct_rows();
+        let diag_before = prover.diagnostics();
+
+        let model: GradientBooster =
+            serde_json::from_str(include_str!("../../xgboost/res/trained_model.json")).unwrap();
+        let model_bytes = rmp_serde::to_vec(&model).unwrap();
+        let data: Vec<f64> = vec![18511304.0, 117.0];
+        let env = ExecutorEnv::builder()
+            .write(&data)
+            .unwrap()
+            .write(&model_bytes)
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "xgboost_control0_direct_accum_candidate",
+            env,
+            XGBOOST_ELF,
+            XGBOOST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert_eq!(
+            prove_info.receipt.journal.decode::<f64>().unwrap(),
+            30.528042544062632
+        );
+        let diagnostics = prover.diagnostics();
+        assert_eq!(
+            diagnostics.cpu_fallbacks, 0,
+            "CONTROL0 xgboost proof must not use CPU fallbacks"
+        );
+        assert_eq!(
+            diagnostics.cpu_only_ops, 0,
+            "CONTROL0 xgboost proof must not use CPU-only WebGPU HAL ops"
+        );
+        assert!(
+            accum_gpu_control0_direct_rows() > control0_before,
+            "CONTROL0 direct accumulator must cover xgboost CONTROL0 rows"
+        );
+        assert_witgen_accum_shadow_readback_bytes_bounded(
+            "xgboost_control0_direct_accum_candidate",
+            &diag_before,
+            &diagnostics,
+            1_000_000,
+        );
+
+        set_accum_gpu_control0_direct_enabled(false);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_mem1_witgen_replace_candidate_e2e_verify() {
+        use risc0_circuit_rv32im::prove::{
+            accum_gpu_mem1_direct_rows, set_accum_gpu_mem1_direct_enabled,
+            set_witgen_gpu_mem1_replace_candidate_enabled, set_witgen_gpu_mem1_replace_minor_mask,
+            set_witgen_gpu_probe_enabled, set_witgen_gpu_replace_enabled,
+            set_witgen_gpu_replace_nonblocking_pending_enabled,
+            witgen_gpu_mem1_extra_prewarm_requests, witgen_gpu_replace_arm_mask,
+            witgen_gpu_replace_on_demand_kernel_compiles, witgen_gpu_short_circuit_cycles,
+        };
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        console_error_panic_hook::set_once();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(
+            "iter6d_g replace=mem1_witgen_candidate fixture=busy_loop+keccak_union",
+        );
+        set_witgen_gpu_probe_enabled(true);
+        set_witgen_gpu_replace_enabled(true);
+        set_witgen_gpu_replace_nonblocking_pending_enabled(false);
+        set_accum_gpu_mem1_direct_enabled(true);
+        set_witgen_gpu_mem1_replace_minor_mask(0x0007);
+        set_witgen_gpu_mem1_replace_candidate_enabled(true);
+
+        let prover = init_prover().await;
+        set_witgen_gpu_replace_nonblocking_pending_enabled(false);
+        assert_representative_webgpu_limits(prover.as_ref());
+
+        let busy_loop_short_before = witgen_gpu_short_circuit_cycles();
+        let busy_loop_mem1_before = accum_gpu_mem1_direct_rows();
+        let busy_loop_on_demand_before = witgen_gpu_replace_on_demand_kernel_compiles();
+        let env = ExecutorEnv::builder()
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let receipt = prove_succinct_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_mem1_witgen_candidate",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        receipt
+            .verify(MULTI_TEST_ID)
+            .expect("MEM1 witgen candidate BusyLoop receipt verifies");
+        let diagnostics = prover.diagnostics();
+        assert_eq!(
+            diagnostics.cpu_fallbacks, 0,
+            "MEM1 BusyLoop witgen candidate proof must not use CPU fallbacks"
+        );
+        assert_eq!(
+            diagnostics.cpu_only_ops, 0,
+            "MEM1 BusyLoop witgen candidate proof must not use CPU-only WebGPU HAL ops"
+        );
+        assert!(
+            witgen_gpu_short_circuit_cycles() > busy_loop_short_before,
+            "MEM1 witgen candidate must short-circuit BusyLoop store rows"
+        );
+        assert!(
+            (witgen_gpu_replace_arm_mask() & (1u16 << 6)) != 0,
+            "MEM1 witgen candidate should mark arm 6 ready"
+        );
+        assert!(
+            accum_gpu_mem1_direct_rows() > busy_loop_mem1_before,
+            "MEM1 direct accumulator must cover BusyLoop candidate rows"
+        );
+        assert!(
+            witgen_gpu_mem1_extra_prewarm_requests() <= 1,
+            "MEM1 candidate should prewarm only the selected SW extra minor"
+        );
+        assert_eq!(
+            witgen_gpu_replace_on_demand_kernel_compiles(),
+            busy_loop_on_demand_before,
+            "MEM1 candidate prewarm should avoid on-demand replacement compiles"
+        );
+
+        let keccak_union_short_before = witgen_gpu_short_circuit_cycles();
+        let keccak_union_mem1_before = accum_gpu_mem1_direct_rows();
+        let keccak_union_on_demand_before = witgen_gpu_replace_on_demand_kernel_compiles();
+        let keccak_union_proof_count = 1;
+        assert_keccak_union_representative_shape(keccak_union_proof_count);
+        let keccak_union_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/keccak_union_mem1_witgen_candidate",
+            keccak_union_env_with_count(keccak_union_proof_count),
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert!(keccak_union_info.stats.segments >= 1);
+        let diagnostics = prover.diagnostics();
+        assert_eq!(
+            diagnostics.cpu_fallbacks, 0,
+            "MEM1 KeccakUnion witgen candidate proof must not use CPU fallbacks"
+        );
+        assert_eq!(
+            diagnostics.cpu_only_ops, 0,
+            "MEM1 KeccakUnion witgen candidate proof must not use CPU-only WebGPU HAL ops"
+        );
+        assert!(
+            witgen_gpu_short_circuit_cycles() > keccak_union_short_before,
+            "MEM1 witgen candidate must short-circuit KeccakUnion store rows"
+        );
+        assert!(
+            accum_gpu_mem1_direct_rows() > keccak_union_mem1_before,
+            "MEM1 direct accumulator must cover KeccakUnion candidate rows"
+        );
+        assert_eq!(
+            witgen_gpu_replace_on_demand_kernel_compiles(),
+            keccak_union_on_demand_before,
+            "MEM1 candidate prewarm should cover KeccakUnion without on-demand replacement compiles"
+        );
+
+        set_witgen_gpu_mem1_replace_minor_mask(0x0007);
+        set_witgen_gpu_mem1_replace_candidate_enabled(false);
+        set_accum_gpu_mem1_direct_enabled(false);
+        set_witgen_gpu_replace_enabled(false);
+        set_witgen_gpu_probe_enabled(false);
+        set_witgen_gpu_replace_nonblocking_pending_enabled(false);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_mem1_witgen_replace_candidate_xgboost_e2e_verify() {
+        use forust_ml::GradientBooster;
+        use risc0_circuit_rv32im::prove::{
+            accum_gpu_mem1_direct_rows, set_accum_gpu_mem1_direct_enabled,
+            set_witgen_gpu_mem1_replace_candidate_enabled, set_witgen_gpu_mem1_replace_minor_mask,
+            set_witgen_gpu_probe_enabled, set_witgen_gpu_replace_enabled,
+            set_witgen_gpu_replace_nonblocking_pending_enabled,
+            witgen_gpu_mem1_extra_prewarm_requests, witgen_gpu_replace_arm_mask,
+            witgen_gpu_replace_on_demand_kernel_compiles, witgen_gpu_short_circuit_cycles,
+        };
+        use xgboost_methods::{XGBOOST_ELF, XGBOOST_ID};
+
+        console_error_panic_hook::set_once();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(
+            "iter6d_g replace=mem1_witgen_candidate fixture=xgboost",
+        );
+        set_witgen_gpu_probe_enabled(true);
+        set_witgen_gpu_replace_enabled(true);
+        set_witgen_gpu_replace_nonblocking_pending_enabled(false);
+        set_accum_gpu_mem1_direct_enabled(true);
+        set_witgen_gpu_mem1_replace_minor_mask(0x0007);
+        set_witgen_gpu_mem1_replace_candidate_enabled(true);
+
+        let prover = init_prover().await;
+        set_witgen_gpu_replace_nonblocking_pending_enabled(false);
+        assert_representative_webgpu_limits(prover.as_ref());
+        let short_before = witgen_gpu_short_circuit_cycles();
+        let mem1_before = accum_gpu_mem1_direct_rows();
+        let on_demand_before = witgen_gpu_replace_on_demand_kernel_compiles();
+
+        let model: GradientBooster =
+            serde_json::from_str(include_str!("../../xgboost/res/trained_model.json")).unwrap();
+        let model_bytes = rmp_serde::to_vec(&model).unwrap();
+        let data: Vec<f64> = vec![18511304.0, 117.0];
+        let env = ExecutorEnv::builder()
+            .write(&data)
+            .unwrap()
+            .write(&model_bytes)
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "xgboost_mem1_witgen_candidate",
+            env,
+            XGBOOST_ELF,
+            XGBOOST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert_eq!(
+            prove_info.receipt.journal.decode::<f64>().unwrap(),
+            30.528042544062632
+        );
+        let diagnostics = prover.diagnostics();
+        assert_eq!(
+            diagnostics.cpu_fallbacks, 0,
+            "MEM1 xgboost witgen candidate proof must not use CPU fallbacks"
+        );
+        assert_eq!(
+            diagnostics.cpu_only_ops, 0,
+            "MEM1 xgboost witgen candidate proof must not use CPU-only WebGPU HAL ops"
+        );
+        assert!(
+            witgen_gpu_short_circuit_cycles() > short_before,
+            "MEM1 witgen candidate must short-circuit xgboost store rows"
+        );
+        assert!(
+            (witgen_gpu_replace_arm_mask() & (1u16 << 6)) != 0,
+            "MEM1 witgen candidate should mark arm 6 ready for xgboost"
+        );
+        assert!(
+            accum_gpu_mem1_direct_rows() > mem1_before,
+            "MEM1 direct accumulator must cover xgboost candidate rows"
+        );
+        assert!(
+            witgen_gpu_mem1_extra_prewarm_requests() <= 1,
+            "MEM1 candidate should prewarm only the selected SW extra minor for xgboost"
+        );
+        assert_eq!(
+            witgen_gpu_replace_on_demand_kernel_compiles(),
+            on_demand_before,
+            "MEM1 candidate prewarm should avoid xgboost on-demand replacement compiles"
+        );
+
+        set_witgen_gpu_mem1_replace_minor_mask(0x0007);
+        set_witgen_gpu_mem1_replace_candidate_enabled(false);
+        set_accum_gpu_mem1_direct_enabled(false);
+        set_witgen_gpu_replace_enabled(false);
+        set_witgen_gpu_probe_enabled(false);
+        set_witgen_gpu_replace_nonblocking_pending_enabled(false);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_mem1_witgen_replace_nonblocking_candidate_e2e_verify() {
+        use risc0_circuit_rv32im::prove::{
+            accum_gpu_mem1_direct_rows, set_accum_gpu_mem1_direct_enabled,
+            set_witgen_gpu_mem1_replace_candidate_enabled, set_witgen_gpu_mem1_replace_minor_mask,
+            set_witgen_gpu_probe_enabled, set_witgen_gpu_replace_enabled,
+            set_witgen_gpu_replace_nonblocking_pending_enabled,
+            witgen_gpu_mem1_extra_prewarm_requests, witgen_gpu_replace_arm_mask,
+            witgen_gpu_replace_nonblocking_pending_skips,
+            witgen_gpu_replace_on_demand_kernel_compiles, witgen_gpu_short_circuit_cycles,
+        };
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        console_error_panic_hook::set_once();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(
+            "iter6d_g replace=mem1_witgen_nonblocking_candidate fixture=busy_loop+keccak_union",
+        );
+        set_witgen_gpu_probe_enabled(true);
+        set_witgen_gpu_replace_enabled(true);
+        set_witgen_gpu_replace_nonblocking_pending_enabled(true);
+        set_accum_gpu_mem1_direct_enabled(true);
+        set_witgen_gpu_mem1_replace_minor_mask(0x0007);
+        set_witgen_gpu_mem1_replace_candidate_enabled(true);
+
+        let prover = init_prover().await;
+        set_witgen_gpu_replace_nonblocking_pending_enabled(true);
+        assert_representative_webgpu_limits(prover.as_ref());
+
+        let busy_loop_mem1_before = accum_gpu_mem1_direct_rows();
+        let skip_before = witgen_gpu_replace_nonblocking_pending_skips();
+        let busy_loop_on_demand_before = witgen_gpu_replace_on_demand_kernel_compiles();
+        let env = ExecutorEnv::builder()
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let receipt = prove_succinct_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_mem1_witgen_nonblocking_candidate",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        receipt
+            .verify(MULTI_TEST_ID)
+            .expect("MEM1 nonblocking BusyLoop receipt verifies");
+        let busy_loop_diagnostics = prover.diagnostics();
+        assert_eq!(
+            busy_loop_diagnostics.cpu_fallbacks, 0,
+            "MEM1 nonblocking BusyLoop proof must not use CPU fallbacks"
+        );
+        assert_eq!(
+            busy_loop_diagnostics.cpu_only_ops, 0,
+            "MEM1 nonblocking BusyLoop proof must not use CPU-only WebGPU HAL ops"
+        );
+        assert!(
+            witgen_gpu_replace_nonblocking_pending_skips() > skip_before,
+            "MEM1 nonblocking BusyLoop should skip the cold pending replacement segment"
+        );
+        assert!(
+            accum_gpu_mem1_direct_rows() > busy_loop_mem1_before,
+            "MEM1 direct accumulator must cover BusyLoop nonblocking candidate rows"
+        );
+        assert!(
+            witgen_gpu_mem1_extra_prewarm_requests() <= 1,
+            "MEM1 nonblocking candidate should prewarm only the selected SW extra minor"
+        );
+        assert_eq!(
+            witgen_gpu_replace_on_demand_kernel_compiles(),
+            busy_loop_on_demand_before,
+            "MEM1 nonblocking candidate prewarm should avoid BusyLoop on-demand replacement compiles"
+        );
+
+        let keccak_union_short_before = witgen_gpu_short_circuit_cycles();
+        let keccak_union_mem1_before = accum_gpu_mem1_direct_rows();
+        let keccak_union_on_demand_before = witgen_gpu_replace_on_demand_kernel_compiles();
+        let keccak_union_proof_count = 1;
+        assert_keccak_union_representative_shape(keccak_union_proof_count);
+        let keccak_union_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/keccak_union_mem1_witgen_nonblocking_candidate",
+            keccak_union_env_with_count(keccak_union_proof_count),
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert!(keccak_union_info.stats.segments >= 1);
+        let keccak_union_diagnostics = prover.diagnostics();
+        assert_eq!(
+            keccak_union_diagnostics.cpu_fallbacks, 0,
+            "MEM1 nonblocking KeccakUnion proof must not use CPU fallbacks"
+        );
+        assert_eq!(
+            keccak_union_diagnostics.cpu_only_ops, 0,
+            "MEM1 nonblocking KeccakUnion proof must not use CPU-only WebGPU HAL ops"
+        );
+        assert!(
+            witgen_gpu_short_circuit_cycles() > keccak_union_short_before,
+            "MEM1 nonblocking candidate must use GPU-witgen replacement after prewarm"
+        );
+        assert!(
+            (witgen_gpu_replace_arm_mask() & (1u16 << 6)) != 0,
+            "MEM1 nonblocking candidate should mark arm 6 ready for KeccakUnion"
+        );
+        assert!(
+            accum_gpu_mem1_direct_rows() > keccak_union_mem1_before,
+            "MEM1 direct accumulator must cover KeccakUnion nonblocking candidate rows"
+        );
+        assert_eq!(
+            witgen_gpu_replace_on_demand_kernel_compiles(),
+            keccak_union_on_demand_before,
+            "MEM1 nonblocking candidate prewarm should cover KeccakUnion without on-demand replacement compiles"
+        );
+
+        set_witgen_gpu_mem1_replace_minor_mask(0x0007);
+        set_witgen_gpu_mem1_replace_candidate_enabled(false);
+        set_accum_gpu_mem1_direct_enabled(false);
+        set_witgen_gpu_replace_enabled(false);
+        set_witgen_gpu_probe_enabled(false);
+        set_witgen_gpu_replace_nonblocking_pending_enabled(false);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_mem1_witgen_replace_nonblocking_candidate_xgboost_e2e_verify() {
+        use forust_ml::GradientBooster;
+        use risc0_circuit_rv32im::prove::{
+            accum_gpu_mem1_direct_rows, set_accum_gpu_mem1_direct_enabled,
+            set_witgen_gpu_mem1_replace_candidate_enabled, set_witgen_gpu_mem1_replace_minor_mask,
+            set_witgen_gpu_probe_enabled, set_witgen_gpu_replace_enabled,
+            set_witgen_gpu_replace_nonblocking_pending_enabled,
+            witgen_gpu_mem1_extra_prewarm_requests, witgen_gpu_replace_arm_mask,
+            witgen_gpu_replace_nonblocking_pending_skips,
+            witgen_gpu_replace_on_demand_kernel_compiles, witgen_gpu_short_circuit_cycles,
+        };
+        use xgboost_methods::{XGBOOST_ELF, XGBOOST_ID};
+
+        console_error_panic_hook::set_once();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(
+            "iter6d_g replace=mem1_witgen_nonblocking_candidate fixture=xgboost",
+        );
+        set_witgen_gpu_probe_enabled(true);
+        set_witgen_gpu_replace_enabled(true);
+        set_witgen_gpu_replace_nonblocking_pending_enabled(true);
+        set_accum_gpu_mem1_direct_enabled(true);
+        set_witgen_gpu_mem1_replace_minor_mask(0x0007);
+        set_witgen_gpu_mem1_replace_candidate_enabled(true);
+
+        let prover = init_prover().await;
+        set_witgen_gpu_replace_nonblocking_pending_enabled(true);
+        assert_representative_webgpu_limits(prover.as_ref());
+        let short_before = witgen_gpu_short_circuit_cycles();
+        let mem1_before = accum_gpu_mem1_direct_rows();
+        let skip_before = witgen_gpu_replace_nonblocking_pending_skips();
+        let on_demand_before = witgen_gpu_replace_on_demand_kernel_compiles();
+
+        let model: GradientBooster =
+            serde_json::from_str(include_str!("../../xgboost/res/trained_model.json")).unwrap();
+        let model_bytes = rmp_serde::to_vec(&model).unwrap();
+        let data: Vec<f64> = vec![18511304.0, 117.0];
+        let env = ExecutorEnv::builder()
+            .write(&data)
+            .unwrap()
+            .write(&model_bytes)
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "xgboost_mem1_witgen_nonblocking_candidate",
+            env,
+            XGBOOST_ELF,
+            XGBOOST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert_eq!(
+            prove_info.receipt.journal.decode::<f64>().unwrap(),
+            30.528042544062632
+        );
+        let diagnostics = prover.diagnostics();
+        assert_eq!(
+            diagnostics.cpu_fallbacks, 0,
+            "MEM1 nonblocking xgboost candidate proof must not use CPU fallbacks"
+        );
+        assert_eq!(
+            diagnostics.cpu_only_ops, 0,
+            "MEM1 nonblocking xgboost candidate proof must not use CPU-only WebGPU HAL ops"
+        );
+        assert!(
+            witgen_gpu_replace_nonblocking_pending_skips() > skip_before,
+            "MEM1 nonblocking candidate should skip the cold pending replacement segment"
+        );
+        assert!(
+            witgen_gpu_short_circuit_cycles() > short_before,
+            "MEM1 nonblocking candidate must use GPU-witgen replacement after prewarm"
+        );
+        assert!(
+            (witgen_gpu_replace_arm_mask() & (1u16 << 6)) != 0,
+            "MEM1 nonblocking candidate should mark arm 6 ready for xgboost"
+        );
+        assert!(
+            accum_gpu_mem1_direct_rows() > mem1_before,
+            "MEM1 direct accumulator must cover xgboost nonblocking candidate rows"
+        );
+        assert!(
+            witgen_gpu_mem1_extra_prewarm_requests() <= 1,
+            "MEM1 nonblocking candidate should prewarm only the selected SW extra minor for xgboost"
+        );
+        assert_eq!(
+            witgen_gpu_replace_on_demand_kernel_compiles(),
+            on_demand_before,
+            "MEM1 nonblocking candidate prewarm should avoid xgboost on-demand replacement compiles"
+        );
+
+        set_witgen_gpu_mem1_replace_minor_mask(0x0007);
+        set_witgen_gpu_mem1_replace_candidate_enabled(false);
+        set_accum_gpu_mem1_direct_enabled(false);
+        set_witgen_gpu_replace_enabled(false);
+        set_witgen_gpu_probe_enabled(false);
+        set_witgen_gpu_replace_nonblocking_pending_enabled(false);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_nonblocking_witgen_prewarm_candidate_xgboost_e2e_verify() {
+        use forust_ml::GradientBooster;
+        use risc0_circuit_rv32im::prove::{
+            set_witgen_gpu_replace_nonblocking_pending_enabled,
+            witgen_gpu_replace_nonblocking_pending_skips, witgen_gpu_short_circuit_cycles,
+        };
+        use xgboost_methods::{XGBOOST_ELF, XGBOOST_ID};
+
+        console_error_panic_hook::set_once();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(
+            "iter6d_g replace=nonblocking_prewarm_candidate fixture=xgboost",
+        );
+        set_witgen_gpu_replace_nonblocking_pending_enabled(true);
+
+        let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+        let skip_before = witgen_gpu_replace_nonblocking_pending_skips();
+        let short_before = witgen_gpu_short_circuit_cycles();
+
+        let model: GradientBooster =
+            serde_json::from_str(include_str!("../../xgboost/res/trained_model.json")).unwrap();
+        let model_bytes = rmp_serde::to_vec(&model).unwrap();
+        let data: Vec<f64> = vec![18511304.0, 117.0];
+        let env = ExecutorEnv::builder()
+            .write(&data)
+            .unwrap()
+            .write(&model_bytes)
+            .unwrap()
+            .build()
+            .unwrap();
+        let prove_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "xgboost_nonblocking_witgen_prewarm_candidate",
+            env,
+            XGBOOST_ELF,
+            XGBOOST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert_eq!(
+            prove_info.receipt.journal.decode::<f64>().unwrap(),
+            30.528042544062632
+        );
+        let diagnostics = prover.diagnostics();
+        assert_eq!(
+            diagnostics.cpu_fallbacks, 0,
+            "nonblocking xgboost proof must not use CPU fallbacks"
+        );
+        assert_eq!(
+            diagnostics.cpu_only_ops, 0,
+            "nonblocking xgboost proof must not use CPU-only WebGPU HAL ops"
+        );
+        assert!(
+            witgen_gpu_replace_nonblocking_pending_skips() > skip_before,
+            "candidate should skip at least one segment instead of blocking on pending replacement kernels"
+        );
+        assert!(
+            witgen_gpu_short_circuit_cycles() > short_before,
+            "candidate should still use GPU-witgen replacement after prewarm catches up"
+        );
+
+        set_witgen_gpu_replace_nonblocking_pending_enabled(false);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_nonblocking_witgen_prewarm_candidate_e2e_verify() {
+        use risc0_circuit_rv32im::prove::{
+            set_witgen_gpu_replace_nonblocking_pending_enabled,
+            witgen_gpu_replace_nonblocking_pending_skips, witgen_gpu_short_circuit_cycles,
+        };
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        console_error_panic_hook::set_once();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(
+            "iter6d_g replace=nonblocking_prewarm_candidate fixture=busy_loop+keccak_union",
+        );
+        set_witgen_gpu_replace_nonblocking_pending_enabled(true);
+
+        let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+        let skip_before = witgen_gpu_replace_nonblocking_pending_skips();
+        let busy_loop_diag_before = prover.diagnostics();
+        let env = ExecutorEnv::builder()
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let receipt = prove_succinct_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_nonblocking_witgen_prewarm_candidate",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        receipt
+            .verify(MULTI_TEST_ID)
+            .expect("nonblocking BusyLoop receipt verifies");
+        let busy_loop_diagnostics = prover.diagnostics();
+        assert_eq!(
+            busy_loop_diagnostics.cpu_fallbacks, 0,
+            "nonblocking BusyLoop proof must not use CPU fallbacks"
+        );
+        assert_eq!(
+            busy_loop_diagnostics.cpu_only_ops, 0,
+            "nonblocking BusyLoop proof must not use CPU-only WebGPU HAL ops"
+        );
+        assert!(
+            witgen_gpu_replace_nonblocking_pending_skips() > skip_before,
+            "nonblocking BusyLoop should skip the cold replacement wait"
+        );
+        assert_witgen_accum_shadow_readback_bytes_bounded(
+            "multi_test/busy_loop_po2_18_nonblocking_witgen_prewarm_candidate",
+            &busy_loop_diag_before,
+            &busy_loop_diagnostics,
+            2_000_000,
+        );
+
+        let keccak_union_proof_count = 1;
+        assert_keccak_union_representative_shape(keccak_union_proof_count);
+        let keccak_union_short_before = witgen_gpu_short_circuit_cycles();
+        let keccak_union_diag_before = prover.diagnostics();
+        let keccak_union_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/keccak_union_nonblocking_witgen_prewarm_candidate",
+            keccak_union_env_with_count(keccak_union_proof_count),
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert!(keccak_union_info.stats.segments >= 1);
+        let keccak_union_diagnostics = prover.diagnostics();
+        assert_eq!(
+            keccak_union_diagnostics.cpu_fallbacks, 0,
+            "nonblocking KeccakUnion proof must not use CPU fallbacks"
+        );
+        assert_eq!(
+            keccak_union_diagnostics.cpu_only_ops, 0,
+            "nonblocking KeccakUnion proof must not use CPU-only WebGPU HAL ops"
+        );
+        assert!(
+            witgen_gpu_short_circuit_cycles() > keccak_union_short_before,
+            "KeccakUnion should still use GPU-witgen replacement after prewarm catches up"
+        );
+        assert_witgen_accum_shadow_readback_bytes_bounded(
+            "multi_test/keccak_union_nonblocking_witgen_prewarm_candidate",
+            &keccak_union_diag_before,
+            &keccak_union_diagnostics,
+            8_000_000,
+        );
+
+        set_witgen_gpu_replace_nonblocking_pending_enabled(false);
+    }
+
     #[wasm_bindgen_test(async)]
     async fn iter6d_g_replace_xgboost() {
         use forust_ml::GradientBooster;
         use risc0_circuit_rv32im::prove::{
-            set_witgen_gpu_probe_enabled, set_witgen_gpu_replace_enabled,
+            accum_gpu_misc0_direct_rows, accum_gpu_misc1_direct_rows, accum_gpu_misc2_direct_rows,
+            set_accum_gpu_misc0_direct_enabled, set_accum_gpu_misc1_direct_enabled,
+            set_accum_gpu_misc2_direct_enabled, set_witgen_gpu_probe_enabled,
+            set_witgen_gpu_replace_enabled, witgen_accum_shadow_replay_rows,
+            witgen_gpu_replace_on_demand_kernel_compiles, witgen_gpu_short_circuit_cycles,
         };
         use xgboost_methods::{XGBOOST_ELF, XGBOOST_ID};
 
@@ -3452,11 +7910,21 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         risc0_zkp::hal::webgpu::log_webgpu_metric("iter6d_g replace=on fixture=xgboost");
         set_witgen_gpu_probe_enabled(true);
         set_witgen_gpu_replace_enabled(true);
+        set_accum_gpu_misc0_direct_enabled(true);
+        set_accum_gpu_misc1_direct_enabled(true);
+        set_accum_gpu_misc2_direct_enabled(true);
 
         let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+        let short_before = witgen_gpu_short_circuit_cycles();
+        let direct_accum_before = accum_gpu_misc0_direct_rows();
+        let misc1_direct_accum_before = accum_gpu_misc1_direct_rows();
+        let misc2_direct_accum_before = accum_gpu_misc2_direct_rows();
+        let on_demand_before = witgen_gpu_replace_on_demand_kernel_compiles();
+        let shadow_replay_before = witgen_accum_shadow_replay_rows();
+        let diag_before = prover.diagnostics();
         let model: GradientBooster =
-            serde_json::from_str(include_str!("../../xgboost/res/trained_model.json"))
-                .unwrap();
+            serde_json::from_str(include_str!("../../xgboost/res/trained_model.json")).unwrap();
         let model_bytes = rmp_serde::to_vec(&model).unwrap();
         let data: Vec<f64> = vec![18511304.0, 117.0];
         let env = ExecutorEnv::builder()
@@ -3469,7 +7937,84 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let receipt =
             prove_succinct_async(prover.as_ref(), "xgboost", env, XGBOOST_ELF, XGBOOST_ID).await;
         assert_eq!(receipt.journal.decode::<f64>().unwrap(), 30.528042544062632);
+        assert_no_witgen_data_readback("xgboost_witgen_replace", &prover.diagnostics());
+        assert_witgen_seed_upload_elided(
+            "xgboost_witgen_replace",
+            &diag_before,
+            &prover.diagnostics(),
+            6_500_000_000,
+        );
+        assert_witgen_seed_scatter_elided(
+            "xgboost_witgen_replace",
+            &diag_before,
+            &prover.diagnostics(),
+        );
+        assert_witgen_data_shadow_readback_elided(
+            "xgboost_witgen_replace",
+            &diag_before,
+            &prover.diagnostics(),
+        );
+        assert_witgen_replacement_pipeline_scope(
+            "xgboost_witgen_replace",
+            &prover.diagnostics(),
+            52,
+        );
+        assert!(
+            witgen_gpu_short_circuit_cycles() > short_before,
+            "GPU-witgen replacement must short-circuit xgboost CPU cycles"
+        );
+        assert!(
+            accum_gpu_misc0_direct_rows() > direct_accum_before,
+            "GPU direct MISC0 accumulator must cover xgboost GPU-owned rows"
+        );
+        assert!(
+            accum_gpu_misc1_direct_rows() > misc1_direct_accum_before,
+            "GPU direct MISC1 accumulator must cover xgboost CPU-witgen-owned rows"
+        );
+        assert!(
+            accum_gpu_misc2_direct_rows() > misc2_direct_accum_before,
+            "GPU direct MISC2 accumulator must cover xgboost CPU-witgen-owned rows"
+        );
+        assert_eq!(
+            witgen_gpu_replace_on_demand_kernel_compiles(),
+            on_demand_before,
+            "GPU-witgen replacement prewarm should cover xgboost without on-demand replacement kernel compiles"
+        );
+        assert_eq!(
+            witgen_accum_shadow_replay_rows(),
+            shadow_replay_before,
+            "GPU-witgen replacement must not rerun CPU step_Top for xgboost accum shadow repair"
+        );
+        assert_witgen_accum_shadow_readbacks_coalesced(
+            "xgboost_witgen_replace",
+            &diag_before,
+            &prover.diagnostics(),
+            11,
+        );
+        assert_witgen_accum_shadow_readback_bytes_bounded(
+            "xgboost_witgen_replace",
+            &diag_before,
+            &prover.diagnostics(),
+            1_000_000,
+        );
+        assert_upload_bytes_bounded(
+            "xgboost_witgen_replace",
+            &diag_before,
+            &prover.diagnostics(),
+            "accum",
+            100_000_000,
+        );
+        assert_upload_bytes_bounded(
+            "xgboost_witgen_replace",
+            &diag_before,
+            &prover.diagnostics(),
+            "recursion_data",
+            100_000_000,
+        );
         set_witgen_gpu_replace_enabled(false);
+        set_accum_gpu_misc0_direct_enabled(false);
+        set_accum_gpu_misc1_direct_enabled(false);
+        set_accum_gpu_misc2_direct_enabled(false);
         set_witgen_gpu_probe_enabled(false);
     }
 
@@ -3495,8 +8040,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         let prover = init_prover().await;
         let model: GradientBooster =
-            serde_json::from_str(include_str!("../../xgboost/res/trained_model.json"))
-                .unwrap();
+            serde_json::from_str(include_str!("../../xgboost/res/trained_model.json")).unwrap();
         let model_bytes = rmp_serde::to_vec(&model).unwrap();
         let data: Vec<f64> = vec![18511304.0, 117.0];
         let env = ExecutorEnv::builder()
@@ -3509,6 +8053,172 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let _ =
             prove_succinct_async(prover.as_ref(), "xgboost", env, XGBOOST_ELF, XGBOOST_ID).await;
         set_witgen_gpu_diff_enabled(false);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_diff_busy_loop() {
+        use risc0_circuit_rv32im::prove::set_witgen_gpu_diff_enabled;
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        console_error_panic_hook::set_once();
+        risc0_zkp::hal::webgpu::log_webgpu_metric("iter6d_g diff=on fixture=busy_loop");
+        set_witgen_gpu_diff_enabled(true);
+
+        let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+        let env = ExecutorEnv::builder()
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let _ = prove_succinct_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_witgen_diff",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        set_witgen_gpu_diff_enabled(false);
+    }
+
+    async fn run_witgen_diff_busy_loop_candidate_major(major: u8, suffix: &str) {
+        use risc0_circuit_rv32im::prove::{
+            set_witgen_gpu_diff_enabled, set_witgen_gpu_diff_major, set_witgen_gpu_probe_enabled,
+            set_witgen_gpu_replace_enabled,
+        };
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        console_error_panic_hook::set_once();
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "iter6d_g diff=on fixture=busy_loop candidate_major={major}",
+        ));
+        set_witgen_gpu_diff_major(Some(major));
+        set_witgen_gpu_diff_enabled(true);
+
+        let prover = init_prover().await;
+        set_witgen_gpu_replace_enabled(false);
+        set_witgen_gpu_probe_enabled(false);
+        assert_representative_webgpu_limits(prover.as_ref());
+        let env = ExecutorEnv::builder()
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let name = format!("multi_test/busy_loop_po2_18_witgen_diff_{suffix}");
+        let _ =
+            prove_succinct_async(prover.as_ref(), &name, env, MULTI_TEST_ELF, MULTI_TEST_ID).await;
+        set_witgen_gpu_diff_enabled(false);
+        set_witgen_gpu_diff_major(None);
+        set_witgen_gpu_replace_enabled(false);
+        set_witgen_gpu_probe_enabled(false);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_diff_busy_loop_misc2() {
+        run_witgen_diff_busy_loop_candidate_major(2, "misc2").await;
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_diff_busy_loop_mul0() {
+        run_witgen_diff_busy_loop_candidate_major(3, "mul0").await;
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_diff_busy_loop_div0() {
+        run_witgen_diff_busy_loop_candidate_major(4, "div0").await;
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_diff_busy_loop_mem0() {
+        run_witgen_diff_busy_loop_candidate_major(5, "mem0").await;
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_diff_busy_loop_mem1() {
+        run_witgen_diff_busy_loop_candidate_major(6, "mem1").await;
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_diff_busy_loop_ecall0() {
+        run_witgen_diff_busy_loop_candidate_major(8, "ecall0").await;
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_replace_diff_busy_loop() {
+        use risc0_circuit_rv32im::prove::{
+            set_witgen_gpu_diff_enabled, set_witgen_gpu_probe_enabled,
+            set_witgen_gpu_replace_enabled,
+        };
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        console_error_panic_hook::set_once();
+        risc0_zkp::hal::webgpu::log_webgpu_metric("iter6d_g replace-diff=on fixture=busy_loop");
+        set_witgen_gpu_probe_enabled(true);
+        set_witgen_gpu_replace_enabled(true);
+        set_witgen_gpu_diff_enabled(true);
+
+        let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+        let env = ExecutorEnv::builder()
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let _ = prove_succinct_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_witgen_replace_diff",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+        )
+        .await;
+        set_witgen_gpu_diff_enabled(false);
+        set_witgen_gpu_replace_enabled(false);
+        set_witgen_gpu_probe_enabled(false);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn iter6d_g_replace_diff_xgboost() {
+        use forust_ml::GradientBooster;
+        use risc0_circuit_rv32im::prove::{
+            set_witgen_gpu_diff_enabled, set_witgen_gpu_probe_enabled,
+            set_witgen_gpu_replace_diff_target_segment, set_witgen_gpu_replace_enabled,
+        };
+        use xgboost_methods::{XGBOOST_ELF, XGBOOST_ID};
+
+        console_error_panic_hook::set_once();
+        risc0_zkp::hal::webgpu::log_webgpu_metric("iter6d_g replace-diff=on fixture=xgboost");
+        set_witgen_gpu_probe_enabled(true);
+        set_witgen_gpu_replace_enabled(true);
+        set_witgen_gpu_diff_enabled(true);
+        set_witgen_gpu_replace_diff_target_segment(Some(8));
+
+        let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+        let model: GradientBooster =
+            serde_json::from_str(include_str!("../../xgboost/res/trained_model.json")).unwrap();
+        let model_bytes = rmp_serde::to_vec(&model).unwrap();
+        let data: Vec<f64> = vec![18511304.0, 117.0];
+        let env = ExecutorEnv::builder()
+            .write(&data)
+            .unwrap()
+            .write(&model_bytes)
+            .unwrap()
+            .build()
+            .unwrap();
+        let _ = prove_succinct_async(
+            prover.as_ref(),
+            "xgboost_witgen_replace_diff",
+            env,
+            XGBOOST_ELF,
+            XGBOOST_ID,
+        )
+        .await;
+        set_witgen_gpu_diff_enabled(false);
+        set_witgen_gpu_replace_diff_target_segment(None);
+        set_witgen_gpu_replace_enabled(false);
+        set_witgen_gpu_probe_enabled(false);
     }
 
     /// SP7 iter 6d-g step 3 -- batch Tint compile validation for all
@@ -3549,7 +8259,9 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let ok = sp7_probe("iter6d_g_all", &module, Box::leak(entry.into_boxed_str())).await;
             risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
                 "iter6d_g_all arm={} module_bytes={} tint_compile_ok={}",
-                label, module.len(), ok,
+                label,
+                module.len(),
+                ok,
             ));
             if ok {
                 compiled += 1;
@@ -3559,7 +8271,9 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
             "iter6d_g_all VERDICT compiled={}/{} failed={:?}",
-            compiled, TOP_CHUNK0_ARM_DELTAS.len(), failed
+            compiled,
+            TOP_CHUNK0_ARM_DELTAS.len(),
+            failed
         ));
     }
 
@@ -3572,8 +8286,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     #[wasm_bindgen_test(async)]
     async fn iter6d_g_assembled_arm_kernel_compiles_on_chrome() {
         use risc0_circuit_rv32im::prove::wgsl_pruner::{
-            assemble_arm_kernel, EXEC_SHA0_CHUNK0_DELTA_WGSL,
-            EXEC_SHA0_CHUNK0_ONLY_COMPUTE_ENTRY,
+            assemble_arm_kernel, EXEC_SHA0_CHUNK0_DELTA_WGSL, EXEC_SHA0_CHUNK0_ONLY_COMPUTE_ENTRY,
         };
         console_error_panic_hook::set_once();
         let module = assemble_arm_kernel(
@@ -3581,11 +8294,13 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             EXEC_SHA0_CHUNK0_ONLY_COMPUTE_ENTRY,
         );
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "iter6d_g assembled module_bytes={}", module.len()
+            "iter6d_g assembled module_bytes={}",
+            module.len()
         ));
         let ok = sp7_probe("iter6d_g", &module, "exec_sha0_chunk0_only_main").await;
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "iter6d_g assembled tint_compile_ok={}", ok
+            "iter6d_g assembled tint_compile_ok={}",
+            ok
         ));
         assert!(
             ok,
@@ -3607,11 +8322,13 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         console_error_panic_hook::set_once();
         let module = format!("{EXEC_SHA0_CHUNK0_ONLY_WGSL}{EXEC_SHA0_CHUNK0_ONLY_COMPUTE_ENTRY}");
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "iter6d_f_take2 sha0_per_arm module_bytes={}", module.len()
+            "iter6d_f_take2 sha0_per_arm module_bytes={}",
+            module.len()
         ));
         let ok = sp7_probe("iter6d_f_take2", &module, "exec_sha0_chunk0_only_main").await;
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "iter6d_f_take2 sha0_per_arm tint_compile_ok={}", ok
+            "iter6d_f_take2 sha0_per_arm tint_compile_ok={}",
+            ok
         ));
         if ok {
             risc0_zkp::hal::webgpu::log_webgpu_metric(
@@ -3642,11 +8359,13 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         console_error_panic_hook::set_once();
         let module = format!("{EXEC_TOP_CHUNK0_ALL_WGSL}{EXEC_TOP_CHUNK0_ALL_COMPUTE_ENTRY}");
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "iter6d_f all-chunks module_bytes={}", module.len()
+            "iter6d_f all-chunks module_bytes={}",
+            module.len()
         ));
         let ok = sp7_probe("iter6d_f", &module, "exec_top_chunk0_all_main").await;
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "iter6d_f all-chunks tint_compile_ok={}", ok
+            "iter6d_f all-chunks tint_compile_ok={}",
+            ok
         ));
         // Soft assertion: log the result either way so we have data
         // even if Tint rejects. The witness-replacement path needs
@@ -4410,25 +9129,25 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
         assert_eq!(prove_info.stats.total_cycles, 1 << 18);
     }
 
-    #[wasm_bindgen_test(async)]
-    async fn rv32im_accum_topaccum_arm5_real_buffer_probe_e2e_verify() {
+    async fn prove_topaccum_arm5_probe_workload<F>(
+        prover: &WebGpuProver,
+        name: &str,
+        env: ExecutorEnv<'_>,
+        check_stats: F,
+    ) -> risc0_circuit_rv32im::prove::TopAccumArm5ProbeSummary
+    where
+        F: FnOnce(&ProveInfo),
+    {
         use risc0_circuit_rv32im::prove::{
-            accum_gpu_arm5_probe_dispatches, accum_gpu_arm5_probe_mismatch_summary,
+            accum_gpu_arm5_probe_dispatches, accum_gpu_arm5_probe_summary,
             set_accum_gpu_arm5_probe_enabled,
         };
-        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+        use risc0_zkvm_methods::{MULTI_TEST_ELF, MULTI_TEST_ID};
 
-        let prover = init_prover().await;
         set_accum_gpu_arm5_probe_enabled(true);
-        let env = ExecutorEnv::builder()
-            .segment_limit_po2(18)
-            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
-            .unwrap()
-            .build()
-            .unwrap();
         let prove_info = prove_succinct_info_async(
-            prover.as_ref(),
-            "multi_test/busy_loop_po2_18_topaccum_arm5_probe",
+            prover,
+            name,
             env,
             MULTI_TEST_ELF,
             MULTI_TEST_ID,
@@ -4436,19 +9155,562 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
         )
         .await;
         set_accum_gpu_arm5_probe_enabled(false);
-        assert_eq!(prove_info.stats.segments, 1);
-        assert_eq!(prove_info.stats.total_cycles, 1 << 18);
+        check_stats(&prove_info);
         assert!(
             accum_gpu_arm5_probe_dispatches() > 0,
-            "TopAccum arm5 real-buffer probe should dispatch during the proof"
+            "TopAccum arm5 real-buffer probe should dispatch during {name}"
         );
-        let (mismatch_count, first_mismatch_col) = accum_gpu_arm5_probe_mismatch_summary()
+        let summary = accum_gpu_arm5_probe_summary()
             .await
             .unwrap()
-            .expect("TopAccum arm5 probe should record a scratch-vs-CPU mismatch summary");
+            .expect("TopAccum arm5 probe should record a scratch-vs-CPU summary");
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "topaccum_arm5_probe mismatch_count={mismatch_count} first_mismatch_col={first_mismatch_col}"
+            "topaccum_arm5_probe workload={} sample_cycle={} available_cycles={} preflight_major={} data_major_value={} selector_value={} mismatch_count={} first_mismatch_col={} first_mismatch_expected={} first_mismatch_actual={}",
+            name,
+            summary.sample_cycle,
+            summary.available_cycles,
+            summary.preflight_major,
+            summary.data_major_value,
+            summary.selector_value,
+            summary.mismatch_count,
+            summary.first_mismatch_col,
+            summary.first_mismatch_expected,
+            summary.first_mismatch_actual
         ));
+        assert_eq!(summary.preflight_major, 5);
+        assert_eq!(
+            summary.data_major_value, 5,
+            "sampled TopAccum arm5 row must read major 5 from the data buffer"
+        );
+        assert_eq!(
+            summary.selector_value, 1,
+            "sampled preflight major 5 row must have TopInstResult selector[5] set"
+        );
+        assert_eq!(
+            summary.mismatch_count, 0,
+            "generated TopAccum arm5 scratch row must match the authoritative accum row"
+        );
+        assert_eq!(
+            summary.first_mismatch_col,
+            u32::MAX,
+            "zero-mismatch TopAccum arm5 probe must not report a first mismatch column"
+        );
+        summary
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn rv32im_accum_topaccum_arm5_representative_probe_e2e_verify() {
+        use risc0_zkvm_methods::multi_test::MultiTestSpec;
+
+        let prover = init_prover().await;
+
+        let busy_loop_env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let _busy_loop_summary = prove_topaccum_arm5_probe_workload(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_topaccum_arm5_probe",
+            busy_loop_env,
+            |prove_info| {
+                assert_eq!(prove_info.stats.segments, 1);
+                assert_eq!(prove_info.stats.total_cycles, 1 << 18);
+            },
+        )
+        .await;
+
+        let keccak_union_env = keccak_union_env_with_count(1);
+        let _keccak_union_summary = prove_topaccum_arm5_probe_workload(
+            prover.as_ref(),
+            "multi_test/keccak_union_topaccum_arm5_probe",
+            keccak_union_env,
+            |prove_info| {
+                assert!(prove_info.stats.segments >= 1);
+            },
+        )
+        .await;
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn rv32im_accum_topaccum_arm5_authoritative_e2e_verify() {
+        use risc0_circuit_rv32im::prove::{
+            accum_gpu_arm5_authoritative_dispatches, accum_gpu_candidate_sync_waits,
+            set_accum_gpu_arm5_authoritative_enabled, set_accum_gpu_candidate_sync_enabled,
+        };
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+        set_accum_gpu_arm5_authoritative_enabled(true);
+        set_accum_gpu_candidate_sync_enabled(false);
+
+        let busy_loop_env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let busy_loop_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_topaccum_arm5_authoritative",
+            busy_loop_env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert_eq!(busy_loop_info.stats.segments, 1);
+        assert_eq!(busy_loop_info.stats.total_cycles, 1 << 18);
+        assert!(
+            accum_gpu_arm5_authoritative_dispatches() > 0,
+            "authoritative TopAccum arm5 should dispatch during BusyLoop"
+        );
+
+        let keccak_union_proof_count = 1;
+        assert_keccak_union_representative_shape(keccak_union_proof_count);
+        let keccak_union_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/keccak_union_topaccum_arm5_authoritative",
+            keccak_union_env_with_count(keccak_union_proof_count),
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert!(keccak_union_info.stats.segments >= 1);
+        assert!(
+            accum_gpu_arm5_authoritative_dispatches() > 1,
+            "authoritative TopAccum arm5 should dispatch during KeccakUnion"
+        );
+        assert!(
+            accum_gpu_candidate_sync_waits() == 0,
+            "canonical production-wall representative workloads should not force candidate sync waits"
+        );
+        let diagnostics = prover.diagnostics();
+        assert_no_code_uploads(
+            "multi_test/keccak_union_topaccum_arm5_authoritative",
+            &diagnostics,
+        );
+        let merkle_query_readbacks = diagnostics
+            .readback_sources
+            .iter()
+            .find(|source| source.name == "merkle_query")
+            .map(|source| source.readbacks)
+            .unwrap_or(0);
+        assert!(
+            merkle_query_readbacks > 0,
+            "Merkle query openings should combine sampled values and sibling nodes into one readback: {diagnostics:?}"
+        );
+        assert_eval_u_readbacks_coalesced(
+            "multi_test/keccak_union_topaccum_arm5_authoritative",
+            &diagnostics,
+        );
+        assert_merkle_query_readbacks_coalesced(
+            "multi_test/keccak_union_topaccum_arm5_authoritative",
+            &diagnostics,
+        );
+
+        set_accum_gpu_candidate_sync_enabled(false);
+        set_accum_gpu_arm5_authoritative_enabled(false);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn recursion_accum_gpu_candidate_representative_e2e_verify() {
+        use risc0_circuit_recursion::prove::{
+            recursion_accum_gpu_dispatches, set_recursion_accum_gpu_enabled,
+        };
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+        set_recursion_accum_gpu_enabled(true);
+
+        let dispatches_before = recursion_accum_gpu_dispatches();
+        let busy_loop_env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let busy_loop_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_recursion_accum_gpu_candidate",
+            busy_loop_env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert_eq!(busy_loop_info.stats.segments, 1);
+        assert_eq!(busy_loop_info.stats.total_cycles, 1 << 18);
+        let busy_loop_dispatches = recursion_accum_gpu_dispatches();
+        assert!(
+            busy_loop_dispatches > dispatches_before,
+            "recursion accumulator GPU candidate should dispatch during BusyLoop"
+        );
+
+        let keccak_union_proof_count = 1;
+        assert_keccak_union_representative_shape(keccak_union_proof_count);
+        let keccak_union_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/keccak_union_recursion_accum_gpu_candidate",
+            keccak_union_env_with_count(keccak_union_proof_count),
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert!(keccak_union_info.stats.segments >= 1);
+        assert!(
+            recursion_accum_gpu_dispatches() > busy_loop_dispatches,
+            "recursion accumulator GPU candidate should dispatch during KeccakUnion"
+        );
+        let diagnostics = prover.diagnostics();
+        assert_eq!(
+            diagnostics.cpu_fallbacks, 0,
+            "recursion accumulator GPU candidate KeccakUnion proof must not use CPU fallbacks"
+        );
+        assert_eq!(
+            diagnostics.cpu_only_ops, 0,
+            "recursion accumulator GPU candidate KeccakUnion proof must not use CPU-only WebGPU HAL ops"
+        );
+
+        set_recursion_accum_gpu_enabled(true);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn recursion_witgen_gpu_verify_mem_candidate_busy_loop_e2e_verify() {
+        use risc0_circuit_recursion::prove::{
+            recursion_witgen_gpu_verify_mem_candidate_dispatches,
+            set_recursion_witgen_gpu_verify_mem_candidate_enabled,
+        };
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+        set_recursion_witgen_gpu_verify_mem_candidate_enabled(true);
+
+        let dispatches_before = recursion_witgen_gpu_verify_mem_candidate_dispatches();
+        let env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate",
+            env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert_eq!(info.stats.segments, 1);
+        assert_eq!(info.stats.total_cycles, 1 << 18);
+        assert!(
+            recursion_witgen_gpu_verify_mem_candidate_dispatches() > dispatches_before,
+            "recursion witgen GPU verify_mem candidate should dispatch during BusyLoop"
+        );
+
+        let diagnostics = prover.diagnostics();
+        assert_eq!(
+            diagnostics.cpu_fallbacks, 0,
+            "recursion witgen GPU verify_mem candidate proof must not use CPU fallbacks"
+        );
+        assert_eq!(
+            diagnostics.cpu_only_ops, 0,
+            "recursion witgen GPU verify_mem candidate proof must not use CPU-only WebGPU HAL ops"
+        );
+        assert!(
+            diagnostics.queue_submits <= 168,
+            "recursion witgen GPU verify_mem BusyLoop candidate should batch its row/scatter/backfill/verify stages; queue_submits={}",
+            diagnostics.queue_submits
+        );
+        set_recursion_witgen_gpu_verify_mem_candidate_enabled(true);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn recursion_witgen_gpu_verify_mem_candidate_representative_e2e_verify() {
+        use risc0_circuit_recursion::prove::{
+            recursion_witgen_gpu_verify_mem_candidate_dispatches,
+            set_recursion_witgen_gpu_verify_mem_candidate_enabled,
+        };
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+        set_recursion_witgen_gpu_verify_mem_candidate_enabled(true);
+
+        let busy_loop_dispatches_before = recursion_witgen_gpu_verify_mem_candidate_dispatches();
+        let busy_loop_env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let busy_loop_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_recursion_witgen_gpu_verify_mem_candidate_representative",
+            busy_loop_env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert_eq!(busy_loop_info.stats.segments, 1);
+        assert_eq!(busy_loop_info.stats.total_cycles, 1 << 18);
+        assert!(
+            recursion_witgen_gpu_verify_mem_candidate_dispatches() > busy_loop_dispatches_before,
+            "recursion witgen GPU verify_mem candidate should dispatch during representative BusyLoop"
+        );
+
+        let keccak_union_proof_count = 1;
+        assert_keccak_union_representative_shape(keccak_union_proof_count);
+        let keccak_union_dispatches_before = recursion_witgen_gpu_verify_mem_candidate_dispatches();
+        let keccak_union_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/keccak_union_recursion_witgen_gpu_verify_mem_candidate_representative",
+            keccak_union_env_with_count(keccak_union_proof_count),
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert!(keccak_union_info.stats.segments >= 1);
+        assert!(
+            recursion_witgen_gpu_verify_mem_candidate_dispatches() > keccak_union_dispatches_before,
+            "recursion witgen GPU verify_mem candidate should dispatch during representative KeccakUnion"
+        );
+
+        let diagnostics = prover.diagnostics();
+        assert_eq!(
+            diagnostics.cpu_fallbacks, 0,
+            "recursion witgen GPU verify_mem candidate representative proof must not use CPU fallbacks"
+        );
+        assert_eq!(
+            diagnostics.cpu_only_ops, 0,
+            "recursion witgen GPU verify_mem candidate representative proof must not use CPU-only WebGPU HAL ops"
+        );
+
+        set_recursion_witgen_gpu_verify_mem_candidate_enabled(true);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn rv32im_default_representative_e2e_verify() {
+        use risc0_circuit_recursion::prove::{
+            recursion_accum_gpu_dispatches, recursion_witgen_gpu_verify_mem_candidate_dispatches,
+            recursion_witgen_post_zeroize_hook_calls,
+            set_recursion_witgen_gpu_verify_mem_candidate_enabled,
+            set_recursion_witgen_post_zeroize_hook_probe_enabled,
+        };
+        use risc0_circuit_rv32im::prove::{
+            accum_gpu_arm5_authoritative_dispatches, accum_gpu_candidate_sync_waits,
+            accum_gpu_control0_direct_rows, accum_gpu_misc0_direct_rows,
+            accum_gpu_misc1_direct_rows, accum_gpu_misc2_direct_rows,
+            set_accum_gpu_arm5_authoritative_enabled, set_accum_gpu_candidate_sync_enabled,
+            witgen_accum_shadow_replay_rows, witgen_gpu_replace_nonblocking_pending_skips,
+            witgen_gpu_replace_on_demand_kernel_compiles, witgen_gpu_short_circuit_cycles,
+        };
+        use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
+
+        let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+        set_recursion_witgen_post_zeroize_hook_probe_enabled(true);
+        set_recursion_witgen_gpu_verify_mem_candidate_enabled(true);
+        set_accum_gpu_arm5_authoritative_enabled(true);
+        set_accum_gpu_arm5_authoritative_enabled(false);
+        set_accum_gpu_candidate_sync_enabled(false);
+
+        let busy_loop_short_before = witgen_gpu_short_circuit_cycles();
+        let busy_loop_misc0_before = accum_gpu_misc0_direct_rows();
+        let busy_loop_misc1_before = accum_gpu_misc1_direct_rows();
+        let busy_loop_misc2_before = accum_gpu_misc2_direct_rows();
+        let busy_loop_control0_before = accum_gpu_control0_direct_rows();
+        let busy_loop_on_demand_before = witgen_gpu_replace_on_demand_kernel_compiles();
+        let busy_loop_nonblocking_skip_before = witgen_gpu_replace_nonblocking_pending_skips();
+        let busy_loop_shadow_replay_before = witgen_accum_shadow_replay_rows();
+        let busy_loop_recursion_accum_dispatches_before = recursion_accum_gpu_dispatches();
+        let busy_loop_recursion_witgen_dispatches_before =
+            recursion_witgen_gpu_verify_mem_candidate_dispatches();
+        let busy_loop_diag_before = prover.diagnostics();
+        let busy_loop_env = ExecutorEnv::builder()
+            .segment_limit_po2(18)
+            .write(&MultiTestSpec::BusyLoop { cycles: 200_000 })
+            .unwrap()
+            .build()
+            .unwrap();
+        let busy_loop_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/busy_loop_po2_18_default_representative",
+            busy_loop_env,
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert_eq!(busy_loop_info.stats.segments, 1);
+        assert_eq!(busy_loop_info.stats.total_cycles, 1 << 18);
+        assert_eq!(
+            accum_gpu_arm5_authoritative_dispatches(),
+            0,
+            "default representative BusyLoop should not dispatch opt-in TopAccum arm5"
+        );
+        if witgen_gpu_replace_nonblocking_pending_skips() == busy_loop_nonblocking_skip_before {
+            assert!(
+                witgen_gpu_short_circuit_cycles() > busy_loop_short_before,
+                "default representative BusyLoop should use GPU-witgen replacement once replacement kernels are ready"
+            );
+        }
+        assert!(
+            accum_gpu_misc0_direct_rows() > busy_loop_misc0_before,
+            "default representative BusyLoop should use GPU MISC0 direct accumulation"
+        );
+        assert!(
+            accum_gpu_misc1_direct_rows() > busy_loop_misc1_before,
+            "default representative BusyLoop should use GPU MISC1 direct accumulation"
+        );
+        assert!(
+            accum_gpu_misc2_direct_rows() > busy_loop_misc2_before,
+            "default representative BusyLoop should use GPU MISC2 direct accumulation"
+        );
+        assert!(
+            accum_gpu_control0_direct_rows() > busy_loop_control0_before,
+            "default representative BusyLoop should use GPU CONTROL0 direct accumulation"
+        );
+        assert_eq!(
+            witgen_gpu_replace_on_demand_kernel_compiles(),
+            busy_loop_on_demand_before,
+            "default representative BusyLoop should prewarm replacement kernels"
+        );
+        assert_eq!(
+            witgen_accum_shadow_replay_rows(),
+            busy_loop_shadow_replay_before,
+            "default representative BusyLoop must not rerun CPU step_Top for accum shadow repair"
+        );
+        assert!(
+            recursion_accum_gpu_dispatches() > busy_loop_recursion_accum_dispatches_before,
+            "default representative BusyLoop should use GPU recursion accumulation"
+        );
+        assert!(
+            recursion_witgen_gpu_verify_mem_candidate_dispatches()
+                > busy_loop_recursion_witgen_dispatches_before,
+            "default representative BusyLoop should use GPU recursion witness verify_mem"
+        );
+        assert_no_witgen_data_readback(
+            "multi_test/busy_loop_po2_18_default_representative",
+            &prover.diagnostics(),
+        );
+        assert_witgen_accum_shadow_readbacks_coalesced(
+            "multi_test/busy_loop_po2_18_default_representative",
+            &busy_loop_diag_before,
+            &prover.diagnostics(),
+            1,
+        );
+
+        let keccak_union_proof_count = 1;
+        assert_keccak_union_representative_shape(keccak_union_proof_count);
+        let keccak_union_short_before = witgen_gpu_short_circuit_cycles();
+        let keccak_union_misc0_before = accum_gpu_misc0_direct_rows();
+        let keccak_union_misc1_before = accum_gpu_misc1_direct_rows();
+        let keccak_union_misc2_before = accum_gpu_misc2_direct_rows();
+        let keccak_union_control0_before = accum_gpu_control0_direct_rows();
+        let keccak_union_on_demand_before = witgen_gpu_replace_on_demand_kernel_compiles();
+        let keccak_union_shadow_replay_before = witgen_accum_shadow_replay_rows();
+        let keccak_union_recursion_accum_dispatches_before = recursion_accum_gpu_dispatches();
+        let keccak_union_recursion_witgen_dispatches_before =
+            recursion_witgen_gpu_verify_mem_candidate_dispatches();
+        let keccak_union_diag_before = prover.diagnostics();
+        let keccak_union_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "multi_test/keccak_union_default_representative",
+            keccak_union_env_with_count(keccak_union_proof_count),
+            MULTI_TEST_ELF,
+            MULTI_TEST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert!(keccak_union_info.stats.segments >= 1);
+        assert_eq!(
+            accum_gpu_arm5_authoritative_dispatches(),
+            0,
+            "default representative KeccakUnion should not dispatch opt-in TopAccum arm5"
+        );
+        assert!(
+            witgen_gpu_short_circuit_cycles() > keccak_union_short_before,
+            "default representative KeccakUnion should use GPU-witgen replacement"
+        );
+        assert!(
+            accum_gpu_misc0_direct_rows() > keccak_union_misc0_before,
+            "default representative KeccakUnion should use GPU MISC0 direct accumulation"
+        );
+        assert!(
+            accum_gpu_misc1_direct_rows() > keccak_union_misc1_before,
+            "default representative KeccakUnion should use GPU MISC1 direct accumulation"
+        );
+        assert!(
+            accum_gpu_misc2_direct_rows() > keccak_union_misc2_before,
+            "default representative KeccakUnion should use GPU MISC2 direct accumulation"
+        );
+        assert!(
+            accum_gpu_control0_direct_rows() > keccak_union_control0_before,
+            "default representative KeccakUnion should use GPU CONTROL0 direct accumulation"
+        );
+        assert_eq!(
+            witgen_gpu_replace_on_demand_kernel_compiles(),
+            keccak_union_on_demand_before,
+            "default representative KeccakUnion should prewarm replacement kernels"
+        );
+        assert_eq!(
+            witgen_accum_shadow_replay_rows(),
+            keccak_union_shadow_replay_before,
+            "default representative KeccakUnion must not rerun CPU step_Top for accum shadow repair"
+        );
+        assert!(
+            recursion_accum_gpu_dispatches() > keccak_union_recursion_accum_dispatches_before,
+            "default representative KeccakUnion should use GPU recursion accumulation"
+        );
+        assert!(
+            recursion_witgen_gpu_verify_mem_candidate_dispatches()
+                > keccak_union_recursion_witgen_dispatches_before,
+            "default representative KeccakUnion should use GPU recursion witness verify_mem"
+        );
+        assert_eq!(
+            accum_gpu_candidate_sync_waits(),
+            0,
+            "default representative workloads should not force candidate sync waits"
+        );
+        let diagnostics = prover.diagnostics();
+        assert_no_witgen_data_readback(
+            "multi_test/keccak_union_default_representative",
+            &diagnostics,
+        );
+        assert_witgen_accum_shadow_readbacks_coalesced(
+            "multi_test/keccak_union_default_representative",
+            &keccak_union_diag_before,
+            &diagnostics,
+            4,
+        );
+        assert_no_code_uploads(
+            "multi_test/keccak_union_default_representative",
+            &diagnostics,
+        );
+        assert_eval_u_readbacks_coalesced(
+            "multi_test/keccak_union_default_representative",
+            &diagnostics,
+        );
+        assert_merkle_query_readbacks_coalesced(
+            "multi_test/keccak_union_default_representative",
+            &diagnostics,
+        );
+        let post_zeroize_hooks = recursion_witgen_post_zeroize_hook_calls();
+        set_recursion_witgen_post_zeroize_hook_probe_enabled(false);
+        assert!(
+            post_zeroize_hooks > 0,
+            "representative recursion witgen should exercise the post-zeroize hook"
+        );
     }
 
     #[wasm_bindgen_test(async)]
@@ -5594,6 +10856,35 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
         keccak_union_env_with_count(3)
     }
 
+    fn assert_keccak_union_representative_shape(proof_count: usize) {
+        use risc0_zkvm::{ExecutorImpl, SimpleSegmentRef};
+        use risc0_zkvm_methods::MULTI_TEST_ELF;
+
+        let session =
+            ExecutorImpl::from_elf(keccak_union_env_with_count(proof_count), MULTI_TEST_ELF)
+                .expect("keccak union executor build")
+                .run_with_callback(|seg| Ok(Box::new(SimpleSegmentRef::new(seg))))
+                .expect("keccak union executor run");
+        let pending_keccaks = session.pending_keccaks().len();
+        let assumptions = session.assumptions.len();
+        console_log!(
+            "browser-prove:representative-keccak-union proof_count={proof_count} segments={} pending_keccaks={pending_keccaks} assumptions={assumptions}",
+            session.segments.len()
+        );
+        assert!(
+            !session.segments.is_empty(),
+            "KeccakUnion representative workload should produce a top-level session segment"
+        );
+        assert!(
+            pending_keccaks > 0,
+            "KeccakUnion representative workload should produce pending keccak proofs"
+        );
+        assert!(
+            assumptions > 0,
+            "KeccakUnion representative workload should exercise assumption resolution"
+        );
+    }
+
     fn prove_keccak_union(prover: &WebGpuProver) {
         use risc0_zkvm_methods::{MULTI_TEST_ELF, MULTI_TEST_ID};
 
@@ -6573,9 +11864,43 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
     #[wasm_bindgen_test(async)]
     async fn xgboost_succinct_receipt_verifies() {
         use forust_ml::GradientBooster;
+        use risc0_circuit_recursion::prove::{
+            recursion_accum_gpu_dispatches, recursion_witgen_gpu_verify_mem_candidate_dispatches,
+            recursion_witgen_post_zeroize_hook_calls,
+            set_recursion_witgen_gpu_verify_mem_candidate_enabled,
+            set_recursion_witgen_post_zeroize_hook_probe_enabled,
+        };
+        use risc0_circuit_rv32im::prove::{
+            accum_gpu_control0_direct_rows, accum_gpu_mem0_direct_rows, accum_gpu_mem1_direct_rows,
+            accum_gpu_misc0_direct_rows, accum_gpu_misc1_direct_rows, accum_gpu_misc2_direct_rows,
+            witgen_accum_shadow_replay_rows, witgen_gpu_mem0_extra_prewarm_requests,
+            witgen_gpu_mem0_replace_minor_mask, witgen_gpu_replace_on_demand_kernel_compiles,
+            witgen_gpu_short_circuit_cycles,
+        };
         use xgboost_methods::{XGBOOST_ELF, XGBOOST_ID};
 
         let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+        set_recursion_witgen_post_zeroize_hook_probe_enabled(true);
+        set_recursion_witgen_gpu_verify_mem_candidate_enabled(true);
+        assert_eq!(
+            witgen_gpu_mem0_replace_minor_mask(),
+            1u16 << 2,
+            "default WebGPU acceleration should enable only MEM0 LW replacement"
+        );
+        let short_before = witgen_gpu_short_circuit_cycles();
+        let misc0_before = accum_gpu_misc0_direct_rows();
+        let misc1_before = accum_gpu_misc1_direct_rows();
+        let misc2_before = accum_gpu_misc2_direct_rows();
+        let mem0_before = accum_gpu_mem0_direct_rows();
+        let mem1_before = accum_gpu_mem1_direct_rows();
+        let control0_before = accum_gpu_control0_direct_rows();
+        let on_demand_before = witgen_gpu_replace_on_demand_kernel_compiles();
+        let shadow_replay_before = witgen_accum_shadow_replay_rows();
+        let recursion_accum_dispatches_before = recursion_accum_gpu_dispatches();
+        let recursion_witgen_dispatches_before =
+            recursion_witgen_gpu_verify_mem_candidate_dispatches();
+        let diag_before = prover.diagnostics();
         let model: GradientBooster =
             serde_json::from_str(include_str!("../../xgboost/res/trained_model.json")).unwrap();
         let model_bytes = rmp_serde::to_vec(&model).unwrap();
@@ -6587,9 +11912,271 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
             .unwrap()
             .build()
             .unwrap();
-        let receipt =
-            prove_succinct_async(prover.as_ref(), "xgboost", env, XGBOOST_ELF, XGBOOST_ID).await;
-        assert_eq!(receipt.journal.decode::<f64>().unwrap(), 30.528042544062632);
+        let prove_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "xgboost",
+            env,
+            XGBOOST_ELF,
+            XGBOOST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        assert_eq!(
+            prove_info.receipt.journal.decode::<f64>().unwrap(),
+            30.528042544062632
+        );
+        let diagnostics = prover.diagnostics();
+        assert!(
+            witgen_gpu_short_circuit_cycles() > short_before,
+            "default xgboost proof should use GPU-witgen replacement"
+        );
+        assert!(
+            accum_gpu_misc0_direct_rows() > misc0_before,
+            "default xgboost proof should use GPU MISC0 direct accumulation"
+        );
+        assert!(
+            accum_gpu_misc1_direct_rows() > misc1_before,
+            "default xgboost proof should use GPU MISC1 direct accumulation"
+        );
+        assert!(
+            accum_gpu_misc2_direct_rows() > misc2_before,
+            "default xgboost proof should use GPU MISC2 direct accumulation"
+        );
+        assert!(
+            accum_gpu_mem0_direct_rows() > mem0_before,
+            "default xgboost proof should use GPU MEM0 LW direct accumulation"
+        );
+        assert!(
+            accum_gpu_mem1_direct_rows() > mem1_before,
+            "default xgboost proof should use GPU MEM1 direct accumulation"
+        );
+        assert!(
+            accum_gpu_control0_direct_rows() > control0_before,
+            "default xgboost proof should use GPU CONTROL0 direct accumulation"
+        );
+        assert!(
+            witgen_gpu_mem0_extra_prewarm_requests() <= 1,
+            "default xgboost proof should prewarm only the selected MEM0 extra minor"
+        );
+        assert_eq!(
+            witgen_gpu_replace_on_demand_kernel_compiles(),
+            on_demand_before,
+            "default xgboost proof should prewarm replacement kernels"
+        );
+        assert_eq!(
+            witgen_accum_shadow_replay_rows(),
+            shadow_replay_before,
+            "default xgboost proof must not rerun CPU step_Top for accum shadow repair"
+        );
+        assert!(
+            recursion_accum_gpu_dispatches() > recursion_accum_dispatches_before,
+            "default xgboost proof should use GPU recursion accumulation"
+        );
+        assert!(
+            recursion_witgen_gpu_verify_mem_candidate_dispatches()
+                > recursion_witgen_dispatches_before,
+            "default xgboost proof should use GPU recursion witness verify_mem"
+        );
+        assert_no_witgen_data_readback("xgboost", &diagnostics);
+        assert_witgen_data_shadow_readback_elided("xgboost", &diag_before, &diagnostics);
+        assert_witgen_accum_shadow_readbacks_coalesced("xgboost", &diag_before, &diagnostics, 11);
+        assert_no_code_uploads("xgboost", &diagnostics);
+        assert_eval_u_readbacks_coalesced("xgboost", &diagnostics);
+        assert_merkle_query_readbacks_coalesced("xgboost", &diagnostics);
+        let post_zeroize_hooks = recursion_witgen_post_zeroize_hook_calls();
+        set_recursion_witgen_post_zeroize_hook_probe_enabled(false);
+        assert!(
+            post_zeroize_hooks > 0,
+            "xgboost recursion witgen should exercise the post-zeroize hook"
+        );
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn xgboost_recursion_accum_gpu_candidate_succinct_receipt_verifies() {
+        use forust_ml::GradientBooster;
+        use risc0_circuit_recursion::prove::{
+            recursion_accum_gpu_dispatches, set_recursion_accum_gpu_enabled,
+        };
+        use xgboost_methods::{XGBOOST_ELF, XGBOOST_ID};
+
+        let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+        let model: GradientBooster =
+            serde_json::from_str(include_str!("../../xgboost/res/trained_model.json")).unwrap();
+        let model_bytes = rmp_serde::to_vec(&model).unwrap();
+        let data: Vec<f64> = vec![18511304.0, 117.0];
+        let env = ExecutorEnv::builder()
+            .write(&data)
+            .unwrap()
+            .write(&model_bytes)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        set_recursion_accum_gpu_enabled(true);
+        let dispatches_before = recursion_accum_gpu_dispatches();
+        let prove_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "xgboost_recursion_accum_gpu_candidate",
+            env,
+            XGBOOST_ELF,
+            XGBOOST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        set_recursion_accum_gpu_enabled(true);
+
+        assert_eq!(
+            prove_info.receipt.journal.decode::<f64>().unwrap(),
+            30.528042544062632
+        );
+        assert!(
+            recursion_accum_gpu_dispatches() > dispatches_before,
+            "recursion accumulator GPU candidate should dispatch during xgboost"
+        );
+        let diagnostics = prover.diagnostics();
+        assert_eq!(
+            diagnostics.cpu_fallbacks, 0,
+            "recursion accumulator GPU candidate xgboost proof must not use CPU fallbacks"
+        );
+        assert_eq!(
+            diagnostics.cpu_only_ops, 0,
+            "recursion accumulator GPU candidate xgboost proof must not use CPU-only WebGPU HAL ops"
+        );
+        assert_no_code_uploads("xgboost_recursion_accum_gpu_candidate", &diagnostics);
+        assert_eval_u_readbacks_coalesced("xgboost_recursion_accum_gpu_candidate", &diagnostics);
+        assert_merkle_query_readbacks_coalesced(
+            "xgboost_recursion_accum_gpu_candidate",
+            &diagnostics,
+        );
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn xgboost_recursion_witgen_gpu_verify_mem_candidate_succinct_receipt_verifies() {
+        use forust_ml::GradientBooster;
+        use risc0_circuit_recursion::prove::{
+            recursion_witgen_gpu_verify_mem_candidate_dispatches,
+            set_recursion_witgen_gpu_verify_mem_candidate_enabled,
+        };
+        use xgboost_methods::{XGBOOST_ELF, XGBOOST_ID};
+
+        let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+        let model: GradientBooster =
+            serde_json::from_str(include_str!("../../xgboost/res/trained_model.json")).unwrap();
+        let model_bytes = rmp_serde::to_vec(&model).unwrap();
+        let data: Vec<f64> = vec![18511304.0, 117.0];
+        let env = ExecutorEnv::builder()
+            .write(&data)
+            .unwrap()
+            .write(&model_bytes)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        set_recursion_witgen_gpu_verify_mem_candidate_enabled(true);
+        let dispatches_before = recursion_witgen_gpu_verify_mem_candidate_dispatches();
+        let prove_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "xgboost_recursion_witgen_gpu_verify_mem_candidate",
+            env,
+            XGBOOST_ELF,
+            XGBOOST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        set_recursion_witgen_gpu_verify_mem_candidate_enabled(true);
+
+        assert_eq!(
+            prove_info.receipt.journal.decode::<f64>().unwrap(),
+            30.528042544062632
+        );
+        assert!(
+            recursion_witgen_gpu_verify_mem_candidate_dispatches() > dispatches_before,
+            "recursion witgen GPU verify_mem candidate should dispatch during xgboost"
+        );
+        let diagnostics = prover.diagnostics();
+        assert_eq!(
+            diagnostics.cpu_fallbacks, 0,
+            "recursion witgen GPU verify_mem candidate xgboost proof must not use CPU fallbacks"
+        );
+        assert_eq!(
+            diagnostics.cpu_only_ops, 0,
+            "recursion witgen GPU verify_mem candidate xgboost proof must not use CPU-only WebGPU HAL ops"
+        );
+        assert_no_code_uploads(
+            "xgboost_recursion_witgen_gpu_verify_mem_candidate",
+            &diagnostics,
+        );
+        assert_eval_u_readbacks_coalesced(
+            "xgboost_recursion_witgen_gpu_verify_mem_candidate",
+            &diagnostics,
+        );
+        assert_merkle_query_readbacks_coalesced(
+            "xgboost_recursion_witgen_gpu_verify_mem_candidate",
+            &diagnostics,
+        );
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn xgboost_topaccum_arm5_authoritative_succinct_receipt_verifies() {
+        use forust_ml::GradientBooster;
+        use risc0_circuit_rv32im::prove::{
+            accum_gpu_arm5_authoritative_dispatches, accum_gpu_candidate_sync_waits,
+            set_accum_gpu_arm5_authoritative_enabled, set_accum_gpu_candidate_sync_enabled,
+            set_accum_gpu_major_histogram_enabled,
+        };
+        use xgboost_methods::{XGBOOST_ELF, XGBOOST_ID};
+
+        let prover = init_prover().await;
+        assert_representative_webgpu_limits(prover.as_ref());
+        let model: GradientBooster =
+            serde_json::from_str(include_str!("../../xgboost/res/trained_model.json")).unwrap();
+        let model_bytes = rmp_serde::to_vec(&model).unwrap();
+        let data: Vec<f64> = vec![18511304.0, 117.0];
+        let env = ExecutorEnv::builder()
+            .write(&data)
+            .unwrap()
+            .write(&model_bytes)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        set_accum_gpu_major_histogram_enabled(true);
+        set_accum_gpu_arm5_authoritative_enabled(true);
+        set_accum_gpu_candidate_sync_enabled(false);
+        let prove_info = prove_succinct_info_async(
+            prover.as_ref(),
+            "xgboost_topaccum_arm5_authoritative",
+            env,
+            XGBOOST_ELF,
+            XGBOOST_ID,
+            &ProverOpts::succinct(),
+        )
+        .await;
+        set_accum_gpu_candidate_sync_enabled(false);
+        set_accum_gpu_arm5_authoritative_enabled(false);
+        set_accum_gpu_major_histogram_enabled(false);
+
+        assert_eq!(
+            prove_info.receipt.journal.decode::<f64>().unwrap(),
+            30.528042544062632
+        );
+        assert!(
+            accum_gpu_arm5_authoritative_dispatches() > 0,
+            "authoritative TopAccum arm5 should dispatch during xgboost"
+        );
+        assert!(
+            accum_gpu_candidate_sync_waits() == 0,
+            "canonical xgboost production-wall run should not force candidate sync waits"
+        );
+        let diagnostics = prover.diagnostics();
+        assert_no_code_uploads("xgboost_topaccum_arm5_authoritative", &diagnostics);
+        assert_eval_u_readbacks_coalesced("xgboost_topaccum_arm5_authoritative", &diagnostics);
+        assert_merkle_query_readbacks_coalesced(
+            "xgboost_topaccum_arm5_authoritative",
+            &diagnostics,
+        );
     }
 
     #[wasm_bindgen_test(async)]
@@ -7044,9 +12631,7 @@ mod native_stats_tests {
         let hello_receipt = hello_info.receipt;
         println!(
             "native_hello_prove elapsed={hello_elapsed:?} segments={} user_cycles={} total_cycles={}",
-            hello_info.stats.segments,
-            hello_info.stats.user_cycles,
-            hello_info.stats.total_cycles
+            hello_info.stats.segments, hello_info.stats.user_cycles, hello_info.stats.total_cycles
         );
 
         let verify_input = || {
@@ -7111,9 +12696,7 @@ mod native_stats_tests {
         prove_info.receipt.verify(VERIFY_ID).unwrap();
         println!(
             "native_verify_prove elapsed={prove_elapsed:?} segments={} user_cycles={} total_cycles={}",
-            prove_info.stats.segments,
-            prove_info.stats.user_cycles,
-            prove_info.stats.total_cycles
+            prove_info.stats.segments, prove_info.stats.user_cycles, prove_info.stats.total_cycles
         );
     }
 

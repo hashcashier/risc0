@@ -160,6 +160,13 @@ impl WebGpuProveRoundInfo {
                 log2_ceil(INV_RATE),
             )
             .await?;
+            if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
+                let _t = crate::hal::webgpu::WebGpuStageTimer::new_for(
+                    format!("fri_prove round={round_idx} drain_after_expand_evaluate_ntt domain={domain}"),
+                    hal,
+                );
+                hal.wait_idle().await?;
+            }
         }
         let merkle = {
             let _t = crate::hal::webgpu::WebGpuStageTimer::new(format!(
@@ -167,29 +174,36 @@ impl WebGpuProveRoundInfo {
                 domain / FRI_FOLD,
                 FRI_FOLD * ext_size
             ));
-            MerkleTreeProver::new_async(
+            let merkle_name = format!("fri_round{round_idx}");
+            MerkleTreeProver::new_committed_async(
                 hal,
                 &evaluated,
                 domain / FRI_FOLD,
                 FRI_FOLD * ext_size,
                 QUERIES,
+                iop,
+                &merkle_name,
             )
             .await?
         };
-        {
-            let _t = crate::hal::webgpu::WebGpuStageTimer::new(format!(
-                "fri_prove round={round_idx} merkle_commit"
-            ));
-            merkle.commit_async(hal, iop).await?;
-        }
         let fold_mix = iop.random_ext_elem();
-        let out_coeffs = hal.alloc_elem("out_coeffs", size / FRI_FOLD * ext_size);
+        let count_out = size / FRI_FOLD;
+        let out_coeffs = hal.alloc_elem("out_coeffs", count_out * ext_size);
         {
             let _t = crate::hal::webgpu::WebGpuStageTimer::new(format!(
                 "fri_prove round={round_idx} fri_fold count_out={}",
-                size / FRI_FOLD
+                count_out
             ));
             hal.fri_fold_async(&out_coeffs, coeffs, &fold_mix).await?;
+            if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
+                let _t = crate::hal::webgpu::WebGpuStageTimer::new_for(
+                    format!(
+                        "fri_prove round={round_idx} drain_after_fri_fold count_out={count_out}"
+                    ),
+                    hal,
+                );
+                hal.wait_idle().await?;
+            }
         }
         Ok(WebGpuProveRoundInfo {
             domain,
@@ -251,18 +265,17 @@ pub async fn fri_prove_async(
         round_positions.push(per_round);
     }
 
-    // SP8 iter 3 (2026-05-15): issue prove_batch_async calls
-    // concurrently across the inner merkles and the FRI rounds.
-    // prove_batch_async dispatches the underlying GPU reads and then
-    // awaits a Promise per readback; running the .await calls in
-    // parallel via try_join_all lets the browser pipeline mapAsync
-    // requests across trees instead of round-tripping each in turn.
-    // This is the same pattern as SP8 iter 1's PolyGroup batch
-    // evaluate, applied to the FRI query phase.
-    let inner_proofs: Vec<_> = futures::future::try_join_all(
-        inner_merkles
-            .iter()
-            .map(|merkle| merkle.prove_batch_async(hal, query_positions.as_slice())),
+    // Coalesce query openings across Merkle trees. Each proof still writes the
+    // same tree/query order below, but the browser sees one indexed readback
+    // for inner trees and one for FRI-round trees instead of one map per tree.
+    let inner_positions_by_tree = inner_merkles
+        .iter()
+        .map(|_| query_positions.clone())
+        .collect::<Vec<_>>();
+    let inner_proofs = crate::prove::merkle::prove_batch_for_trees_async(
+        hal,
+        inner_merkles,
+        inner_positions_by_tree.as_slice(),
     )
     .await?;
 
@@ -274,11 +287,11 @@ pub async fn fri_prove_async(
                 .collect()
         })
         .collect();
-    let round_proofs: Vec<_> = futures::future::try_join_all(
-        rounds
-            .iter()
-            .zip(round_positions_per_round.iter())
-            .map(|(round, positions)| round.merkle.prove_batch_async(hal, positions.as_slice())),
+    let round_merkles = rounds.iter().map(|round| &round.merkle).collect::<Vec<_>>();
+    let round_proofs = crate::prove::merkle::prove_batch_for_trees_async(
+        hal,
+        round_merkles.as_slice(),
+        round_positions_per_round.as_slice(),
     )
     .await?;
 

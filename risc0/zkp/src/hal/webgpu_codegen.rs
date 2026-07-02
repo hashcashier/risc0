@@ -95,11 +95,7 @@ impl EvalCheckSlotAllocator {
     }
 }
 
-pub(crate) fn eval_check_note_last(
-    last_uses: &mut Vec<Option<usize>>,
-    var: usize,
-    op_idx: usize,
-) {
+pub(crate) fn eval_check_note_last(last_uses: &mut Vec<Option<usize>>, var: usize, op_idx: usize) {
     if var >= last_uses.len() {
         last_uses.resize(var + 1, None);
     }
@@ -253,11 +249,7 @@ pub const WEBGPU_COMPUTE_WORKGROUP_STORAGE_BUDGET: u32 = 49152;
 /// don't divide by per-thread byte footprint the way a
 /// workgroup-shared budget would. Matches the runtime interpreter's
 /// Ext-mode pipeline.
-fn choose_workgroup_size(
-    field_mode: FieldMode,
-    fp_slots: usize,
-    mix_slots: usize,
-) -> u32 {
+fn choose_workgroup_size(field_mode: FieldMode, fp_slots: usize, mix_slots: usize) -> u32 {
     // Inputs are kept for future per-stage tuning hooks (e.g., a
     // workgroup-shared scratch variant for very large DEFs would
     // gate `workgroup_size` on `fp_slots` / `mix_slots`).
@@ -532,12 +524,20 @@ impl<'a> WgslEmitter<'a> {
         match (op, self.field_mode) {
             (PolyExtStep::Const(v), FieldMode::Base) => {
                 let (var, slot) = self.alloc_fp(idx);
-                writeln!(self.body, "  // [{idx}] fp_var{var} (slot {slot}) = Const({v})").unwrap();
+                writeln!(
+                    self.body,
+                    "  // [{idx}] fp_var{var} (slot {slot}) = Const({v})"
+                )
+                .unwrap();
                 writeln!(self.body, "  fp[{slot}] = {v}u;").unwrap();
             }
             (PolyExtStep::Const(v), FieldMode::Ext) => {
                 let (var, slot) = self.alloc_fp(idx);
-                writeln!(self.body, "  // [{idx}] fp_var{var} (slot {slot}) = Const({v})").unwrap();
+                writeln!(
+                    self.body,
+                    "  // [{idx}] fp_var{var} (slot {slot}) = Const({v})"
+                )
+                .unwrap();
                 writeln!(self.body, "  fp[{slot}] = vec4<u32>({v}u, 0u, 0u, 0u);").unwrap();
             }
             (PolyExtStep::ConstExt(_, _, _, _), FieldMode::Base) => {
@@ -550,7 +550,11 @@ impl<'a> WgslEmitter<'a> {
                     "  // [{idx}] fp_var{var} (slot {slot}) = ConstExt({a}, {b}, {c}, {d})"
                 )
                 .unwrap();
-                writeln!(self.body, "  fp[{slot}] = vec4<u32>({a}u, {b}u, {c}u, {d}u);").unwrap();
+                writeln!(
+                    self.body,
+                    "  fp[{slot}] = vec4<u32>({a}u, {b}u, {c}u, {d}u);"
+                )
+                .unwrap();
             }
             (PolyExtStep::Get(tap_idx), mode) => {
                 let tap = self.resolve_tap(*tap_idx)?;
@@ -670,7 +674,9 @@ impl<'a> WgslEmitter<'a> {
                 let exp = self.mix_exps[var];
                 let inner_combine = match mode {
                     // Base mode: scalar fp[inner] combined via ext_scale.
-                    FieldMode::Base => format!("ext_scale(mix_mul[{chain_slot}], fp[{inner_slot}])"),
+                    FieldMode::Base => {
+                        format!("ext_scale(mix_mul[{chain_slot}], fp[{inner_slot}])")
+                    }
                     // Ext mode: vec4 fp[inner] combined via full ext_mul.
                     FieldMode::Ext => format!("ext_mul(mix_mul[{chain_slot}], fp[{inner_slot}])"),
                 };
@@ -741,8 +747,7 @@ impl<'a> WgslEmitter<'a> {
         // workgroup storage budget. Iter 6 used a hardcoded `1`; on
         // poseidon2_basic that left the GPU dramatically underutilized
         // and the staged kernel ran ~10x slower than the interpreter.
-        let workgroup_size =
-            choose_workgroup_size(self.field_mode, fp_slots, mix_slots);
+        let workgroup_size = choose_workgroup_size(self.field_mode, fp_slots, mix_slots);
         writeln!(wgsl, "@compute @workgroup_size({workgroup_size})").unwrap();
         wgsl.push_str("fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
         wgsl.push_str("  let cycle = gid.x;\n");
@@ -857,7 +862,9 @@ pub fn staged_full_kernel_wgsl(
     field_mode: FieldMode,
 ) -> Result<String, CodegenError> {
     let body_kernel = staged_kernel_from_def_with_mode(name, def, taps, field_mode)?;
-    let mut full = String::with_capacity(STAGED_EVAL_CHECK_PRELUDE_WGSL.len() + body_kernel.wgsl_source.len() + 64);
+    let mut full = String::with_capacity(
+        STAGED_EVAL_CHECK_PRELUDE_WGSL.len() + body_kernel.wgsl_source.len() + 64,
+    );
     full.push_str(STAGED_EVAL_CHECK_PRELUDE_WGSL);
     full.push('\n');
     full.push_str(&body_kernel.wgsl_source);
@@ -1054,14 +1061,12 @@ fn emit_chunk_wgsl(
             .unwrap();
         }
     } else {
-        let ret_slot = emitter
-            .mix_slot_for(ret_var)
-            .map_err(|err| match err {
-                CodegenError::VarNotLive(msg) => CodegenError::VarNotLive(format!(
-                    "final chunk: ret mix var {ret_var} not live: {msg}"
-                )),
-                other => other,
-            })?;
+        let ret_slot = emitter.mix_slot_for(ret_var).map_err(|err| match err {
+            CodegenError::VarNotLive(msg) => CodegenError::VarNotLive(format!(
+                "final chunk: ret mix var {ret_var} not live: {msg}"
+            )),
+            other => other,
+        })?;
         writeln!(
             emitter.body,
             "  // === chunk {chunk_idx} final: write_check ===",
@@ -1423,16 +1428,16 @@ mod tests {
     /// Tiny PolyExt program exercising every PolyExtStep variant including
     /// `ConstExt`, so it requires `FieldMode::Ext`.
     static FULL_BLOCK: &[PolyExtStep] = &[
-        PolyExtStep::Const(2),                  // f0
-        PolyExtStep::ConstExt(1, 2, 3, 4),      // f1 (requires Ext)
-        PolyExtStep::Get(5),                    // f2
-        PolyExtStep::GetGlobal(0, 7),           // f3
-        PolyExtStep::Add(0, 2),                 // f4
-        PolyExtStep::Sub(4, 1),                 // f5
-        PolyExtStep::Mul(5, 3),                 // f6
-        PolyExtStep::True,                      // m0
-        PolyExtStep::AndEqz(0, 6),              // m1
-        PolyExtStep::AndCond(1, 0, 1),          // m2
+        PolyExtStep::Const(2),             // f0
+        PolyExtStep::ConstExt(1, 2, 3, 4), // f1 (requires Ext)
+        PolyExtStep::Get(5),               // f2
+        PolyExtStep::GetGlobal(0, 7),      // f3
+        PolyExtStep::Add(0, 2),            // f4
+        PolyExtStep::Sub(4, 1),            // f5
+        PolyExtStep::Mul(5, 3),            // f6
+        PolyExtStep::True,                 // m0
+        PolyExtStep::AndEqz(0, 6),         // m1
+        PolyExtStep::AndCond(1, 0, 1),     // m2
     ];
 
     static FULL_DEF: PolyExtStepDef = PolyExtStepDef {
@@ -1444,16 +1449,56 @@ mod tests {
     /// reusable Get-only DEFs below. Indices 0-9 are populated so that
     /// `Get(5)` and `Get(3)` both resolve cleanly.
     static TEST_TAPS: &[EmitterTap] = &[
-        EmitterTap { group: 0, offset: 0, back_inv_rate: 0 },
-        EmitterTap { group: 1, offset: 1, back_inv_rate: 0 },
-        EmitterTap { group: 2, offset: 2, back_inv_rate: 0 },
-        EmitterTap { group: 0, offset: 3, back_inv_rate: 4 },
-        EmitterTap { group: 1, offset: 4, back_inv_rate: 4 },
-        EmitterTap { group: 2, offset: 5, back_inv_rate: 0 },
-        EmitterTap { group: 0, offset: 6, back_inv_rate: 0 },
-        EmitterTap { group: 1, offset: 7, back_inv_rate: 0 },
-        EmitterTap { group: 2, offset: 8, back_inv_rate: 0 },
-        EmitterTap { group: 0, offset: 9, back_inv_rate: 0 },
+        EmitterTap {
+            group: 0,
+            offset: 0,
+            back_inv_rate: 0,
+        },
+        EmitterTap {
+            group: 1,
+            offset: 1,
+            back_inv_rate: 0,
+        },
+        EmitterTap {
+            group: 2,
+            offset: 2,
+            back_inv_rate: 0,
+        },
+        EmitterTap {
+            group: 0,
+            offset: 3,
+            back_inv_rate: 4,
+        },
+        EmitterTap {
+            group: 1,
+            offset: 4,
+            back_inv_rate: 4,
+        },
+        EmitterTap {
+            group: 2,
+            offset: 5,
+            back_inv_rate: 0,
+        },
+        EmitterTap {
+            group: 0,
+            offset: 6,
+            back_inv_rate: 0,
+        },
+        EmitterTap {
+            group: 1,
+            offset: 7,
+            back_inv_rate: 0,
+        },
+        EmitterTap {
+            group: 2,
+            offset: 8,
+            back_inv_rate: 0,
+        },
+        EmitterTap {
+            group: 0,
+            offset: 9,
+            back_inv_rate: 0,
+        },
     ];
 
     #[test]
@@ -1489,9 +1534,7 @@ mod tests {
         assert!(kernel.wgsl_source.contains("fp[2] = add(fp[0], fp[1]);"));
         assert!(!kernel.wgsl_source.contains("fp[2] = ext_add"));
         assert!(
-            kernel
-                .wgsl_source
-                .contains("ext_scale(mix_mul[0], fp[2])"),
+            kernel.wgsl_source.contains("ext_scale(mix_mul[0], fp[2])"),
             "AndEqz under Base mode must use ext_scale to promote fp[inner]"
         );
     }
@@ -1509,17 +1552,21 @@ mod tests {
         // after Sub). Max slot = 5.
         assert!(kernel.wgsl_source.contains("var fp: array<vec4<u32>, 5>"));
         // var 1 ConstExt assigned to slot 1.
-        assert!(
-            kernel
-                .wgsl_source
-                .contains("fp[1] = vec4<u32>(1u, 2u, 3u, 4u);")
-        );
+        assert!(kernel
+            .wgsl_source
+            .contains("fp[1] = vec4<u32>(1u, 2u, 3u, 4u);"));
         // var 4 Add(0, 2) -> fp[4] = ext_add(fp[0], fp[2]).
-        assert!(kernel.wgsl_source.contains("fp[4] = ext_add(fp[0], fp[2]);"));
+        assert!(kernel
+            .wgsl_source
+            .contains("fp[4] = ext_add(fp[0], fp[2]);"));
         // var 5 Sub(4, 1) reuses slot 2 (var 2's slot was freed after Add).
-        assert!(kernel.wgsl_source.contains("fp[2] = ext_sub(fp[4], fp[1]);"));
+        assert!(kernel
+            .wgsl_source
+            .contains("fp[2] = ext_sub(fp[4], fp[1]);"));
         // var 6 Mul(5, 3) reuses slot 1 (var 1's slot was freed after Sub).
-        assert!(kernel.wgsl_source.contains("fp[1] = ext_mul(fp[2], fp[3]);"));
+        assert!(kernel
+            .wgsl_source
+            .contains("fp[1] = ext_mul(fp[2], fp[3]);"));
         // AndEqz combines mix_mul[chain_slot=0] with fp[inner_slot=1] (var 6 lives in slot 1).
         assert!(
             kernel.wgsl_source.contains("ext_mul(mix_mul[0], fp[1])"),
@@ -1529,12 +1576,8 @@ mod tests {
 
     #[test]
     fn base_field_rejects_const_ext() {
-        let err = staged_kernel_from_def_with_mode(
-            "full_base",
-            &FULL_DEF,
-            TEST_TAPS,
-            FieldMode::Base,
-        );
+        let err =
+            staged_kernel_from_def_with_mode("full_base", &FULL_DEF, TEST_TAPS, FieldMode::Base);
         assert_eq!(err, Err(CodegenError::ConstExtInBaseField));
     }
 
@@ -1563,10 +1606,14 @@ mod tests {
             block: &[PolyExtStep::Get(0), PolyExtStep::True],
             ret: 0,
         };
-        let err = staged_kernel_from_def_with_mode("bad_group", &GET_DEF, BAD_TAPS, FieldMode::Base);
+        let err =
+            staged_kernel_from_def_with_mode("bad_group", &GET_DEF, BAD_TAPS, FieldMode::Base);
         assert_eq!(
             err,
-            Err(CodegenError::TapGroupOutOfRange { tap_idx: 0, group: 7 })
+            Err(CodegenError::TapGroupOutOfRange {
+                tap_idx: 0,
+                group: 7
+            })
         );
     }
 
@@ -1587,13 +1634,9 @@ mod tests {
             block: GET_BLOCK,
             ret: 0,
         };
-        let kernel = staged_kernel_from_def_with_mode(
-            "get_base",
-            &GET_DEF,
-            TEST_TAPS,
-            FieldMode::Base,
-        )
-        .unwrap();
+        let kernel =
+            staged_kernel_from_def_with_mode("get_base", &GET_DEF, TEST_TAPS, FieldMode::Base)
+                .unwrap();
         // TEST_TAPS[1] = { group: 1, offset: 1, back_inv_rate: 0 }
         assert!(
             kernel.wgsl_source.contains("read_g1_scalar(1u, 0u, cycle)"),
@@ -1605,7 +1648,9 @@ mod tests {
         let kernel_ext =
             staged_kernel_from_def_with_mode("get_ext", &GET_DEF, TEST_TAPS, FieldMode::Ext)
                 .unwrap();
-        assert!(kernel_ext.wgsl_source.contains("read_g1_ext(1u, 0u, cycle)"));
+        assert!(kernel_ext
+            .wgsl_source
+            .contains("read_g1_ext(1u, 0u, cycle)"));
     }
 
     #[test]
@@ -1620,8 +1665,7 @@ mod tests {
         assert!(base.wgsl_source.contains("read_global_scalar(1u, 4u)"));
         assert!(!base.wgsl_source.contains("read_global_ext"));
 
-        let ext =
-            staged_kernel_from_def_with_mode("gg_ext", &GG_DEF, &[], FieldMode::Ext).unwrap();
+        let ext = staged_kernel_from_def_with_mode("gg_ext", &GG_DEF, &[], FieldMode::Ext).unwrap();
         assert!(ext.wgsl_source.contains("read_global_ext(1u, 4u)"));
     }
 
@@ -1655,20 +1699,22 @@ mod tests {
     fn staged_kernel_writes_ret_mix_tot_to_check_buffer() {
         let kernel = staged_kernel_from_def("tiny", &TINY_DEF, &[]).unwrap();
         assert!(
-            kernel.wgsl_source.contains("write_check(cycle, mix_tot[1]);"),
+            kernel
+                .wgsl_source
+                .contains("write_check(cycle, mix_tot[1]);"),
             "ret = 1 means we write mix_tot[1] to the check buffer at cycle"
         );
     }
 
     #[test]
     fn ext_mode_uses_ext_helpers_for_all_arithmetic_ops_for_full_def() {
-        let kernel = staged_kernel_from_def_with_mode("full", &FULL_DEF, TEST_TAPS, FieldMode::Ext)
-            .unwrap();
+        let kernel =
+            staged_kernel_from_def_with_mode("full", &FULL_DEF, TEST_TAPS, FieldMode::Ext).unwrap();
         for token in [
             "ext_add(",
             "ext_sub(",
             "ext_mul(",
-            "read_g2_ext(",     // FULL_DEF Get(5) -> TEST_TAPS[5] = g2
+            "read_g2_ext(", // FULL_DEF Get(5) -> TEST_TAPS[5] = g2
             "read_global_ext(",
             "load_mix_pow(",
         ] {
@@ -1741,7 +1787,9 @@ mod tests {
         assert!(!stage0.wgsl_source.contains("read_fp_scratch_"));
         assert!(!stage0.wgsl_source.contains("write_fp_scratch_"));
         // Last chunk emits write_check.
-        assert!(stage0.wgsl_source.contains("write_check(cycle, mix_tot[1])"));
+        assert!(stage0
+            .wgsl_source
+            .contains("write_check(cycle, mix_tot[1])"));
         // Strides are zero — no scratch needed.
         assert_eq!(multi.fp_scratch_stride_u32, 0);
         assert_eq!(multi.mix_scratch_stride_u32, 0);

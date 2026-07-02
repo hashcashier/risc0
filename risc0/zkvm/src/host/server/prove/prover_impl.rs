@@ -420,7 +420,7 @@ impl ProverImpl {
             let _timer = WebGpuStageTimer::new(format!("verify_segment index={}", receipt.index));
             receipt
                 .verify_integrity_with_context(ctx)
-                .context("verify segment")?;
+                .with_context(|| format!("verify segment index={}", receipt.index))?;
         }
 
         Ok(receipt)
@@ -878,7 +878,7 @@ impl ProverServer for ProverImpl {
             let _timer = WebGpuStageTimer::new(format!("verify_segment index={}", receipt.index));
             receipt
                 .verify_integrity_with_context(ctx)
-                .context("verify segment")?;
+                .with_context(|| format!("verify segment index={}", receipt.index))?;
         }
 
         Ok(receipt)

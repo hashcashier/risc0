@@ -108,7 +108,11 @@ impl TileLayout {
 
     /// Which tile contains the given column index.
     pub fn tile_for_col(&self, col: usize) -> usize {
-        debug_assert!(col < self.total_cols, "col {col} >= total_cols {}", self.total_cols);
+        debug_assert!(
+            col < self.total_cols,
+            "col {col} >= total_cols {}",
+            self.total_cols
+        );
         col / self.tile_cols
     }
 
@@ -233,8 +237,7 @@ impl BufferPool {
                         std::mem::size_of_val(tile_slice),
                     )
                 };
-                if let Err(e) =
-                    hal.write_buffer_named(&pool.buffers[tile_idx], pool.name, 0, bytes)
+                if let Err(e) = hal.write_buffer_named(&pool.buffers[tile_idx], pool.name, 0, bytes)
                 {
                     err = Some(e);
                     return;
@@ -353,7 +356,10 @@ mod tests {
     fn single_oversized_column_returns_err() {
         // 1 col × 1G rows × 4 B = 4 GiB > 1 GiB binding limit.
         let result = TileLayout::new(1 << 30, 1, ELEM_SIZE, MAX_1G);
-        assert!(result.is_err(), "expected single-col-too-large to be rejected");
+        assert!(
+            result.is_err(),
+            "expected single-col-too-large to be rejected"
+        );
     }
 
     #[test]

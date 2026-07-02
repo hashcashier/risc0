@@ -7116,6 +7116,7 @@ dependencies = [
  "derive_more",
  "enum-map",
  "flate2",
+ "futures",
  "gdbstub",
  "gdbstub_arch",
  "malachite",

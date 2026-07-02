@@ -1,0 +1,177 @@
+warning: fields `fp_scratch_stride_u32` and `mix_scratch_stride_u32` are never read
+    --> /home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkp/src/hal/webgpu.rs:5477:5
+     |
+5461 | struct StagedEvalCheckPipeline {
+     |        ----------------------- fields in this struct
+...
+5477 |     fp_scratch_stride_u32: usize,
+     |     ^^^^^^^^^^^^^^^^^^^^^
+...
+5481 |     mix_scratch_stride_u32: usize,
+     |     ^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `StagedEvalCheckPipeline` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+     = note: `#[warn(dead_code)]` on by default
+
+warning: `risc0-zkp` (lib) generated 1 warning
+   Compiling xgboost-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/xgboost/methods)
+   Compiling voting-machine-methods v0.12.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/voting-machine/methods)
+   Compiling chess-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/chess/methods)
+   Compiling hello-world-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/hello-world/methods)
+   Compiling password-checker-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/password-checker/methods)
+   Compiling wasm-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/wasm/methods)
+   Compiling p256-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/ecdsa/p256/methods)
+   Compiling bevy-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/bevy/methods)
+   Compiling waldo-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/waldo/methods)
+   Compiling prorata-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/prorata/methods)
+   Compiling wordle-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/wordle/methods)
+warning: methods `lookup_witgen_top_chunk0_kernel`, `lookup_witgen_top_chunk1_kernel`, `dispatch_witgen_top_chunk0_probe`, and `lookup_topaccum_arm5_probe_kernel` are never used
+    --> /home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/rv32im/src/prove/hal/webgpu.rs:3751:8
+     |
+3238 | impl WebGpuCircuitHal {
+     | --------------------- methods in this implementation
+...
+3751 |     fn lookup_witgen_top_chunk0_kernel(&self) -> Option<WebGpuKernel> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3755 |     fn lookup_witgen_top_chunk1_kernel(&self) -> Option<WebGpuKernel> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+4928 |     fn dispatch_witgen_top_chunk0_probe(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+5010 |     fn lookup_topaccum_arm5_probe_kernel(&self) -> Result<WebGpuKernel> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` on by default
+
+warning: function `rewrite_chunk0` is never used
+   --> /home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/rv32im/src/prove/wgsl_pruner.rs:780:4
+    |
+780 | fn rewrite_chunk0(body: &str, chunked_bases: &BTreeSet<&str>) -> String {
+    |    ^^^^^^^^^^^^^^
+
+   Compiling jwt-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/jwt-validator/methods)
+   Compiling bn254-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/bn254/methods)
+   Compiling groth16-verifier-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/groth16-verifier/methods)
+   Compiling digital-signature-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/digital-signature/methods)
+   Compiling sha-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/sha/methods)
+   Compiling json-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/json/methods)
+   Compiling composition-example-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/composition/methods)
+warning: `risc0-circuit-rv32im` (lib) generated 2 warnings
+   Compiling risc0-circuit-recursion v4.0.4 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/recursion)
+   Compiling smartcore-ml-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/smartcore-ml/methods)
+   Compiling risc0-bigint2-methods v3.0.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/bigint2/methods)
+   Compiling k256-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/ecdsa/k256/methods)
+   Compiling keccak-methods v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/keccak/methods)
+   Compiling risc0-zkvm-methods v3.0.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm/methods)
+   Compiling risc0-circuit-keccak v4.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/circuit/keccak)
+   Compiling risc0-zkvm v3.0.5 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/risc0/zkvm)
+   Compiling json-core v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/json/core)
+   Compiling wordle-core v1.0.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/wordle/core)
+   Compiling digital-signature-core v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/digital-signature/core)
+   Compiling waldo-core v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/waldo/core)
+   Compiling browser-prove v0.1.0 (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/browser-prove)
+    Finished `release` profile [optimized + debuginfo] target(s) in 3m 01s
+     Running unittests src/lib.rs (/home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/target/wasm32-unknown-unknown/release/deps/browser_prove-d084df2f0d3bf6c6.wasm)
+Set timeout to 420 seconds...
+Executing bindgen...                                                                                Running headless tests in Chrome on `http://127.0.0.1:43437/`
+Try find `webdriver.json` for configure browser's capabilities:
+Ok
+Starting new webdriver session...                 Visiting http://127.0.0.1:40935...                Loading page elements...                          Waiting for test to finish...                                                                       using deprecated parameters for the initialization function; pass a single object instead
+running 1 test
+browser-prove:webgpu-limits max_buffer_size=1073741824 max_storage_buffer_binding_size=1073741824 max_compute_workgroup_storage_size=32768
+panicked at browser-prove/src/lib.rs:61:9:
+representative performance proof gates require high WebGPU limits: max_buffer_size=1073741824 max_storage_buffer_binding_size=1073741824 max_compute_workgroup_storage_size=32768
+
+Stack:
+
+Error
+    at http://127.0.0.1:40935/wasm-bindgen-test:761:21
+    at logError (http://127.0.0.1:40935/wasm-bindgen-test:15:18)
+    at imports.wbg.__wbg_new_8a6f238a6ece86ea (http://127.0.0.1:40935/wasm-bindgen-test:760:66)
+    at browser_prove-d084df2f0d3bf6c6.wasm.__wbg_new_8a6f238a6ece86ea externref shim (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[7851]:0xfd1b72)
+    at browser_prove-d084df2f0d3bf6c6.wasm.console_error_panic_hook::hook::h2934b42f3f2161ce (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[2874]:0xeb2c1d)
+    at browser_prove-d084df2f0d3bf6c6.wasm.core::ops::function::Fn::call::h3f31ab4ef0bd2b2e (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[8827]:0xfd5219)
+    at browser_prove-d084df2f0d3bf6c6.wasm.std::panicking::rust_panic_with_hook::h4fa3daead9c4e0a7 (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[5597]:0xf9a6d7)
+    at browser_prove-d084df2f0d3bf6c6.wasm.std::panicking::begin_panic_handler::{{closure}}::hd6c1b2d9392231ac (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[5922]:0xfa8c75)
+    at browser_prove-d084df2f0d3bf6c6.wasm.std::sys::backtrace::__rust_end_short_backtrace::h59d6c402e40a1685 (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[8258]:0xfd3bcf)
+    at browser_prove-d084df2f0d3bf6c6.wasm.__rustc[5224e6b81cd82a8f]::rust_begin_unwind (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[7280]:0xfcd3d8)
+
+
+test tests::xgboost_succinct_receipt_verifies ... FAIL
+
+failures:
+
+---- tests::xgboost_succinct_receipt_verifies output ----
+    log output:
+        browser-prove:webgpu-limits max_buffer_size=1073741824 max_storage_buffer_binding_size=1073741824 max_compute_workgroup_storage_size=32768
+    
+    error output:
+        panicked at browser-prove/src/lib.rs:61:9:
+        representative performance proof gates require high WebGPU limits: max_buffer_size=1073741824 max_storage_buffer_binding_size=1073741824 max_compute_workgroup_storage_size=32768
+        
+        Stack:
+        
+        Error
+            at http://127.0.0.1:40935/wasm-bindgen-test:761:21
+            at logError (http://127.0.0.1:40935/wasm-bindgen-test:15:18)
+            at imports.wbg.__wbg_new_8a6f238a6ece86ea (http://127.0.0.1:40935/wasm-bindgen-test:760:66)
+            at browser_prove-d084df2f0d3bf6c6.wasm.__wbg_new_8a6f238a6ece86ea externref shim (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[7851]:0xfd1b72)
+            at browser_prove-d084df2f0d3bf6c6.wasm.console_error_panic_hook::hook::h2934b42f3f2161ce (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[2874]:0xeb2c1d)
+            at browser_prove-d084df2f0d3bf6c6.wasm.core::ops::function::Fn::call::h3f31ab4ef0bd2b2e (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[8827]:0xfd5219)
+            at browser_prove-d084df2f0d3bf6c6.wasm.std::panicking::rust_panic_with_hook::h4fa3daead9c4e0a7 (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[5597]:0xf9a6d7)
+            at browser_prove-d084df2f0d3bf6c6.wasm.std::panicking::begin_panic_handler::{{closure}}::hd6c1b2d9392231ac (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[5922]:0xfa8c75)
+            at browser_prove-d084df2f0d3bf6c6.wasm.std::sys::backtrace::__rust_end_short_backtrace::h59d6c402e40a1685 (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[8258]:0xfd3bcf)
+            at browser_prove-d084df2f0d3bf6c6.wasm.__rustc[5224e6b81cd82a8f]::rust_begin_unwind (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[7280]:0xfcd3d8)
+        
+        
+    
+    JS exception that was thrown:
+        RuntimeError: unreachable
+            at browser_prove-d084df2f0d3bf6c6.wasm.__rustc[5224e6b81cd82a8f]::rust_panic (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[8861]:0xfd52e2)
+            at browser_prove-d084df2f0d3bf6c6.wasm.std::panicking::rust_panic_with_hook::h4fa3daead9c4e0a7 (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[5597]:0xf9a701)
+            at browser_prove-d084df2f0d3bf6c6.wasm.std::panicking::begin_panic_handler::{{closure}}::hd6c1b2d9392231ac (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[5922]:0xfa8c75)
+            at browser_prove-d084df2f0d3bf6c6.wasm.std::sys::backtrace::__rust_end_short_backtrace::h59d6c402e40a1685 (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[8258]:0xfd3bcf)
+            at browser_prove-d084df2f0d3bf6c6.wasm.__rustc[5224e6b81cd82a8f]::rust_begin_unwind (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[7280]:0xfcd3d8)
+            at browser_prove-d084df2f0d3bf6c6.wasm.core::panicking::panic_fmt::hd3052a3662d50c95 (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[7275]:0xfcd2e7)
+            at browser_prove-d084df2f0d3bf6c6.wasm.<wasm_bindgen_test::__rt::TestFuture<F> as core::future::future::Future>::poll::{{closure}}::{{closure}}::h4d721d1c8bb5286b (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[481]:0xb18c9b)
+            at browser_prove-d084df2f0d3bf6c6.wasm.wasm_bindgen::convert::closures::invoke0_mut::h2dd29ddff6cb24a3 (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[7532]:0xfcfccc)
+            at __wbg_adapter_154 (http://127.0.0.1:40935/wasm-bindgen-test:337:10)
+            at cb0 (http://127.0.0.1:40935/wasm-bindgen-test:1050:28)
+
+failures:
+
+    tests::xgboost_succinct_receipt_verifies
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 157 filtered out; finished in 0.14s
+
+browser-prove:stage start iter6d_d_witgen_prewarm_async
+browser-prove:stage start iter6d_d_witgen_prewarm_async
+console.log div contained:
+    browser-prove:webgpu-limits max_buffer_size=1073741824 max_storage_buffer_binding_size=1073741824 max_compute_workgroup_storage_size=32768
+    browser-prove:stage start iter6d_d_witgen_prewarm_async
+
+console.log div contained:
+    panicked at browser-prove/src/lib.rs:61:9:
+    representative performance proof gates require high WebGPU limits: max_buffer_size=1073741824 max_storage_buffer_binding_size=1073741824 max_compute_workgroup_storage_size=32768
+    
+    Stack:
+    
+    Error
+        at http://127.0.0.1:40935/wasm-bindgen-test:761:21
+        at logError (http://127.0.0.1:40935/wasm-bindgen-test:15:18)
+        at imports.wbg.__wbg_new_8a6f238a6ece86ea (http://127.0.0.1:40935/wasm-bindgen-test:760:66)
+        at browser_prove-d084df2f0d3bf6c6.wasm.__wbg_new_8a6f238a6ece86ea externref shim (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[7851]:0xfd1b72)
+        at browser_prove-d084df2f0d3bf6c6.wasm.console_error_panic_hook::hook::h2934b42f3f2161ce (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[2874]:0xeb2c1d)
+        at browser_prove-d084df2f0d3bf6c6.wasm.core::ops::function::Fn::call::h3f31ab4ef0bd2b2e (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[8827]:0xfd5219)
+        at browser_prove-d084df2f0d3bf6c6.wasm.std::panicking::rust_panic_with_hook::h4fa3daead9c4e0a7 (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[5597]:0xf9a6d7)
+        at browser_prove-d084df2f0d3bf6c6.wasm.std::panicking::begin_panic_handler::{{closure}}::hd6c1b2d9392231ac (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[5922]:0xfa8c75)
+        at browser_prove-d084df2f0d3bf6c6.wasm.std::sys::backtrace::__rust_end_short_backtrace::h59d6c402e40a1685 (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[8258]:0xfd3bcf)
+        at browser_prove-d084df2f0d3bf6c6.wasm.__rustc[5224e6b81cd82a8f]::rust_begin_unwind (http://127.0.0.1:40935/wasm-bindgen-test_bg.wasm:wasm-function[7280]:0xfcd3d8)
+
+                                                  Error: some tests failed
+error: test failed, to rerun pass `--lib`
+
+Caused by:
+  process didn't exit successfully: `wasm-bindgen-test-runner /home/rami/repos/risc0/.worktrees/wasm-webgpu-prover-perf/examples/target/wasm32-unknown-unknown/release/deps/browser_prove-d084df2f0d3bf6c6.wasm xgboost_succinct_receipt_verifies --nocapture` (exit status: 1)

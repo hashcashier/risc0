@@ -165,7 +165,7 @@ where
             cols: REGCOUNT_GLOBAL,
             checked_reads: true,
         };
-        let code = MetaBuffer::new("code", self.hal.as_ref(), cycles, REGCOUNT_CODE, true);
+        let code = MetaBuffer::new_zeroed("code", self.hal.as_ref(), cycles, REGCOUNT_CODE, true);
         let data = scope!(
             "alloc(data)",
             MetaBuffer::new("data", self.hal.as_ref(), cycles, REGCOUNT_DATA, true)
@@ -177,9 +177,8 @@ where
         self.circuit_hal
             .generate_witness(StepMode::Parallel, &preflight, &global, &data)?;
 
-        // Zero out 'invalid' entries in data and output.
+        // Zero out invalid data entries. The code group is allocated zeroed.
         scope!("zeroize", {
-            self.hal.eltwise_zeroize_elem(&code.buf);
             self.hal.eltwise_zeroize_elem(&data.buf);
         });
 

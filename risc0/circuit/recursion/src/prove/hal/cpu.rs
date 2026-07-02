@@ -43,7 +43,7 @@ use crate::{
     GLOBAL_MIX, GLOBAL_OUT, REGISTER_GROUP_ACCUM, REGISTER_GROUP_CTRL, REGISTER_GROUP_DATA,
 };
 
-use super::{CircuitAccumulator, CircuitWitnessGenerator};
+use super::{CircuitAccumulationMode, CircuitAccumulator, CircuitWitnessGenerator};
 
 type CpuHal = risc0_zkp::hal::cpu::CpuHal<BabyBear>;
 
@@ -78,6 +78,7 @@ impl CircuitWitnessGenerator<CpuHal> for CpuCircuitHal {
 impl CircuitAccumulator<CpuHal> for CpuCircuitHal {
     fn accumulate(
         &self,
+        _hal: &CpuHal,
         work_cycles: u32,
         total_cycles: u32,
         ctrl: &CpuBuffer<BabyBearElem>,
@@ -85,7 +86,7 @@ impl CircuitAccumulator<CpuHal> for CpuCircuitHal {
         data: &CpuBuffer<BabyBearElem>,
         mix: &CpuBuffer<BabyBearElem>,
         accum: &CpuBuffer<BabyBearElem>,
-    ) -> Result<()> {
+    ) -> Result<CircuitAccumulationMode> {
         let ctrl = ctrl.as_slice();
         let global = global.as_slice();
         let data = data.as_slice();
@@ -100,7 +101,8 @@ impl CircuitAccumulator<CpuHal> for CpuCircuitHal {
         };
         ffi_wrap(|| unsafe {
             risc0_circuit_recursion_cpu_accum(&buffers, work_cycles, total_cycles)
-        })
+        })?;
+        Ok(CircuitAccumulationMode::Default)
     }
 }
 

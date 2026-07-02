@@ -42,7 +42,7 @@ use crate::{
     GLOBAL_MIX, GLOBAL_OUT, REGISTER_GROUP_ACCUM, REGISTER_GROUP_CTRL, REGISTER_GROUP_DATA,
 };
 
-use super::{CircuitAccumulator, CircuitWitnessGenerator};
+use super::{CircuitAccumulationMode, CircuitAccumulator, CircuitWitnessGenerator};
 
 type CudaCircuitHalSha256 = CudaCircuitHal<CudaHashSha256>;
 type CudaCircuitHalPoseidon2 = CudaCircuitHal<CudaHashPoseidon2>;
@@ -86,6 +86,7 @@ impl<CH: CudaHash> CircuitWitnessGenerator<CudaHal<CH>> for CudaCircuitHal<CH> {
 impl<CH: CudaHash> CircuitAccumulator<CudaHal<CH>> for CudaCircuitHal<CH> {
     fn accumulate(
         &self,
+        _hal: &CudaHal<CH>,
         work_cycles: u32,
         total_cycles: u32,
         ctrl: &CudaBuffer<BabyBearElem>,
@@ -93,7 +94,7 @@ impl<CH: CudaHash> CircuitAccumulator<CudaHal<CH>> for CudaCircuitHal<CH> {
         data: &CudaBuffer<BabyBearElem>,
         mix: &CudaBuffer<BabyBearElem>,
         accum: &CudaBuffer<BabyBearElem>,
-    ) -> Result<()> {
+    ) -> Result<CircuitAccumulationMode> {
         let ctrl = ctrl.as_device_ptr();
         let global = global.as_device_ptr();
         let data = data.as_device_ptr();
@@ -108,7 +109,8 @@ impl<CH: CudaHash> CircuitAccumulator<CudaHal<CH>> for CudaCircuitHal<CH> {
         };
         ffi_wrap(|| unsafe {
             risc0_circuit_recursion_cuda_accum(&buffers, work_cycles, total_cycles)
-        })
+        })?;
+        Ok(CircuitAccumulationMode::Default)
     }
 }
 

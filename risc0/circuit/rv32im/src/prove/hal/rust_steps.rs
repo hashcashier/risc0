@@ -24,7 +24,7 @@
 use std::{
     cell::Cell,
     marker::PhantomData,
-    sync::atomic::{AtomicBool, AtomicU16, Ordering},
+    sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering},
 };
 
 use anyhow::{bail, ensure, Result};
@@ -230,7 +230,9 @@ macro_rules! bind_layout {
 
 macro_rules! eqz {
     ($val:expr, $loc:expr) => {
-        eqz($val, $loc)?
+        if !eqz_elided() {
+            eqz($val, $loc)?
+        }
     };
 }
 
@@ -484,6 +486,576 @@ impl LookupTables {
     }
 }
 
+fn replay_arg_u16_lookup_delta(
+    cycle: usize,
+    tables: &LookupTables,
+    data: BufferRow<Val>,
+    arg: &ArgU16Layout,
+) -> Result<()> {
+    let index = data.get_at(cycle, arg.val._super.offset, false);
+    tables.lookup_delta(cycle, Val::new(16), index)
+}
+
+fn replay_nondet_u16_lookup_delta(
+    cycle: usize,
+    tables: &LookupTables,
+    data: BufferRow<Val>,
+    layout: &NondetU16RegLayout,
+) -> Result<()> {
+    replay_arg_u16_lookup_delta(cycle, tables, data, layout.arg)
+}
+
+fn replay_normalize_u32_lookup_deltas(
+    cycle: usize,
+    tables: &LookupTables,
+    data: BufferRow<Val>,
+    layout: &NormalizeU32Layout,
+) -> Result<()> {
+    replay_nondet_u16_lookup_delta(cycle, tables, data, layout.low16)?;
+    replay_nondet_u16_lookup_delta(cycle, tables, data, layout.high16)?;
+    Ok(())
+}
+
+fn replay_get_sign_u32_lookup_deltas(
+    cycle: usize,
+    tables: &LookupTables,
+    data: BufferRow<Val>,
+    layout: &GetSignU32Layout,
+) -> Result<()> {
+    replay_nondet_u16_lookup_delta(cycle, tables, data, layout.rest_times_two)
+}
+
+fn replay_cmp_less_than_lookup_deltas(
+    cycle: usize,
+    tables: &LookupTables,
+    data: BufferRow<Val>,
+    layout: &CmpLessThanLayout,
+) -> Result<()> {
+    replay_normalize_u32_lookup_deltas(cycle, tables, data, layout.diff)?;
+    replay_get_sign_u32_lookup_deltas(cycle, tables, data, layout.s1)?;
+    replay_get_sign_u32_lookup_deltas(cycle, tables, data, layout.s2)?;
+    replay_get_sign_u32_lookup_deltas(cycle, tables, data, layout.s3)?;
+    Ok(())
+}
+
+fn replay_cmp_less_than_unsigned_lookup_deltas(
+    cycle: usize,
+    tables: &LookupTables,
+    data: BufferRow<Val>,
+    layout: &CmpLessThanUnsignedLayout,
+) -> Result<()> {
+    replay_normalize_u32_lookup_deltas(cycle, tables, data, layout.diff)
+}
+
+fn replay_u16_lookup_delta(cycle: usize, tables: &LookupTables, value: u32) -> Result<()> {
+    ensure!(
+        value < (1 << 16),
+        "[{cycle}]: direct lookup replay value out of u16 range: {value}"
+    );
+    tables.lookup_delta(cycle, Val::new(16), Val::new(value))
+}
+
+fn replay_u8_lookup_delta(cycle: usize, tables: &LookupTables, value: u32) -> Result<()> {
+    ensure!(
+        value < (1 << 8),
+        "[{cycle}]: direct lookup replay value out of u8 range: {value}"
+    );
+    tables.lookup_delta(cycle, Val::new(8), Val::new(value))
+}
+
+fn get_cycle_txn<'a>(
+    preflight: &'a PreflightTrace,
+    cycle: usize,
+    txn_cursor: &mut usize,
+) -> Result<&'a risc0_circuit_rv32im_sys::RawMemoryTransaction> {
+    let txn = preflight
+        .txns
+        .get(*txn_cursor)
+        .ok_or_else(|| anyhow::anyhow!("[{cycle}]: memory transaction index out of range"))?;
+    ensure!(
+        txn.cycle / 2 == cycle as u32,
+        "[{cycle}]: memory transaction cycle mismatch: txn_cycle={}",
+        txn.cycle
+    );
+    *txn_cursor += 1;
+    Ok(txn)
+}
+
+fn current_pc_and_machine_mode(preflight: &PreflightTrace, cycle: usize) -> (u32, u8) {
+    if cycle == 0 {
+        (0, 1)
+    } else {
+        let prev = &preflight.cycles[cycle - 1];
+        (prev.pc, prev.machine_mode)
+    }
+}
+
+fn get_cycle_inst_and_sources(preflight: &PreflightTrace, cycle: usize) -> Result<(u32, u32, u32)> {
+    let preflight_cycle = &preflight.cycles[cycle];
+    let (pc, _) = current_pc_and_machine_mode(preflight, cycle);
+    let mut txn_cursor = preflight_cycle.txn_idx as usize;
+    let inst_txn = get_cycle_txn(preflight, cycle, &mut txn_cursor)?;
+    ensure!(
+        inst_txn.addr == pc / 4,
+        "[{cycle}]: direct replay instruction txn addr mismatch: got={:#010x} expected={:#010x}",
+        inst_txn.addr,
+        pc / 4
+    );
+    let inst = inst_txn.word;
+    let rs1 = (inst >> 15) & 0x1f;
+    let rs2 = (inst >> 20) & 0x1f;
+    let rs1_word = get_cycle_txn(preflight, cycle, &mut txn_cursor)?.word;
+    let rs2_word = if rs1 == rs2 {
+        rs1_word
+    } else {
+        get_cycle_txn(preflight, cycle, &mut txn_cursor)?.word
+    };
+    Ok((inst, rs1_word, rs2_word))
+}
+
+fn get_cycle_inst_rs1_and_load_word(
+    preflight: &PreflightTrace,
+    cycle: usize,
+) -> Result<(u32, u32, u32)> {
+    let preflight_cycle = &preflight.cycles[cycle];
+    let (pc, _) = current_pc_and_machine_mode(preflight, cycle);
+    let mut txn_cursor = preflight_cycle.txn_idx as usize;
+    let inst_txn = get_cycle_txn(preflight, cycle, &mut txn_cursor)?;
+    ensure!(
+        inst_txn.addr == pc / 4,
+        "[{cycle}]: MEM0 direct replay instruction txn addr mismatch: got={:#010x} expected={:#010x}",
+        inst_txn.addr,
+        pc / 4
+    );
+    let inst = inst_txn.word;
+    let rs1_word = get_cycle_txn(preflight, cycle, &mut txn_cursor)?.word;
+    let imm_i = ((inst as i32) >> 20) as u32;
+    let load_addr = rs1_word.wrapping_add(imm_i);
+    let load_txn = get_cycle_txn(preflight, cycle, &mut txn_cursor)?;
+    ensure!(
+        load_txn.addr == load_addr / 4,
+        "[{cycle}]: MEM0 direct replay load txn addr mismatch: got={:#010x} expected={:#010x}",
+        load_txn.addr,
+        load_addr / 4
+    );
+    Ok((inst, rs1_word, load_txn.word))
+}
+
+fn get_cycle_store_context(
+    preflight: &PreflightTrace,
+    cycle: usize,
+    minor: u8,
+) -> Result<(u32, u32, u32, u32, u32, u32)> {
+    let preflight_cycle = &preflight.cycles[cycle];
+    let (pc, _) = current_pc_and_machine_mode(preflight, cycle);
+    let mut txn_cursor = preflight_cycle.txn_idx as usize;
+    let inst_txn = get_cycle_txn(preflight, cycle, &mut txn_cursor)?;
+    ensure!(
+        inst_txn.addr == pc / 4,
+        "[{cycle}]: MEM1 direct replay instruction txn addr mismatch: got={:#010x} expected={:#010x}",
+        inst_txn.addr,
+        pc / 4
+    );
+    let inst = inst_txn.word;
+    let rs1 = (inst >> 15) & 0x1f;
+    let rs2 = (inst >> 20) & 0x1f;
+    let rs1_word = get_cycle_txn(preflight, cycle, &mut txn_cursor)?.word;
+    let rs2_word = if rs1 == rs2 {
+        rs1_word
+    } else {
+        get_cycle_txn(preflight, cycle, &mut txn_cursor)?.word
+    };
+    let imm_s = ((((inst as i32) >> 25) << 5) as u32) | ((inst >> 7) & 0x1f);
+    let store_addr = rs1_word.wrapping_add(imm_s);
+    let read_txn = get_cycle_txn(preflight, cycle, &mut txn_cursor)?;
+    ensure!(
+        read_txn.addr == store_addr / 4,
+        "[{cycle}]: MEM1 direct replay read txn addr mismatch: got={:#010x} expected={:#010x}",
+        read_txn.addr,
+        store_addr / 4
+    );
+    let write_txn = get_cycle_txn(preflight, cycle, &mut txn_cursor)?;
+    ensure!(
+        write_txn.addr == store_addr / 4,
+        "[{cycle}]: MEM1 direct replay write txn addr mismatch: got={:#010x} expected={:#010x}",
+        write_txn.addr,
+        store_addr / 4
+    );
+    let expected_write = mem1_store_word(cycle, minor, store_addr, rs2_word, read_txn.word)?;
+    ensure!(
+        write_txn.word == expected_write,
+        "[{cycle}]: MEM1 direct replay write word mismatch: got={:#010x} expected={:#010x}",
+        write_txn.word,
+        expected_write
+    );
+    Ok((
+        inst,
+        rs1_word,
+        rs2_word,
+        store_addr,
+        read_txn.word,
+        write_txn.word,
+    ))
+}
+
+fn upper_base_for_mode(cycle: usize, mode: u8, context: &str) -> Result<u32> {
+    match mode {
+        0 => Ok(0xbfff),
+        1 => Ok(0xffff),
+        mode => anyhow::bail!("[{cycle}]: unsupported {context} direct replay machine_mode={mode}"),
+    }
+}
+
+fn replay_addr_decompose_lookup_deltas(
+    cycle: usize,
+    tables: &LookupTables,
+    addr: u32,
+    mode: u8,
+    context: &str,
+) -> Result<()> {
+    let addr_high = addr >> 16;
+    let upper_base = upper_base_for_mode(cycle, mode, context)?;
+    ensure!(
+        addr_high <= upper_base,
+        "[{cycle}]: {context} direct replay address high word exceeds mode range: addr_high={addr_high} upper_base={upper_base}"
+    );
+    replay_u16_lookup_delta(cycle, tables, upper_base - addr_high)?;
+    replay_u16_lookup_delta(cycle, tables, (addr & 0xffff) >> 2)
+}
+
+fn misc0_simple_replay_values(preflight: &PreflightTrace, cycle: usize) -> Result<[u32; 6]> {
+    let preflight_cycle = &preflight.cycles[cycle];
+    let (pc, machine_mode) = current_pc_and_machine_mode(preflight, cycle);
+    ensure!(
+        pc & 3 == 0,
+        "[{cycle}]: MISC0 direct replay expected word-aligned pc, got {pc:#010x}"
+    );
+
+    let pc_low = pc & 0xffff;
+    let pc_high = pc >> 16;
+    let upper_base = upper_base_for_mode(cycle, machine_mode, "MISC0")?;
+    ensure!(
+        pc_high <= upper_base,
+        "[{cycle}]: MISC0 direct replay pc high word exceeds mode range: pc_high={pc_high} upper_base={upper_base}"
+    );
+    let pc_addr_upper_diff = upper_base - pc_high;
+    let pc_addr_med14 = pc_low >> 2;
+
+    let (inst, rs1_word, rs2_word) = get_cycle_inst_and_sources(preflight, cycle)?;
+    let write_word = match preflight_cycle.minor {
+        0 => rs1_word.wrapping_add(rs2_word),
+        1 => rs1_word.wrapping_sub(rs2_word),
+        2 => rs1_word ^ rs2_word,
+        3 => rs1_word | rs2_word,
+        4 => rs1_word & rs2_word,
+        7 => {
+            let imm_i = ((inst as i32) >> 20) as u32;
+            rs1_word.wrapping_add(imm_i)
+        }
+        minor => anyhow::bail!("[{cycle}]: unsupported MISC0 direct replay minor={minor}"),
+    };
+    let next_pc = pc.wrapping_add(4);
+
+    Ok([
+        pc_addr_upper_diff,
+        pc_addr_med14,
+        write_word & 0xffff,
+        write_word >> 16,
+        next_pc & 0xffff,
+        next_pc >> 16,
+    ])
+}
+
+fn replay_misc0_simple_lookup_deltas(
+    preflight: &PreflightTrace,
+    cycle: usize,
+    tables: &LookupTables,
+) -> Result<()> {
+    for value in misc0_simple_replay_values(preflight, cycle)? {
+        replay_u16_lookup_delta(cycle, tables, value)?;
+    }
+    Ok(())
+}
+
+fn misc0_simple_short_circuit_minor(minor: u8) -> bool {
+    matches!(minor, 0 | 1 | 2 | 3 | 4 | 7)
+}
+
+fn misc2_short_circuit_minor(minor: u8) -> bool {
+    // Minor 1 still uses the generic chunk1 path whose nested
+    // ReadSourceRegs mux is incomplete when rs1 == rs2. Keep it on CPU until
+    // it has the same combined source-register treatment as minor 0/2+.
+    matches!(minor, 0 | 2 | 3 | 4 | 5 | 6 | 7)
+}
+
+fn mem0_short_circuit_minor(minor: u8) -> bool {
+    matches!(minor, 0 | 1 | 2 | 3 | 4)
+        && (WITGEN_GPU_MEM0_REPLACE_MINOR_MASK.load(Ordering::Acquire) & (1u16 << minor)) != 0
+}
+
+fn mem1_short_circuit_minor(minor: u8) -> bool {
+    matches!(minor, 0 | 1 | 2)
+        && (WITGEN_GPU_MEM1_REPLACE_MINOR_MASK.load(Ordering::Acquire) & (1u16 << minor)) != 0
+}
+
+fn replay_normalized_word_lookup_deltas(
+    cycle: usize,
+    tables: &LookupTables,
+    value: u32,
+) -> Result<()> {
+    replay_u16_lookup_delta(cycle, tables, value & 0xffff)?;
+    replay_u16_lookup_delta(cycle, tables, value >> 16)
+}
+
+fn normalized_diff_lookup_values(lhs: u32, rhs: u32) -> (u32, u32) {
+    let lhs_low = lhs & 0xffff;
+    let lhs_high = lhs >> 16;
+    let rhs_low = rhs & 0xffff;
+    let rhs_high = rhs >> 16;
+    let low = lhs_low + 0x1_0000 - rhs_low;
+    let low_carry = (low >> 16) & 1;
+    let high = lhs_high + 0xffff - rhs_high + low_carry;
+    (low & 0xffff, high & 0xffff)
+}
+
+fn sign_rest_times_two(value: u32) -> u32 {
+    ((value >> 16) & 0x7fff) * 2
+}
+
+fn replay_unsigned_cmp_lookup_deltas(
+    cycle: usize,
+    tables: &LookupTables,
+    lhs: u32,
+    rhs: u32,
+) -> Result<()> {
+    let (diff_low, diff_high) = normalized_diff_lookup_values(lhs, rhs);
+    replay_u16_lookup_delta(cycle, tables, diff_low)?;
+    replay_u16_lookup_delta(cycle, tables, diff_high)
+}
+
+fn replay_signed_cmp_lookup_deltas(
+    cycle: usize,
+    tables: &LookupTables,
+    lhs: u32,
+    rhs: u32,
+) -> Result<()> {
+    let (diff_low, diff_high) = normalized_diff_lookup_values(lhs, rhs);
+    replay_u16_lookup_delta(cycle, tables, diff_low)?;
+    replay_u16_lookup_delta(cycle, tables, diff_high)?;
+    replay_u16_lookup_delta(cycle, tables, sign_rest_times_two(lhs))?;
+    replay_u16_lookup_delta(cycle, tables, sign_rest_times_two(rhs))?;
+    replay_u16_lookup_delta(cycle, tables, (diff_high & 0x7fff) * 2)
+}
+
+fn misc2_write_word(preflight: &PreflightTrace, cycle: usize, inst: u32, minor: u8) -> u32 {
+    let (pc, _) = current_pc_and_machine_mode(preflight, cycle);
+    match minor {
+        3 | 4 => pc.wrapping_add(4),
+        5 => inst & 0xffff_f000,
+        6 => pc.wrapping_add(inst & 0xffff_f000),
+        _ => 0,
+    }
+}
+
+fn replay_misc2_lookup_deltas_from_preflight(
+    preflight: &PreflightTrace,
+    cycle: usize,
+    tables: &LookupTables,
+    minor: u8,
+) -> Result<()> {
+    let (pc, machine_mode) = current_pc_and_machine_mode(preflight, cycle);
+    ensure!(
+        pc & 3 == 0,
+        "[{cycle}]: MISC2 direct replay expected word-aligned pc, got {pc:#010x}"
+    );
+    let pc_low = pc & 0xffff;
+    let pc_high = pc >> 16;
+    let upper_base = upper_base_for_mode(cycle, machine_mode, "MISC2")?;
+    ensure!(
+        pc_high <= upper_base,
+        "[{cycle}]: MISC2 direct replay pc high word exceeds mode range: pc_high={pc_high} upper_base={upper_base}"
+    );
+
+    let (inst, rs1_word, rs2_word) = get_cycle_inst_and_sources(preflight, cycle)?;
+    replay_u16_lookup_delta(cycle, tables, upper_base - pc_high)?;
+    replay_u16_lookup_delta(cycle, tables, pc_low >> 2)?;
+    replay_normalized_word_lookup_deltas(
+        cycle,
+        tables,
+        misc2_write_word(preflight, cycle, inst, minor),
+    )?;
+    replay_normalized_word_lookup_deltas(cycle, tables, preflight.cycles[cycle].pc)?;
+    match minor {
+        0 => replay_signed_cmp_lookup_deltas(cycle, tables, rs1_word, rs2_word)?,
+        2 => replay_unsigned_cmp_lookup_deltas(cycle, tables, rs1_word, rs2_word)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn replay_split_word_lookup_deltas(cycle: usize, tables: &LookupTables, word: u32) -> Result<()> {
+    replay_u8_lookup_delta(cycle, tables, word & 0xff)?;
+    replay_u8_lookup_delta(cycle, tables, (word >> 8) & 0xff)
+}
+
+fn replay_mem0_lookup_deltas_from_preflight(
+    preflight: &PreflightTrace,
+    cycle: usize,
+    tables: &LookupTables,
+    minor: u8,
+) -> Result<()> {
+    let (pc, machine_mode) = current_pc_and_machine_mode(preflight, cycle);
+    ensure!(
+        pc & 3 == 0,
+        "[{cycle}]: MEM0 direct replay expected word-aligned pc, got {pc:#010x}"
+    );
+
+    let (inst, rs1_word, load_word) = get_cycle_inst_rs1_and_load_word(preflight, cycle)?;
+    let imm_i = ((inst as i32) >> 20) as u32;
+    let load_addr = rs1_word.wrapping_add(imm_i);
+    let load_low2 = load_addr & 3;
+    let halfword = if (load_low2 & 2) != 0 {
+        load_word >> 16
+    } else {
+        load_word & 0xffff
+    };
+
+    replay_addr_decompose_lookup_deltas(cycle, tables, pc, machine_mode, "MEM0 pc")?;
+    replay_normalized_word_lookup_deltas(cycle, tables, load_addr)?;
+    replay_addr_decompose_lookup_deltas(cycle, tables, load_addr, machine_mode, "MEM0 load")?;
+
+    match minor {
+        0 => {
+            replay_split_word_lookup_deltas(cycle, tables, halfword)?;
+            let byte = if (load_low2 & 1) != 0 {
+                (halfword >> 8) & 0xff
+            } else {
+                halfword & 0xff
+            };
+            replay_u8_lookup_delta(cycle, tables, (byte & 0x7f) * 2)?;
+        }
+        1 => {
+            ensure!(
+                (load_low2 & 1) == 0,
+                "[{cycle}]: MEM0 LH direct replay expected halfword alignment, got addr={load_addr:#010x}"
+            );
+            replay_u16_lookup_delta(cycle, tables, (halfword & 0x7fff) * 2)?;
+        }
+        2 => {
+            ensure!(
+                load_low2 == 0,
+                "[{cycle}]: MEM0 LW direct replay expected word alignment, got addr={load_addr:#010x}"
+            );
+        }
+        3 => {
+            replay_split_word_lookup_deltas(cycle, tables, halfword)?;
+        }
+        4 => {
+            ensure!(
+                (load_low2 & 1) == 0,
+                "[{cycle}]: MEM0 LHU direct replay expected halfword alignment, got addr={load_addr:#010x}"
+            );
+        }
+        _ => anyhow::bail!("[{cycle}]: unsupported MEM0 direct replay minor={minor}"),
+    }
+
+    replay_normalized_word_lookup_deltas(cycle, tables, pc.wrapping_add(4))
+}
+
+fn mem1_store_word(
+    cycle: usize,
+    minor: u8,
+    store_addr: u32,
+    rs2_word: u32,
+    old_word: u32,
+) -> Result<u32> {
+    let low2 = store_addr & 3;
+    match minor {
+        0 => {
+            let shift = low2 * 8;
+            let mask = 0xffu32 << shift;
+            Ok((old_word & !mask) | ((rs2_word & 0xff) << shift))
+        }
+        1 => {
+            ensure!(
+                (low2 & 1) == 0,
+                "[{cycle}]: MEM1 SH direct replay expected halfword alignment, got addr={store_addr:#010x}"
+            );
+            let shift = (low2 & 2) * 8;
+            let mask = 0xffffu32 << shift;
+            Ok((old_word & !mask) | ((rs2_word & 0xffff) << shift))
+        }
+        2 => {
+            ensure!(
+                low2 == 0,
+                "[{cycle}]: MEM1 SW direct replay expected word alignment, got addr={store_addr:#010x}"
+            );
+            Ok(rs2_word)
+        }
+        _ => anyhow::bail!("[{cycle}]: unsupported MEM1 direct replay minor={minor}"),
+    }
+}
+
+fn replay_mem1_lookup_deltas_from_preflight(
+    preflight: &PreflightTrace,
+    cycle: usize,
+    tables: &LookupTables,
+    minor: u8,
+) -> Result<()> {
+    let (pc, machine_mode) = current_pc_and_machine_mode(preflight, cycle);
+    ensure!(
+        pc & 3 == 0,
+        "[{cycle}]: MEM1 direct replay expected word-aligned pc, got {pc:#010x}"
+    );
+
+    let (_inst, _rs1_word, rs2_word, store_addr, old_word, _new_word) =
+        get_cycle_store_context(preflight, cycle, minor)?;
+    let halfword = if (store_addr & 2) != 0 {
+        old_word >> 16
+    } else {
+        old_word & 0xffff
+    };
+
+    replay_addr_decompose_lookup_deltas(cycle, tables, pc, machine_mode, "MEM1 pc")?;
+    replay_normalized_word_lookup_deltas(cycle, tables, store_addr)?;
+    replay_addr_decompose_lookup_deltas(cycle, tables, store_addr, machine_mode, "MEM1 store")?;
+
+    if minor == 0 {
+        replay_split_word_lookup_deltas(cycle, tables, halfword)?;
+        replay_split_word_lookup_deltas(cycle, tables, rs2_word & 0xffff)?;
+    }
+
+    replay_normalized_word_lookup_deltas(cycle, tables, pc.wrapping_add(4))
+}
+
+fn replay_short_circuit_side_effects(
+    preflight: &PreflightTrace,
+    tables: &LookupTables,
+    cycle: usize,
+    data: BufferRow<Val>,
+) -> Result<()> {
+    let preflight_cycle = &preflight.cycles[cycle];
+    match (preflight_cycle.major, preflight_cycle.minor) {
+        // Bounded replacement slice: MISC0 arithmetic/bitwise ops.
+        // The GPU writes the witness cells, but later Control0 rows read the
+        // mutable U16 lookup counts that step_Top would have advanced. Replay
+        // the common decode/finalize table deltas directly from preflight.
+        (0, minor) if misc0_simple_short_circuit_minor(minor) => {
+            replay_misc0_simple_lookup_deltas(preflight, cycle, tables)
+        }
+        (2, minor) if misc2_short_circuit_minor(minor) => {
+            replay_misc2_lookup_deltas_from_preflight(preflight, cycle, tables, minor)
+        }
+        (5, minor) if mem0_short_circuit_minor(minor) => {
+            replay_mem0_lookup_deltas_from_preflight(preflight, cycle, tables, minor)
+        }
+        (6, minor) if mem1_short_circuit_minor(minor) => {
+            replay_mem1_lookup_deltas_from_preflight(preflight, cycle, tables, minor)
+        }
+        _ => Ok(()),
+    }
+}
+
 trait EqZero {
     fn ensure_zero(self, loc: &'static str) -> Result<()>;
 }
@@ -506,6 +1078,33 @@ impl EqZero for BabyBearExtElem {
 
 fn eqz<T: EqZero>(val: T, loc: &'static str) -> Result<()> {
     val.ensure_zero(loc)
+}
+
+static EQZ_ELIDED: AtomicBool = AtomicBool::new(false);
+
+#[inline(always)]
+fn eqz_elided() -> bool {
+    EQZ_ELIDED.load(Ordering::Relaxed)
+}
+
+struct EqzElisionGuard {
+    previous: bool,
+}
+
+impl Drop for EqzElisionGuard {
+    fn drop(&mut self) {
+        EQZ_ELIDED.store(self.previous, Ordering::Release);
+    }
+}
+
+pub(crate) fn with_eqz_elided<R>(f: impl FnOnce() -> R) -> R {
+    let previous = EQZ_ELIDED.swap(true, Ordering::AcqRel);
+    let _guard = EqzElisionGuard { previous };
+    f()
+}
+
+pub(crate) fn with_accum_eqz_elided<R>(f: impl FnOnce() -> R) -> R {
+    with_eqz_elided(f)
 }
 
 trait Inv {
@@ -708,6 +1307,54 @@ where
     step_accum_inner(preflight, data, accum, global, mix, true)
 }
 
+pub(crate) fn repair_witgen_gpu_replace_shadow_for_accum<H>(
+    preflight: &PreflightTrace,
+    global: &MetaBuffer<H>,
+    data: &MetaBuffer<H>,
+) -> Result<usize>
+where
+    H: risc0_zkp::hal::Hal<Field = CircuitField, Elem = Val, ExtElem = ExtVal>,
+{
+    let mut result = Ok(0);
+    data.buf.view_mut(|data_view| {
+        global.buf.view(|global_view| {
+            let data = BufferRow::mutable(data_view, data.rows, data.cols, false);
+            let global = BufferRow::global(global_view, global.rows, global.cols, global.checked);
+            let tables = LookupTables::default();
+            let mut repaired = 0usize;
+
+            #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+            let _timer = risc0_zkp::hal::webgpu::WebGpuStageTimer::new(format!(
+                "rv32im_witgen_accum_shadow_replay cycles={}",
+                preflight.cycles.len()
+            ));
+
+            for cycle in 0..preflight.cycles.len() {
+                let major = preflight.cycles[cycle].major;
+                let minor = preflight.cycles[cycle].minor;
+                if !cycle_short_circuited(major, minor) {
+                    continue;
+                }
+                let ctx = ExecContext::new(preflight, &tables, cycle);
+                if let Err(err) = step_Top(&ctx, data, global).map_err(|e| {
+                    anyhow::anyhow!(
+                        "step_Top shadow repair failed at cycle={cycle} major={major} minor={minor}: {e}"
+                    )
+                }) {
+                    result = Err(err);
+                    return;
+                }
+                repaired += 1;
+            }
+            if repaired != 0 {
+                WITGEN_ACCUM_SHADOW_REPLAY_ROWS.fetch_add(repaired, Ordering::Relaxed);
+            }
+            result = Ok(repaired);
+        });
+    });
+    result
+}
+
 pub(crate) fn step_accum_without_machine_column_carry<H>(
     preflight: &PreflightTrace,
     data: &MetaBuffer<H>,
@@ -721,14 +1368,124 @@ where
     step_accum_inner(preflight, data, accum, global, mix, false)
 }
 
+pub(crate) fn step_accum_without_major_or_postprocess<H>(
+    preflight: &PreflightTrace,
+    data: &MetaBuffer<H>,
+    accum: &MetaBuffer<H>,
+    global: &MetaBuffer<H>,
+    mix: &MetaBuffer<H>,
+    skip_major: u8,
+) -> Result<()>
+where
+    H: risc0_zkp::hal::Hal<Field = CircuitField, Elem = Val, ExtElem = ExtVal>,
+{
+    let mut result = Ok(());
+    accum.buf.view_mut(|accum_view| {
+        data.buf.view(|data_view| {
+            global.buf.view(|global_view| {
+                mix.buf.view(|mix_view| {
+                    let data = BufferRow::immutable(data_view, data.rows, data.cols, data.checked);
+                    let split = LAYOUT_TOP_ACCUM.columns[0].offset;
+                    let accum =
+                        BufferRow::mutable(accum_view, accum.rows, accum.cols, accum.checked)
+                            .with_zero_back_after(split);
+                    let global =
+                        BufferRow::global(global_view, global.rows, global.cols, global.checked);
+                    let mix = BufferRow::global(mix_view, mix.rows, mix.cols, mix.checked);
+                    result = run_accum_raw_steps_skip_major(
+                        preflight, data, accum, global, mix, skip_major,
+                    );
+                });
+            });
+        });
+    });
+    result
+}
+
+pub(crate) fn step_accum_without_replaced_misc0_or_postprocess<H>(
+    preflight: &PreflightTrace,
+    data: &MetaBuffer<H>,
+    accum: &MetaBuffer<H>,
+    global: &MetaBuffer<H>,
+    mix: &MetaBuffer<H>,
+) -> Result<()>
+where
+    H: risc0_zkp::hal::Hal<Field = CircuitField, Elem = Val, ExtElem = ExtVal>,
+{
+    let mut result = Ok(());
+    accum.buf.view_mut(|accum_view| {
+        data.buf.view(|data_view| {
+            global.buf.view(|global_view| {
+                mix.buf.view(|mix_view| {
+                    let data = BufferRow::immutable(data_view, data.rows, data.cols, data.checked);
+                    let split = LAYOUT_TOP_ACCUM.columns[0].offset;
+                    let accum =
+                        BufferRow::mutable(accum_view, accum.rows, accum.cols, accum.checked)
+                            .with_zero_back_after(split);
+                    let global =
+                        BufferRow::global(global_view, global.rows, global.cols, global.checked);
+                    let mix = BufferRow::global(mix_view, mix.rows, mix.cols, mix.checked);
+                    result = run_accum_raw_steps_skip_replaced_misc0_or_majors(
+                        preflight, data, accum, global, mix, true, false, 0,
+                    );
+                });
+            });
+        });
+    });
+    result
+}
+
+pub(crate) fn step_accum_without_selected_majors_or_postprocess<H>(
+    preflight: &PreflightTrace,
+    data: &MetaBuffer<H>,
+    accum: &MetaBuffer<H>,
+    global: &MetaBuffer<H>,
+    mix: &MetaBuffer<H>,
+    skip_replaced_misc0: bool,
+    skip_replaced_mem0: bool,
+    skip_major_mask: u16,
+) -> Result<()>
+where
+    H: risc0_zkp::hal::Hal<Field = CircuitField, Elem = Val, ExtElem = ExtVal>,
+{
+    let mut result = Ok(());
+    accum.buf.view_mut(|accum_view| {
+        data.buf.view(|data_view| {
+            global.buf.view(|global_view| {
+                mix.buf.view(|mix_view| {
+                    let data = BufferRow::immutable(data_view, data.rows, data.cols, data.checked);
+                    let split = LAYOUT_TOP_ACCUM.columns[0].offset;
+                    let accum =
+                        BufferRow::mutable(accum_view, accum.rows, accum.cols, accum.checked)
+                            .with_zero_back_after(split);
+                    let global =
+                        BufferRow::global(global_view, global.rows, global.cols, global.checked);
+                    let mix = BufferRow::global(mix_view, mix.rows, mix.cols, mix.checked);
+                    result = run_accum_raw_steps_skip_replaced_misc0_or_majors(
+                        preflight,
+                        data,
+                        accum,
+                        global,
+                        mix,
+                        skip_replaced_misc0,
+                        skip_replaced_mem0,
+                        skip_major_mask,
+                    );
+                });
+            });
+        });
+    });
+    result
+}
+
 pub(crate) fn finish_accum_machine_column_carry<H>(accum: &MetaBuffer<H>)
 where
     H: risc0_zkp::hal::Hal<Field = CircuitField, Elem = Val, ExtElem = ExtVal>,
 {
     let last_cycle = accum.rows;
     accum.buf.view_mut(|accum_view| {
-        let accum = BufferRow::mutable(accum_view, accum.rows, accum.cols, accum.checked)
-            .unchecked();
+        let accum =
+            BufferRow::mutable(accum_view, accum.rows, accum.cols, accum.checked).unchecked();
         apply_machine_column_carry(accum, last_cycle);
     });
 }
@@ -803,6 +1560,80 @@ fn run_witness_steps(
     Ok(())
 }
 
+fn run_accum_raw_steps_skip_major(
+    preflight: &PreflightTrace,
+    data: BufferRow<Val>,
+    accum: BufferRow<Val>,
+    global: BufferRow<Val>,
+    mix: BufferRow<Val>,
+    skip_major: u8,
+) -> Result<()> {
+    let tables = LookupTables::default();
+    let last_cycle = preflight.cycles.len();
+
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    let step_top_accum_timer = risc0_zkp::hal::webgpu::WebGpuStageTimer::new(format!(
+        "rv32im_accumulate step_top_accum_cpu_skip_major{skip_major} cycles={last_cycle}"
+    ));
+    for cycle in 0..last_cycle {
+        let major = preflight.cycles[cycle].major;
+        let minor = preflight.cycles[cycle].minor;
+        if major == skip_major {
+            continue;
+        }
+        let ctx = ExecContext::new(preflight, &tables, cycle);
+        step_TopAccum(&ctx, accum, data, global, mix).map_err(|e| {
+            anyhow::anyhow!(
+                "step_TopAccum failed at cycle={cycle} major={major} minor={minor}: {e}"
+            )
+        })?;
+    }
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    drop(step_top_accum_timer);
+
+    Ok(())
+}
+
+fn run_accum_raw_steps_skip_replaced_misc0_or_majors(
+    preflight: &PreflightTrace,
+    data: BufferRow<Val>,
+    accum: BufferRow<Val>,
+    global: BufferRow<Val>,
+    mix: BufferRow<Val>,
+    skip_replaced_misc0: bool,
+    skip_replaced_mem0: bool,
+    skip_major_mask: u16,
+) -> Result<()> {
+    let tables = LookupTables::default();
+    let last_cycle = preflight.cycles.len();
+
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    let step_top_accum_timer = risc0_zkp::hal::webgpu::WebGpuStageTimer::new(format!(
+        "rv32im_accumulate step_top_accum_cpu_skip_replaced_misc0={skip_replaced_misc0}_mem0={skip_replaced_mem0}_major_mask=0x{skip_major_mask:04x} cycles={last_cycle}"
+    ));
+    for cycle in 0..last_cycle {
+        let major = preflight.cycles[cycle].major;
+        let minor = preflight.cycles[cycle].minor;
+        let skip_major = major < 16 && (skip_major_mask & (1u16 << major)) != 0;
+        if (skip_replaced_misc0 && major == 0 && misc0_simple_short_circuit_minor(minor))
+            || (skip_replaced_mem0 && major == 5 && mem0_short_circuit_minor(minor))
+            || skip_major
+        {
+            continue;
+        }
+        let ctx = ExecContext::new(preflight, &tables, cycle);
+        step_TopAccum(&ctx, accum, data, global, mix).map_err(|e| {
+            anyhow::anyhow!(
+                "step_TopAccum failed at cycle={cycle} major={major} minor={minor}: {e}"
+            )
+        })?;
+    }
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    drop(step_top_accum_timer);
+
+    Ok(())
+}
+
 fn run_accum_steps(
     preflight: &PreflightTrace,
     data: BufferRow<Val>,
@@ -813,20 +1644,39 @@ fn run_accum_steps(
 ) -> Result<()> {
     let tables = LookupTables::default();
     let last_cycle = preflight.cycles.len();
+    let direct_misc0_enabled = WITGEN_GPU_DIRECT_MISC0_ACCUM_ENABLED.load(Ordering::Acquire);
 
     #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
-    let step_top_accum_timer = risc0_zkp::hal::webgpu::WebGpuStageTimer::new(format!(
-        "rv32im_accumulate step_top_accum cycles={last_cycle}"
-    ));
+    let step_top_accum_timer = {
+        let label = if direct_misc0_enabled {
+            "rv32im_accumulate step_top_accum_direct_misc0"
+        } else {
+            "rv32im_accumulate step_top_accum"
+        };
+        risc0_zkp::hal::webgpu::WebGpuStageTimer::new(format!("{label} cycles={last_cycle}"))
+    };
+    let mut direct_misc0_rows = 0usize;
     for cycle in 0..last_cycle {
-        let ctx = ExecContext::new(preflight, &tables, cycle);
         let major = preflight.cycles[cycle].major;
         let minor = preflight.cycles[cycle].minor;
+        if direct_misc0_enabled && cycle_short_circuited(major, minor) && major == 0 {
+            direct_misc0_accum_step(cycle, data, accum, mix).map_err(|e| {
+                anyhow::anyhow!(
+                    "direct MISC0 step_TopAccum failed at cycle={cycle} major={major} minor={minor}: {e}"
+                )
+            })?;
+            direct_misc0_rows += 1;
+            continue;
+        }
+        let ctx = ExecContext::new(preflight, &tables, cycle);
         step_TopAccum(&ctx, accum, data, global, mix).map_err(|e| {
             anyhow::anyhow!(
                 "step_TopAccum failed at cycle={cycle} major={major} minor={minor}: {e}"
             )
         })?;
+    }
+    if direct_misc0_rows != 0 {
+        WITGEN_GPU_DIRECT_MISC0_ACCUM_ROWS.fetch_add(direct_misc0_rows, Ordering::Relaxed);
     }
     #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
     drop(step_top_accum_timer);
@@ -854,6 +1704,161 @@ fn run_accum_steps(
     if run_machine_column_carry {
         apply_machine_column_carry(accum, last_cycle);
     }
+
+    Ok(())
+}
+
+fn ext_from_val(val: Val) -> ExtVal {
+    ExtVal::from_subfield(&val)
+}
+
+fn load_ext_at(buffer: BufferRow<Val>, row: usize, offset: usize) -> ExtVal {
+    ExtVal::new(
+        buffer.get_at(row, offset, false),
+        buffer.get_at(row, offset + 1, false),
+        buffer.get_at(row, offset + 2, false),
+        buffer.get_at(row, offset + 3, false),
+    )
+}
+
+fn store_ext_at(buffer: BufferRow<Val>, row: usize, offset: usize, value: ExtVal) {
+    for (i, elem) in value.elems().iter().copied().enumerate() {
+        buffer.set_at(row, offset + i, elem);
+    }
+}
+
+fn load_nd_at(data: BufferRow<Val>, row: usize, layout: &'static NondetRegLayout) -> Val {
+    data.get_at(row, layout._super.offset, false)
+}
+
+fn arg_u16_accum_term(
+    data: BufferRow<Val>,
+    mix: BufferRow<Val>,
+    row: usize,
+    arg: &'static ArgU16Layout,
+) -> ExtVal {
+    let randomness = LAYOUT_MIX.randomness;
+    let count = load_nd_at(data, row, arg.count);
+    let value = load_nd_at(data, row, arg.val);
+    let denom = load_ext_at(mix, 0, randomness.arg_u16.val.offset) * ext_from_val(value)
+        + load_ext_at(mix, 0, randomness._offset.offset);
+    ext_from_val(count) * denom.inv()
+}
+
+fn memory_accum_term(
+    data: BufferRow<Val>,
+    mix: BufferRow<Val>,
+    row: usize,
+    arg: &'static MemoryArgLayout,
+) -> ExtVal {
+    let randomness = LAYOUT_MIX.randomness;
+    let denom = load_ext_at(mix, 0, randomness.memory_arg.addr.offset)
+        * ext_from_val(load_nd_at(data, row, arg.addr))
+        + load_ext_at(mix, 0, randomness.memory_arg.cycle.offset)
+            * ext_from_val(load_nd_at(data, row, arg.cycle))
+        + load_ext_at(mix, 0, randomness.memory_arg.data_low.offset)
+            * ext_from_val(load_nd_at(data, row, arg.data_low))
+        + load_ext_at(mix, 0, randomness.memory_arg.data_high.offset)
+            * ext_from_val(load_nd_at(data, row, arg.data_high))
+        + load_ext_at(mix, 0, randomness._offset.offset);
+    ext_from_val(load_nd_at(data, row, arg.count)) * denom.inv()
+}
+
+fn cycle_accum_term(
+    data: BufferRow<Val>,
+    mix: BufferRow<Val>,
+    row: usize,
+    arg: &'static CycleArgLayout,
+) -> ExtVal {
+    let randomness = LAYOUT_MIX.randomness;
+    let denom = load_ext_at(mix, 0, randomness.cycle_arg.cycle.offset)
+        * ext_from_val(load_nd_at(data, row, arg.cycle))
+        + load_ext_at(mix, 0, randomness._offset.offset);
+    ext_from_val(load_nd_at(data, row, arg.count)) * denom.inv()
+}
+
+fn store_direct_misc0_user_accum(accum: BufferRow<Val>, row: usize) {
+    let user = LAYOUT_TOP_ACCUM.user._0;
+    store_ext_at(accum, row, user.state.poly._super.offset, ExtVal::ZERO);
+    store_ext_at(accum, row, user.state.term._super.offset, ExtVal::ONE);
+    store_ext_at(accum, row, user.state.total._super.offset, ExtVal::ZERO);
+    for (idx, bit) in user.poly_op._super.iter().enumerate() {
+        accum.set_at(
+            row,
+            bit._super.offset,
+            if idx == 0 { Val::ONE } else { Val::ZERO },
+        );
+    }
+    store_ext_at(
+        accum,
+        row,
+        user.state_redef.arm3.tmp._super.offset,
+        ExtVal::ZERO,
+    );
+}
+
+fn direct_misc0_accum_step(
+    row: usize,
+    data: BufferRow<Val>,
+    accum: BufferRow<Val>,
+    mix: BufferRow<Val>,
+) -> Result<()> {
+    let misc0 = LAYOUT_TOP.inst_result.arm0;
+    let output_args = misc0._arguments_misc0_misc_output.arg_u16;
+    let write_rd = misc0._super._0;
+    let decoded = misc0.input.decoded;
+    let source_args = misc0
+        .input
+        .source_regs
+        ._arguments_read_source_regs_source_regs;
+
+    store_direct_misc0_user_accum(accum, row);
+
+    let mut cur = ExtVal::ZERO;
+
+    cur += arg_u16_accum_term(data, mix, row, misc0._super.write_data.low16.arg);
+    cur += arg_u16_accum_term(data, mix, row, misc0._super.write_data.high16.arg);
+    cur += arg_u16_accum_term(data, mix, row, misc0._super.pc_norm.low16.arg);
+    store_ext_at(accum, row, LAYOUT_TOP_ACCUM.columns[0].offset, cur);
+
+    cur += arg_u16_accum_term(data, mix, row, misc0._super.pc_norm.high16.arg);
+    cur += memory_accum_term(data, mix, row, write_rd._0.io.old_txn);
+    cur += memory_accum_term(data, mix, row, write_rd._0.io.new_txn);
+    store_ext_at(accum, row, LAYOUT_TOP_ACCUM.columns[1].offset, cur);
+
+    cur += cycle_accum_term(data, mix, row, write_rd._0._0._0.arg);
+    cur += cycle_accum_term(data, mix, row, misc0._0.arg1);
+    cur += cycle_accum_term(data, mix, row, misc0._0.arg2);
+    store_ext_at(accum, row, LAYOUT_TOP_ACCUM.columns[2].offset, cur);
+
+    cur += arg_u16_accum_term(data, mix, row, decoded.pc_addr.upper_diff.arg);
+    cur += arg_u16_accum_term(data, mix, row, decoded.pc_addr.med14.arg);
+    cur += memory_accum_term(data, mix, row, decoded.load_inst.io.old_txn);
+    store_ext_at(accum, row, LAYOUT_TOP_ACCUM.columns[3].offset, cur);
+
+    cur += memory_accum_term(data, mix, row, decoded.load_inst.io.new_txn);
+    cur += cycle_accum_term(data, mix, row, decoded.load_inst._0._0.arg);
+    cur += memory_accum_term(data, mix, row, source_args.memory_arg[0]);
+    store_ext_at(accum, row, LAYOUT_TOP_ACCUM.columns[4].offset, cur);
+
+    cur += memory_accum_term(data, mix, row, source_args.memory_arg[1]);
+    cur += memory_accum_term(data, mix, row, source_args.memory_arg[2]);
+    cur += memory_accum_term(data, mix, row, source_args.memory_arg[3]);
+    store_ext_at(accum, row, LAYOUT_TOP_ACCUM.columns[5].offset, cur);
+
+    cur += cycle_accum_term(data, mix, row, source_args.cycle_arg[0]);
+    cur += cycle_accum_term(data, mix, row, source_args.cycle_arg[1]);
+    cur += arg_u16_accum_term(data, mix, row, output_args[0]);
+    store_ext_at(accum, row, LAYOUT_TOP_ACCUM.columns[6].offset, cur);
+
+    cur += arg_u16_accum_term(data, mix, row, output_args[1]);
+    cur += arg_u16_accum_term(data, mix, row, output_args[2]);
+    cur += arg_u16_accum_term(data, mix, row, output_args[3]);
+    store_ext_at(accum, row, LAYOUT_TOP_ACCUM.columns[7].offset, cur);
+
+    cur += arg_u16_accum_term(data, mix, row, output_args[4]);
+    store_ext_at(accum, row, LAYOUT_TOP_ACCUM.columns[8].offset, cur);
+    store_ext_at(accum, row, LAYOUT_TOP_ACCUM.columns[19].offset, cur);
 
     Ok(())
 }
@@ -887,13 +1892,25 @@ fn apply_machine_column_carry(accum: BufferRow<Val>, last_cycle: usize) {
 // dispatched this segment (kernel ready + cycles > 0). CPU HAL leaves
 // it 0 (no short-circuit ever).
 static WITGEN_GPU_REPLACE_ARM_MASK: AtomicU16 = AtomicU16::new(0);
+const WITGEN_GPU_MEM0_REPLACE_MINOR_MASK_ALL: u16 = 0x001f;
+static WITGEN_GPU_MEM0_REPLACE_MINOR_MASK: AtomicU16 =
+    AtomicU16::new(WITGEN_GPU_MEM0_REPLACE_MINOR_MASK_ALL);
+const WITGEN_GPU_MEM1_REPLACE_MINOR_MASK_ALL: u16 = 0x0007;
+static WITGEN_GPU_MEM1_REPLACE_MINOR_MASK: AtomicU16 =
+    AtomicU16::new(WITGEN_GPU_MEM1_REPLACE_MINOR_MASK_ALL);
 // Legacy process-wide gate kept for the public setter so callers can
 // flip the feature on/off; webgpu.rs reads this to decide whether to
 // populate WITGEN_GPU_REPLACE_ARM_MASK each segment.
 static WITGEN_GPU_REPLACE_ENABLED: AtomicBool = AtomicBool::new(false);
+static WITGEN_GPU_SHORT_CIRCUIT_CYCLES: AtomicUsize = AtomicUsize::new(0);
+static WITGEN_ACCUM_SHADOW_REPLAY_ROWS: AtomicUsize = AtomicUsize::new(0);
+static WITGEN_GPU_DIRECT_MISC0_ACCUM_ENABLED: AtomicBool = AtomicBool::new(false);
+static WITGEN_GPU_DIRECT_MISC0_ACCUM_ROWS: AtomicUsize = AtomicUsize::new(0);
 
 pub fn set_witgen_gpu_replace_enabled(enabled: bool) {
     WITGEN_GPU_REPLACE_ENABLED.store(enabled, Ordering::Release);
+    WITGEN_GPU_SHORT_CIRCUIT_CYCLES.store(0, Ordering::Release);
+    WITGEN_ACCUM_SHADOW_REPLAY_ROWS.store(0, Ordering::Release);
     if !enabled {
         WITGEN_GPU_REPLACE_ARM_MASK.store(0, Ordering::Release);
     }
@@ -901,6 +1918,49 @@ pub fn set_witgen_gpu_replace_enabled(enabled: bool) {
 
 pub fn set_witgen_gpu_replace_arm_mask(mask: u16) {
     WITGEN_GPU_REPLACE_ARM_MASK.store(mask, Ordering::Release);
+}
+
+pub fn witgen_gpu_short_circuit_cycles() -> usize {
+    WITGEN_GPU_SHORT_CIRCUIT_CYCLES.load(Ordering::Acquire)
+}
+
+pub fn witgen_accum_shadow_replay_rows() -> usize {
+    WITGEN_ACCUM_SHADOW_REPLAY_ROWS.load(Ordering::Acquire)
+}
+
+pub fn witgen_gpu_replace_arm_mask() -> u16 {
+    WITGEN_GPU_REPLACE_ARM_MASK.load(Ordering::Acquire)
+}
+
+pub fn set_witgen_gpu_mem0_replace_minor_mask(mask: u16) {
+    WITGEN_GPU_MEM0_REPLACE_MINOR_MASK.store(
+        mask & WITGEN_GPU_MEM0_REPLACE_MINOR_MASK_ALL,
+        Ordering::Release,
+    );
+}
+
+pub fn witgen_gpu_mem0_replace_minor_mask() -> u16 {
+    WITGEN_GPU_MEM0_REPLACE_MINOR_MASK.load(Ordering::Acquire)
+}
+
+pub fn set_witgen_gpu_mem1_replace_minor_mask(mask: u16) {
+    WITGEN_GPU_MEM1_REPLACE_MINOR_MASK.store(
+        mask & WITGEN_GPU_MEM1_REPLACE_MINOR_MASK_ALL,
+        Ordering::Release,
+    );
+}
+
+pub fn witgen_gpu_mem1_replace_minor_mask() -> u16 {
+    WITGEN_GPU_MEM1_REPLACE_MINOR_MASK.load(Ordering::Acquire)
+}
+
+pub fn set_witgen_gpu_direct_misc0_accum_enabled(enabled: bool) {
+    WITGEN_GPU_DIRECT_MISC0_ACCUM_ENABLED.store(enabled, Ordering::Release);
+    WITGEN_GPU_DIRECT_MISC0_ACCUM_ROWS.store(0, Ordering::Release);
+}
+
+pub fn witgen_gpu_direct_misc0_accum_rows() -> usize {
+    WITGEN_GPU_DIRECT_MISC0_ACCUM_ROWS.load(Ordering::Acquire)
 }
 
 fn cycle_short_circuited(major: u8, minor: u8) -> bool {
@@ -911,12 +1971,202 @@ fn cycle_short_circuited(major: u8, minor: u8) -> bool {
     if (mask & (1u16 << major)) == 0 {
         return false;
     }
-    // SP7 iter-6d-g step 6.2.12 finding: narrowing to minor==0 only
-    // produces the same verify_segment failure as minor<2. The bug is
-    // in MISC0/Add (minor=0) chunk0 path itself, not chunk1. Restore
-    // minor<2 gate for future bisection now that we know the bug is
-    // chunk0-side.
-    minor < 2
+    (major == 0 && misc0_simple_short_circuit_minor(minor))
+        || (major == 2 && misc2_short_circuit_minor(minor))
+        || (major == 5 && mem0_short_circuit_minor(minor))
+        || (major == 6 && mem1_short_circuit_minor(minor))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn misc0_arithmetic_and_bitwise_cycles_are_short_circuitable_when_arm_mask_enabled() {
+        set_witgen_gpu_replace_arm_mask(1);
+        for minor in [0, 1, 2, 3, 4, 7] {
+            assert!(
+                cycle_short_circuited(0, minor),
+                "MISC0 minor {minor} should be covered by GPU-witgen replacement"
+            );
+        }
+        for minor in [5, 6] {
+            assert!(
+                !cycle_short_circuited(0, minor),
+                "MISC0 compare minor {minor} remains CPU-covered because sparse shadow repair is wall-negative"
+            );
+        }
+        set_witgen_gpu_replace_arm_mask(0);
+    }
+
+    #[test]
+    fn misc2_cycles_are_short_circuitable_when_arm_mask_enabled() {
+        set_witgen_gpu_replace_arm_mask(1u16 << 2);
+        for minor in [0, 2, 3, 4, 5, 6, 7] {
+            assert!(
+                cycle_short_circuited(2, minor),
+                "MISC2 minor {minor} should be covered by GPU-witgen replacement"
+            );
+        }
+        assert!(
+            !cycle_short_circuited(2, 1),
+            "MISC2 minor 1 remains CPU-covered until its nested source-reg mux is complete"
+        );
+        set_witgen_gpu_replace_arm_mask(0);
+    }
+
+    #[test]
+    fn mem0_load_cycles_are_short_circuitable_when_arm_mask_enabled() {
+        set_witgen_gpu_replace_arm_mask(1u16 << 5);
+        for minor in [0, 1, 2, 3, 4] {
+            assert!(
+                cycle_short_circuited(5, minor),
+                "MEM0 minor {minor} should be covered by GPU-witgen replacement"
+            );
+        }
+        for minor in [5, 6, 7] {
+            assert!(
+                !cycle_short_circuited(5, minor),
+                "MEM0 minor {minor} should remain CPU-covered"
+            );
+        }
+        set_witgen_gpu_replace_arm_mask(0);
+    }
+
+    #[test]
+    fn mem0_minor_mask_filters_short_circuitable_load_cycles() {
+        set_witgen_gpu_mem0_replace_minor_mask(1u16 << 2);
+        set_witgen_gpu_replace_arm_mask(1u16 << 5);
+        assert!(
+            cycle_short_circuited(5, 2),
+            "MEM0 LW minor should remain short-circuitable when selected"
+        );
+        for minor in [0, 1, 3, 4, 5, 6, 7] {
+            assert!(
+                !cycle_short_circuited(5, minor),
+                "MEM0 minor {minor} should stay CPU-covered when the LW-only mask is active"
+            );
+        }
+        set_witgen_gpu_replace_arm_mask(0);
+        set_witgen_gpu_mem0_replace_minor_mask(0x001f);
+    }
+
+    #[test]
+    fn mem1_store_cycles_are_short_circuitable_when_arm_mask_enabled() {
+        set_witgen_gpu_replace_arm_mask(1u16 << 6);
+        for minor in [0, 1, 2] {
+            assert!(
+                cycle_short_circuited(6, minor),
+                "MEM1 minor {minor} should be covered by GPU-witgen replacement"
+            );
+        }
+        for minor in [3, 4, 5, 6, 7] {
+            assert!(
+                !cycle_short_circuited(6, minor),
+                "illegal MEM1 minor {minor} should remain CPU-covered"
+            );
+        }
+        set_witgen_gpu_replace_arm_mask(0);
+    }
+
+    #[test]
+    fn mem1_store_byte_replay_restores_lookup_deltas() {
+        use risc0_circuit_rv32im_sys::{RawMemoryTransaction, RawPreflightCycle};
+
+        let pc = 0x1000;
+        let rs1_word = 0x1000;
+        let rs2_word = 0xaabb_ccdd;
+        let old_store_word = 0x1122_3344;
+        let inst = (2 << 20) | (1 << 15) | (4 << 7) | 0x23;
+        let preflight = PreflightTrace {
+            cycles: vec![RawPreflightCycle {
+                state: 0,
+                pc,
+                major: 6,
+                minor: 0,
+                machine_mode: 1,
+                padding: 0,
+                user_cycle: 0,
+                txn_idx: 0,
+                paging_idx: 0,
+                bigint_idx: 0,
+                diff_count: [0, 0],
+            }],
+            txns: vec![
+                RawMemoryTransaction {
+                    addr: pc / 4,
+                    cycle: 0,
+                    word: inst,
+                    prev_cycle: u32::MAX,
+                    prev_word: inst,
+                },
+                RawMemoryTransaction {
+                    addr: 1_073_725_440 + 1,
+                    cycle: 0,
+                    word: rs1_word,
+                    prev_cycle: u32::MAX,
+                    prev_word: rs1_word,
+                },
+                RawMemoryTransaction {
+                    addr: 1_073_725_440 + 2,
+                    cycle: 0,
+                    word: rs2_word,
+                    prev_cycle: u32::MAX,
+                    prev_word: rs2_word,
+                },
+                RawMemoryTransaction {
+                    addr: (rs1_word + 4) / 4,
+                    cycle: 0,
+                    word: old_store_word,
+                    prev_cycle: u32::MAX,
+                    prev_word: old_store_word,
+                },
+                RawMemoryTransaction {
+                    addr: (rs1_word + 4) / 4,
+                    cycle: 1,
+                    word: 0x1122_33dd,
+                    prev_cycle: 0,
+                    prev_word: old_store_word,
+                },
+            ],
+            ..Default::default()
+        };
+        let tables = LookupTables::default();
+
+        replay_mem1_lookup_deltas_from_preflight(&preflight, 0, &tables, 0).unwrap();
+
+        assert_eq!(
+            tables
+                .lookup_current(Val::new(16), Val::new(0xffff))
+                .unwrap()
+                .as_u32(),
+            2
+        );
+        assert_eq!(
+            tables
+                .lookup_current(Val::new(16), Val::new(0x1004))
+                .unwrap()
+                .as_u32(),
+            2
+        );
+        assert_eq!(
+            tables
+                .lookup_current(Val::new(16), Val::new(0))
+                .unwrap()
+                .as_u32(),
+            2
+        );
+        for byte in [0x44, 0x33, 0xdd, 0xcc] {
+            assert_eq!(
+                tables
+                    .lookup_current(Val::new(8), Val::new(byte))
+                    .unwrap()
+                    .as_u32(),
+                1,
+                "expected one replayed u8 lookup for byte {byte:#04x}"
+            );
+        }
+    }
 }
 
 fn step_exec(
@@ -929,15 +2179,15 @@ fn step_exec(
     let major = preflight.cycles[cycle].major;
     let minor = preflight.cycles[cycle].minor;
     if cycle_short_circuited(major, minor) {
+        replay_short_circuit_side_effects(preflight, tables, cycle, data)?;
+        WITGEN_GPU_SHORT_CIRCUIT_CYCLES.fetch_add(1, Ordering::Relaxed);
         return Ok(());
     }
     let ctx = ExecContext::new(preflight, tables, cycle);
     // SP7 iter 6d-g step 6.2.5 diagnostic: tag the error with cycle + arm
     // info so a downstream bail localizes WHICH cycle's step_Top blew up.
     step_Top(&ctx, data, global).map_err(|e| {
-        anyhow::anyhow!(
-            "step_Top failed at cycle={cycle} major={major} minor={minor}: {e}"
-        )
+        anyhow::anyhow!("step_Top failed at cycle={cycle} major={major} minor={minor}: {e}")
     })
 }
 

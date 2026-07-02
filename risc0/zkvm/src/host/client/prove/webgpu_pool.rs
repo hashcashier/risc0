@@ -57,8 +57,7 @@ use crate::{
             prove::{
                 keccak::prove_keccak_webgpu,
                 prover_impl::{
-                    ProverImpl, WEBGPU_DEFAULT_KECCAK_MAX_PO2,
-                    WEBGPU_DEFAULT_SEGMENT_LIMIT_PO2,
+                    ProverImpl, WEBGPU_DEFAULT_KECCAK_MAX_PO2, WEBGPU_DEFAULT_SEGMENT_LIMIT_PO2,
                 },
                 ProverServer,
             },
@@ -67,9 +66,9 @@ use crate::{
     },
     receipt::{InnerReceipt, SegmentReceipt, SuccinctReceipt},
     sha::Digestible,
-    Assumption, AssumptionReceipt, CompositeReceipt, ExecutorEnv,
-    InnerAssumptionReceipt, MaybePruned, Output, ProveKeccakRequest, ProverOpts, Receipt,
-    ReceiptClaim, ReceiptKind, Unknown, VerifierContext,
+    Assumption, AssumptionReceipt, CompositeReceipt, ExecutorEnv, InnerAssumptionReceipt,
+    MaybePruned, Output, ProveKeccakRequest, ProverOpts, Receipt, ReceiptClaim, ReceiptKind,
+    Unknown, VerifierContext,
 };
 
 use super::webgpu::WebGpuProver;
@@ -97,8 +96,7 @@ impl WebGpuProverPool {
         let mut provers = Vec::with_capacity(slots);
         for idx in 0..slots {
             let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite()).await?;
-            let prover =
-                WebGpuProver::from_hal(&format!("webgpu-pool-{idx}"), Rc::new(hal));
+            let prover = WebGpuProver::from_hal(&format!("webgpu-pool-{idx}"), Rc::new(hal));
             provers.push(Rc::new(prover));
         }
         Ok(Self {
@@ -236,9 +234,8 @@ impl WebGpuProverPool {
             } else {
                 None
             };
-            let mut next_tier: Vec<SuccinctReceipt<ReceiptClaim>> = Vec::with_capacity(
-                pairs.len() + carry.as_ref().map_or(0, |_| 1),
-            );
+            let mut next_tier: Vec<SuccinctReceipt<ReceiptClaim>> =
+                Vec::with_capacity(pairs.len() + carry.as_ref().map_or(0, |_| 1));
             for chunk in pairs.chunks(pool_size) {
                 let mut futures = Vec::with_capacity(chunk.len());
                 for (offset, (a, b)) in chunk.iter().enumerate() {
@@ -406,8 +403,7 @@ impl WebGpuProverPool {
             .map(|r| r.resolve())
             .collect::<Result<_>>()?;
 
-        let mut segment_receipts: Vec<SegmentReceipt> =
-            Vec::with_capacity(resolved_segments.len());
+        let mut segment_receipts: Vec<SegmentReceipt> = Vec::with_capacity(resolved_segments.len());
         let segment_slot = slot_impls[0].clone();
         for seg in &resolved_segments {
             for hook in &session.hooks {
@@ -448,20 +444,18 @@ impl WebGpuProverPool {
 
         let verifier_parameters = ctx
             .composite_verifier_parameters()
-            .ok_or_else(|| {
-                anyhow!("composite receipt verifier parameters missing from context")
-            })?
+            .ok_or_else(|| anyhow!("composite receipt verifier parameters missing from context"))?
             .digest();
 
         // Phase 3: pending keccaks. Distribute via existing pool method.
-        let keccak_receipts: Vec<SuccinctReceipt<Unknown>> =
-            if session.pending_keccaks().is_empty() {
-                Vec::new()
-            } else {
-                self.prove_keccak_requests_async(session.pending_keccaks())
-                    .await
-                    .context("pool prove_keccak_requests")?
-            };
+        let keccak_receipts: Vec<SuccinctReceipt<Unknown>> = if session.pending_keccaks().is_empty()
+        {
+            Vec::new()
+        } else {
+            self.prove_keccak_requests_async(session.pending_keccaks())
+                .await
+                .context("pool prove_keccak_requests")?
+        };
 
         // Phase 4: keccak union tree on slot 0. MMR insert may chain
         // unions; root collapses any remaining peaks.
@@ -714,9 +708,7 @@ impl WebGpuProverPool {
 
         let verifier_parameters = ctx
             .composite_verifier_parameters()
-            .ok_or_else(|| {
-                anyhow!("composite receipt verifier parameters missing from context")
-            })?
+            .ok_or_else(|| anyhow!("composite receipt verifier parameters missing from context"))?
             .digest();
 
         // Join-tree shape: tier 0 has the N lifts; each tier halves
@@ -738,16 +730,16 @@ impl WebGpuProverPool {
         let mut kec_root: Option<Option<SuccinctReceipt<Unknown>>> = None;
         let mut merged = false;
         let mut lift_started = vec![false; n_seg];
-        let mut tiers: Vec<Vec<Option<SuccinctReceipt<ReceiptClaim>>>> =
-            tier_sizes.iter().map(|&s| (0..s).map(|_| None).collect()).collect();
-        let mut join_started: Vec<Vec<bool>> =
-            tier_sizes.iter().map(|&s| vec![false; s]).collect();
+        let mut tiers: Vec<Vec<Option<SuccinctReceipt<ReceiptClaim>>>> = tier_sizes
+            .iter()
+            .map(|&s| (0..s).map(|_| None).collect())
+            .collect();
+        let mut join_started: Vec<Vec<bool>> = tier_sizes.iter().map(|&s| vec![false; s]).collect();
 
         let mut free_slots: Vec<usize> = (0..pool_size).collect();
         let mut seg_in_flight = false;
-        let mut in_flight: Vec<
-            Pin<Box<dyn Future<Output = Result<(usize, SchedDone)>> + '_>>,
-        > = Vec::new();
+        let mut in_flight: Vec<Pin<Box<dyn Future<Output = Result<(usize, SchedDone)>> + '_>>> =
+            Vec::new();
 
         loop {
             // Admission: hand ready tasks to free slots.
@@ -769,10 +761,7 @@ impl WebGpuProverPool {
                     if seg_in_flight {
                         break 'pick None;
                     }
-                    if !kec_root_started
-                        && n_kec > 0
-                        && kec_done.iter().all(Option::is_some)
-                    {
+                    if !kec_root_started && n_kec > 0 && kec_done.iter().all(Option::is_some) {
                         break 'pick Some(SchedTask::KeccakRoot);
                     }
                     // A segment can only start when nothing else is in
@@ -816,91 +805,82 @@ impl WebGpuProverPool {
                 };
                 free_slots.pop();
 
-                let fut: Pin<Box<dyn Future<Output = Result<(usize, SchedDone)>> + '_>> =
-                    match task {
-                        SchedTask::Segment(i) => {
-                            seg_started[i] = true;
-                            seg_in_flight = true;
-                            let impl_rc = slot_impls[slot].clone();
-                            let seg = resolved_segments[i].clone();
-                            Box::pin(async move {
-                                let pf = impl_rc
-                                    .segment_preflight(&seg)
-                                    .with_context(|| {
-                                        format!("preflight segment {}", seg.index)
-                                    })?;
-                                let r = impl_rc
-                                    .prove_segment_core_async(ctx, pf)
+                let fut: Pin<Box<dyn Future<Output = Result<(usize, SchedDone)>> + '_>> = match task
+                {
+                    SchedTask::Segment(i) => {
+                        seg_started[i] = true;
+                        seg_in_flight = true;
+                        let impl_rc = slot_impls[slot].clone();
+                        let seg = resolved_segments[i].clone();
+                        Box::pin(async move {
+                            let pf = impl_rc
+                                .segment_preflight(&seg)
+                                .with_context(|| format!("preflight segment {}", seg.index))?;
+                            let r = impl_rc
+                                .prove_segment_core_async(ctx, pf)
+                                .await
+                                .with_context(|| format!("prove segment {}", seg.index))?;
+                            Ok((slot, SchedDone::Segment(i, r)))
+                        })
+                    }
+                    SchedTask::Keccak(j) => {
+                        kec_started[j] = true;
+                        let hal = self.provers[slot].hal_handle();
+                        let req = session.pending_keccaks()[j].clone();
+                        Box::pin(async move {
+                            let r = prove_keccak_webgpu(&req, hal)
+                                .await
+                                .with_context(|| format!("pool keccak request {j}"))?;
+                            Ok((slot, SchedDone::Keccak(j, r)))
+                        })
+                    }
+                    SchedTask::KeccakRoot => {
+                        kec_root_started = true;
+                        let impl_rc = slot_impls[slot].clone();
+                        let receipts: Vec<SuccinctReceipt<Unknown>> = kec_done
+                            .iter_mut()
+                            .map(|r| r.take().expect("all keccaks done before KeccakRoot"))
+                            .collect();
+                        Box::pin(async move {
+                            let mut peaks: VecDeque<(u32, SuccinctReceipt<Unknown>)> =
+                                VecDeque::new();
+                            for r in receipts {
+                                impl_rc
+                                    .insert_union_receipt_async(&mut peaks, r)
                                     .await
-                                    .with_context(|| {
-                                        format!("prove segment {}", seg.index)
-                                    })?;
-                                Ok((slot, SchedDone::Segment(i, r)))
-                            })
-                        }
-                        SchedTask::Keccak(j) => {
-                            kec_started[j] = true;
-                            let hal = self.provers[slot].hal_handle();
-                            let req = session.pending_keccaks()[j].clone();
-                            Box::pin(async move {
-                                let r = prove_keccak_webgpu(&req, hal)
-                                    .await
-                                    .with_context(|| format!("pool keccak request {j}"))?;
-                                Ok((slot, SchedDone::Keccak(j, r)))
-                            })
-                        }
-                        SchedTask::KeccakRoot => {
-                            kec_root_started = true;
-                            let impl_rc = slot_impls[slot].clone();
-                            let receipts: Vec<SuccinctReceipt<Unknown>> = kec_done
-                                .iter_mut()
-                                .map(|r| {
-                                    r.take().expect("all keccaks done before KeccakRoot")
-                                })
-                                .collect();
-                            Box::pin(async move {
-                                let mut peaks: VecDeque<(u32, SuccinctReceipt<Unknown>)> =
-                                    VecDeque::new();
-                                for r in receipts {
-                                    impl_rc
-                                        .insert_union_receipt_async(&mut peaks, r)
-                                        .await
-                                        .context("pool keccak union insert")?;
-                                }
-                                let root = impl_rc
-                                    .union_receipts_root_async(peaks)
-                                    .await
-                                    .context("pool keccak union root")?;
-                                Ok((slot, SchedDone::KeccakRoot(root)))
-                            })
-                        }
-                        SchedTask::Lift(i) => {
-                            lift_started[i] = true;
-                            let hal = self.provers[slot].hal_handle();
-                            let seg_receipt =
-                                seg_done[i].clone().expect("segment done before lift");
-                            Box::pin(async move {
-                                let r = lift_webgpu(&seg_receipt, hal)
-                                    .await
-                                    .with_context(|| format!("pool lift segment {i}"))?;
-                                Ok((slot, SchedDone::Lift(i, r)))
-                            })
-                        }
-                        SchedTask::Join(t, p) => {
-                            join_started[t][p] = true;
-                            let hal = self.provers[slot].hal_handle();
-                            let a = tiers[t][2 * p].clone().expect("join left ready");
-                            let b = tiers[t][2 * p + 1].clone().expect("join right ready");
-                            Box::pin(async move {
-                                let r = join_webgpu(&a, &b, hal)
-                                    .await
-                                    .with_context(|| {
-                                        format!("pool join tier {t} pos {p}")
-                                    })?;
-                                Ok((slot, SchedDone::Join(t, p, r)))
-                            })
-                        }
-                    };
+                                    .context("pool keccak union insert")?;
+                            }
+                            let root = impl_rc
+                                .union_receipts_root_async(peaks)
+                                .await
+                                .context("pool keccak union root")?;
+                            Ok((slot, SchedDone::KeccakRoot(root)))
+                        })
+                    }
+                    SchedTask::Lift(i) => {
+                        lift_started[i] = true;
+                        let hal = self.provers[slot].hal_handle();
+                        let seg_receipt = seg_done[i].clone().expect("segment done before lift");
+                        Box::pin(async move {
+                            let r = lift_webgpu(&seg_receipt, hal)
+                                .await
+                                .with_context(|| format!("pool lift segment {i}"))?;
+                            Ok((slot, SchedDone::Lift(i, r)))
+                        })
+                    }
+                    SchedTask::Join(t, p) => {
+                        join_started[t][p] = true;
+                        let hal = self.provers[slot].hal_handle();
+                        let a = tiers[t][2 * p].clone().expect("join left ready");
+                        let b = tiers[t][2 * p + 1].clone().expect("join right ready");
+                        Box::pin(async move {
+                            let r = join_webgpu(&a, &b, hal)
+                                .await
+                                .with_context(|| format!("pool join tier {t} pos {p}"))?;
+                            Ok((slot, SchedDone::Join(t, p, r)))
+                        })
+                    }
+                };
                 in_flight.push(fut);
             }
 
@@ -908,8 +888,7 @@ impl WebGpuProverPool {
                 break;
             }
 
-            let (result, _idx, remaining) =
-                futures::future::select_all(in_flight).await;
+            let (result, _idx, remaining) = futures::future::select_all(in_flight).await;
             in_flight = remaining;
             let (slot, done) = result?;
             free_slots.push(slot);
@@ -1047,33 +1026,27 @@ impl WebGpuProverPool {
                 ProverOpts::succinct(),
                 self.provers[0].hal_handle(),
             ));
-            for (idx, assumption) in
-                composite_receipt.assumption_receipts.iter().enumerate()
-            {
+            for (idx, assumption) in composite_receipt.assumption_receipts.iter().enumerate() {
                 continuation = match assumption {
                     InnerAssumptionReceipt::Succinct(a) => slot0
                         .resolve_async(&continuation, a)
                         .await
                         .with_context(|| format!("pool scheduled resolve {idx}"))?,
                     InnerAssumptionReceipt::Composite(nested) => {
-                        let nested_succinct =
-                            self.composite_to_succinct_async(nested).await?;
-                        let unknown = SuccinctReceipt::<ReceiptClaim>::into_unknown(
-                            nested_succinct,
-                        );
+                        let nested_succinct = self.composite_to_succinct_async(nested).await?;
+                        let unknown =
+                            SuccinctReceipt::<ReceiptClaim>::into_unknown(nested_succinct);
                         slot0
                             .resolve_async(&continuation, &unknown)
                             .await
-                            .with_context(|| {
-                                format!("pool scheduled resolve nested {idx}")
-                            })?
+                            .with_context(|| format!("pool scheduled resolve nested {idx}"))?
                     }
-                    InnerAssumptionReceipt::Fake(_) => bail!(
-                        "pool: composite receipts with Fake assumptions are not supported"
-                    ),
-                    InnerAssumptionReceipt::Groth16(_) => bail!(
-                        "pool: composite receipts with Groth16 assumptions are not supported"
-                    ),
+                    InnerAssumptionReceipt::Fake(_) => {
+                        bail!("pool: composite receipts with Fake assumptions are not supported")
+                    }
+                    InnerAssumptionReceipt::Groth16(_) => {
+                        bail!("pool: composite receipts with Groth16 assumptions are not supported")
+                    }
                 };
             }
         }
@@ -1135,7 +1108,15 @@ fn merge_webgpu_diagnostics(aggregate: &mut WebGpuDiagnostics, diagnostics: WebG
     aggregate.gpu_dispatches = aggregate
         .gpu_dispatches
         .saturating_add(diagnostics.gpu_dispatches);
-    aggregate.cpu_mirrors = aggregate.cpu_mirrors.saturating_add(diagnostics.cpu_mirrors);
+    aggregate.raw_compute_dispatches = aggregate
+        .raw_compute_dispatches
+        .saturating_add(diagnostics.raw_compute_dispatches);
+    aggregate.queue_submits = aggregate
+        .queue_submits
+        .saturating_add(diagnostics.queue_submits);
+    aggregate.cpu_mirrors = aggregate
+        .cpu_mirrors
+        .saturating_add(diagnostics.cpu_mirrors);
     aggregate.cpu_fallbacks = aggregate
         .cpu_fallbacks
         .saturating_add(diagnostics.cpu_fallbacks);
@@ -1172,7 +1153,9 @@ fn merge_webgpu_op_diagnostics(
         existing.cpu_fallbacks = existing
             .cpu_fallbacks
             .saturating_add(diagnostics.cpu_fallbacks);
-        existing.cpu_only_ops = existing.cpu_only_ops.saturating_add(diagnostics.cpu_only_ops);
+        existing.cpu_only_ops = existing
+            .cpu_only_ops
+            .saturating_add(diagnostics.cpu_only_ops);
     } else {
         aggregate.push(diagnostics);
     }

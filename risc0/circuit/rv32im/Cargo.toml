@@ -43,6 +43,10 @@ cfg-if = { version = "1.0", optional = true }
 # `WebGpuHal::create_compute_kernel_async` so it overlaps with guest
 # execution instead of blocking the first segment's witgen.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+futures = { version = "0.3", default-features = false, features = [
+  "alloc",
+  "async-await",
+], optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 enum-map = { version = "2.7.3", optional = true }
 malachite = { version = "0.4.22", optional = true, default-features = false, features = [
@@ -108,5 +112,10 @@ std = [
   "risc0-zkp/std",
   "serde/std",
 ]
-webgpu = ["prove", "risc0-zkp/webgpu", "dep:wasm-bindgen-futures"]
+webgpu = [
+  "prove",
+  "risc0-zkp/webgpu",
+  "dep:futures",
+  "dep:wasm-bindgen-futures",
+]
 witgen_debug = []
