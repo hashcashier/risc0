@@ -9,7 +9,7 @@
       "--ignore-gpu-blocklist",
       "--disable-gpu-watchdog",
       "--disable-hang-monitor",
-      "--enable-dawn-features=allow_unsafe_apis,disable_robustness,disable_adapter_blocklist"
+      "--enable-dawn-features=allow_unsafe_apis,disable_adapter_blocklist"
     ]
   }
 }
