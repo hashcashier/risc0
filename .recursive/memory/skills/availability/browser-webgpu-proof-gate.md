@@ -9,8 +9,8 @@ Watch-Paths:
 - `/risc0/zkp/src/hal/webgpu.rs`
 Source-Runs:
 - `wasm-webgpu-prover-perf`
-Validated-At-Commit: `4b84f5e9159c7b042a173c98b07d74e47e048eaf`
-Last-Validated: `2026-05-22T00:00:00Z`
+Validated-At-Commit: `0055df723` (M0 merge)
+Last-Validated: `2026-07-02T00:00:00Z`
 Tags:
 - `skills`
 - `availability`
@@ -29,7 +29,7 @@ Focused and e2e browser proof tests need a wasm bindgen browser runner, Chrome/C
 
 ```text
 CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner
-CHROMEDRIVER=/home/rami/.cache/.wasm-pack/chromedriver-75649e7ca5ae435b/chromedriver
+CHROMEDRIVER=/home/rami/.cache/chromedriver-149/chromedriver-linux64/chromedriver  # must match system Chrome major version
 WASM_BINDGEN_TEST_TIMEOUT=120
 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json
 VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json
@@ -39,6 +39,19 @@ __GLX_VENDOR_LIBRARY_NAME=nvidia
 ```
 
 Plain `cargo test --target wasm32-unknown-unknown` is not enough. It can build the wasm test and then fail with `Exec format error` because it tries to execute the `.wasm` file directly.
+
+## Environment Requirements (updated 2026-07-02)
+
+- Chromedriver major version must match the installed Chrome; Chrome auto-updates, so
+  re-download from Chrome-for-Testing when sessions fail to start.
+- `disable_robustness` must NOT be passed to Dawn: NVIDIA driver 580.159.04 SIGTRAPs the
+  GPU process with it (`exit_code=133`, surfaces as `mapAsync ... external Instance
+  reference no longer exists`). Robust mode measures at baseline speed.
+- `hermes-vllm.service` must be stopped during gates (user authorization required):
+  its VRAM reservation starves Chrome's Vulkan device; if it is crash-looping it also
+  cyclically seizes ~24.5 GiB, killing proofs mid-flight.
+- Warm the GPU before timing comparisons: the first run after idle can execute in P8
+  (270-742 MHz) and read ~10x slow; the driver ramps to P0 on subsequent load.
 
 ## Sandbox Boundary
 
