@@ -48,11 +48,11 @@ pub struct WebGpuProver {
 }
 
 /// Number of recursion proofs the succinct-phase scheduler keeps in
-/// flight (one WebGPU device each). Two is the wasm32 memory ceiling at
-/// po2=18: width 3 aborts with the allocator-OOM `unreachable` signature
-/// mid-phase (measured 2026-07-03; consistent with SP6d's finding that
-/// concurrency is heap-bound near 2 GiB).
-pub(crate) const WEBGPU_SUCCINCT_PIPELINE_WIDTH: usize = 2;
+/// flight (one WebGPU device each). Two was the wasm32 memory ceiling at
+/// po2=18 before M4a (width 3 hit the allocator-OOM `unreachable`
+/// signature mid-phase); M4a lazy shadows cut the per-proof materialized
+/// footprint ~600→172 MB, so M4c retries width 3.
+pub(crate) const WEBGPU_SUCCINCT_PIPELINE_WIDTH: usize = 3;
 
 impl WebGpuProver {
     /// Request a WebGPU device from the browser and construct a prover.
