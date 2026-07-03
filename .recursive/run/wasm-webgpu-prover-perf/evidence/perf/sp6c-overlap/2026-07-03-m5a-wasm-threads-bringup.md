@@ -126,3 +126,30 @@ KeccakUnion wall is in-band either way.
   loudly at wasm-bindgen-rayon's compile_error gate.
 - webdriver.json: SAB flag MERGED into the existing enable-features arg
   (`--enable-features=Vulkan,SharedArrayBuffer`) — repeated flags override.
+
+## M5c: parallel rv32im accum steppers (same-day follow-on)
+
+All three per-cycle `step_TopAccum` loops (`run_accum_raw_steps_skip_major`,
+`run_accum_raw_steps_skip_replaced_misc0_or_majors`, `run_accum_steps`) go
+`into_par_iter().try_for_each` — the C reference (`cpu_accum` phase1) runs
+`stepAccum` under `poolstl::par` identically; the cross-cycle recurrences
+already live in separate prefix passes (GPU-offloaded in production:
+`terminal_ext_prefix_gpu` 122 ms, `machine_column_carry_gpu` ~0). The
+`direct_misc0_rows` counter became a local `AtomicUsize`.
+
+| Gate | M5b | M5c | Movement |
+|---|---:|---:|---:|
+| Parity suite | 4/4 | 4/4 | ✓ |
+| BusyLoop | 2610 ms | **2330 ms** | **−10.7%** |
+| KeccakUnion(1) | 44094 ms | **42180 ms** | **−4.3% — below the 42.8–44.5 s all-time band** |
+| **xgboost** | **21093 ms** | **19454 ms** | **−7.8%** |
+
+Span proof (xgboost): `step_top_accum_cpu_skip_replaced` **2281 → 365 ms**
+(6.2×); `rv32im_witgen_accum` 2474 → 560 ms; `rv32im_accumulate` 2423 → 513 ms.
+
+Remaining CPU ranking after M5c: recursion_witgen_generate 3107 ms (M5d —
+per-worker MachineContext over shared raw-ptr fields + `is_par_safe` group
+leadership, mirroring C++ `parStepExec`; generated inc calls methods only,
+so the struct internals are free to change), rv32im_witgen residual 1560 ms
+(materialize + Amdahl tail), keccak witgen/preflight (~3.4 s per proof,
+KeccakUnion phase).

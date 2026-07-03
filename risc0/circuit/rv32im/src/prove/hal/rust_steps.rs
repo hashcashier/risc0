@@ -1604,19 +1604,22 @@ fn run_accum_raw_steps_skip_major(
     let step_top_accum_timer = risc0_zkp::hal::webgpu::WebGpuStageTimer::new(format!(
         "rv32im_accumulate step_top_accum_cpu_skip_major{skip_major} cycles={last_cycle}"
     ));
-    for cycle in 0..last_cycle {
+    // Per-cycle accum steps are parallel in the C reference (cpu_accum
+    // phase1 runs stepAccum under poolstl::par; the cross-cycle recurrences
+    // live in the separate prefix passes).
+    (0..last_cycle).into_par_iter().try_for_each(|cycle| {
         let major = preflight.cycles[cycle].major;
         let minor = preflight.cycles[cycle].minor;
         if major == skip_major {
-            continue;
+            return Ok(());
         }
         let ctx = ExecContext::new(preflight, &tables, cycle);
         step_TopAccum(&ctx, accum, data, global, mix).map_err(|e| {
             anyhow::anyhow!(
                 "step_TopAccum failed at cycle={cycle} major={major} minor={minor}: {e}"
             )
-        })?;
-    }
+        })
+    })?;
     #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
     drop(step_top_accum_timer);
 
@@ -1640,7 +1643,8 @@ fn run_accum_raw_steps_skip_replaced_misc0_or_majors(
     let step_top_accum_timer = risc0_zkp::hal::webgpu::WebGpuStageTimer::new(format!(
         "rv32im_accumulate step_top_accum_cpu_skip_replaced_misc0={skip_replaced_misc0}_mem0={skip_replaced_mem0}_major_mask=0x{skip_major_mask:04x} cycles={last_cycle}"
     ));
-    for cycle in 0..last_cycle {
+    // Parallel per the C reference's phase1 (see run_accum_raw_steps_skip_major).
+    (0..last_cycle).into_par_iter().try_for_each(|cycle| {
         let major = preflight.cycles[cycle].major;
         let minor = preflight.cycles[cycle].minor;
         let skip_major = major < 16 && (skip_major_mask & (1u16 << major)) != 0;
@@ -1648,15 +1652,15 @@ fn run_accum_raw_steps_skip_replaced_misc0_or_majors(
             || (skip_replaced_mem0 && major == 5 && mem0_short_circuit_minor(minor))
             || skip_major
         {
-            continue;
+            return Ok(());
         }
         let ctx = ExecContext::new(preflight, &tables, cycle);
         step_TopAccum(&ctx, accum, data, global, mix).map_err(|e| {
             anyhow::anyhow!(
                 "step_TopAccum failed at cycle={cycle} major={major} minor={minor}: {e}"
             )
-        })?;
-    }
+        })
+    })?;
     #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
     drop(step_top_accum_timer);
 
@@ -1684,8 +1688,9 @@ fn run_accum_steps(
         };
         risc0_zkp::hal::webgpu::WebGpuStageTimer::new(format!("{label} cycles={last_cycle}"))
     };
-    let mut direct_misc0_rows = 0usize;
-    for cycle in 0..last_cycle {
+    // Parallel per the C reference's phase1 (see run_accum_raw_steps_skip_major).
+    let direct_misc0_rows = AtomicUsize::new(0);
+    (0..last_cycle).into_par_iter().try_for_each(|cycle| {
         let major = preflight.cycles[cycle].major;
         let minor = preflight.cycles[cycle].minor;
         if direct_misc0_enabled && cycle_short_circuited(major, minor) && major == 0 {
@@ -1694,16 +1699,17 @@ fn run_accum_steps(
                     "direct MISC0 step_TopAccum failed at cycle={cycle} major={major} minor={minor}: {e}"
                 )
             })?;
-            direct_misc0_rows += 1;
-            continue;
+            direct_misc0_rows.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
         }
         let ctx = ExecContext::new(preflight, &tables, cycle);
         step_TopAccum(&ctx, accum, data, global, mix).map_err(|e| {
             anyhow::anyhow!(
                 "step_TopAccum failed at cycle={cycle} major={major} minor={minor}: {e}"
             )
-        })?;
-    }
+        })
+    })?;
+    let direct_misc0_rows = direct_misc0_rows.into_inner();
     if direct_misc0_rows != 0 {
         WITGEN_GPU_DIRECT_MISC0_ACCUM_ROWS.fetch_add(direct_misc0_rows, Ordering::Relaxed);
     }
