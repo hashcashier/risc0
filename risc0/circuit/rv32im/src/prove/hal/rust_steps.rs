@@ -24,8 +24,10 @@
 use std::{
     cell::Cell,
     marker::PhantomData,
-    sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicUsize, Ordering},
 };
+
+use rayon::prelude::*;
 
 use anyhow::{bail, ensure, Result};
 use risc0_core::field::{
@@ -56,6 +58,16 @@ impl<T> Clone for BufferRow<T> {
 }
 
 impl<T> Copy for BufferRow<T> {}
+
+// SAFETY: BufferRow is a raw column-major view handed to the witness steppers
+// for the duration of one witness-generation closure. The parallel stepper
+// protocol is identical to the C reference (rv32im-sys ffi.cpp captures the
+// same raw buffers across poolstl::par threads): each cycle's step writes
+// only its own row, and cross-row `back` loads are confined by the protocol's
+// phase structure (table split barrier in witgen; separate prefix pass in
+// accum). `checked` set_at conflicts panic, which rayon propagates at join.
+unsafe impl<T: Send> Send for BufferRow<T> {}
+unsafe impl<T: Sync> Sync for BufferRow<T> {}
 
 impl BufferRow<Val> {
     fn mutable(slice: &mut [Val], rows: usize, cols: usize, checked: bool) -> Self {
@@ -440,15 +452,18 @@ impl<'a> ExecContext<'a> {
 }
 
 pub(crate) struct LookupTables {
-    table_u8: Vec<Cell<u32>>,
-    table_u16: Vec<Cell<u32>>,
+    // Relaxed atomics, mirroring the C reference's
+    // `std::vector<std::atomic_uint32_t>` (tables.h): lookup counts are pure
+    // associative increments accumulated across parallel cycle steps.
+    table_u8: Vec<AtomicU32>,
+    table_u16: Vec<AtomicU32>,
 }
 
 impl Default for LookupTables {
     fn default() -> Self {
         Self {
-            table_u8: (0..(1 << 8)).map(|_| Cell::new(0)).collect(),
-            table_u16: (0..(1 << 16)).map(|_| Cell::new(0)).collect(),
+            table_u8: (0..(1 << 8)).map(|_| AtomicU32::new(0)).collect(),
+            table_u16: (0..(1 << 16)).map(|_| AtomicU32::new(0)).collect(),
         }
     }
 }
@@ -470,7 +485,7 @@ impl LookupTables {
         } else {
             &self.table_u16[index]
         };
-        cell.set(cell.get() + 1);
+        cell.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -479,9 +494,9 @@ impl LookupTables {
         let index = index.as_u32() as usize;
         ensure!(table == 8 || table == 16, "invalid lookup table: {table}");
         Ok(Val::new(if table == 8 {
-            self.table_u8[index].get()
+            self.table_u8[index].load(Ordering::Relaxed)
         } else {
-            self.table_u16[index].get()
+            self.table_u16[index].load(Ordering::Relaxed)
         }))
     }
 }
@@ -1540,7 +1555,21 @@ fn run_witness_steps(
     let last_cycle = preflight.cycles.len();
 
     match mode {
-        StepMode::Parallel | StepMode::SeqForward => {
+        StepMode::Parallel => {
+            // 1:1 port of the C reference (rv32im-sys ffi.cpp
+            // `risc0_circuit_rv32im_cpu_witgen`): `poolstl::par` for_each over
+            // each side of the table split. Cycles within a phase are
+            // independent — preflight pre-resolves cross-cycle data flow —
+            // and the phase boundary is the barrier between lookup-count
+            // accumulation and table-row emission reading final counts.
+            (0..split)
+                .into_par_iter()
+                .try_for_each(|cycle| step_exec(preflight, &tables, cycle, data, global))?;
+            (split..last_cycle)
+                .into_par_iter()
+                .try_for_each(|cycle| step_exec(preflight, &tables, cycle, data, global))?;
+        }
+        StepMode::SeqForward => {
             for cycle in 0..split {
                 step_exec(preflight, &tables, cycle, data, global)?;
             }

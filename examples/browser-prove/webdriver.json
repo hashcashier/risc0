@@ -3,7 +3,7 @@
   "goog:chromeOptions": {
     "args": [
       "--enable-unsafe-webgpu",
-      "--enable-features=Vulkan",
+      "--enable-features=Vulkan,SharedArrayBuffer",
       "--use-angle=vulkan",
       "--disable-vulkan-surface",
       "--ignore-gpu-blocklist",

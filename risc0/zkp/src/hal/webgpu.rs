@@ -207,6 +207,16 @@ thread_local! {
     static WEBGPU_POLY_GROUP_DRAIN_DIAGNOSTIC_ENABLED: Cell<bool> = const { Cell::new(false) };
     static WEBGPU_COMBOS_DIVIDE_PARALLEL_ENABLED: Cell<bool> = const { Cell::new(true) };
     static WEBGPU_COMBOS_DIVIDE_PARALLEL_DISPATCHES: Cell<u64> = const { Cell::new(0) };
+    static WEBGPU_WASM_THREAD_POOL_WORKERS: Cell<usize> = const { Cell::new(0) };
+    static WEBGPU_WASM_THREAD_POOL_STATE: Cell<WasmThreadPoolState> =
+        const { Cell::new(WasmThreadPoolState::Uninit) };
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WasmThreadPoolState {
+    Uninit,
+    Ready,
+    Failed,
 }
 
 /// Enable or disable explicit queue-drain diagnostics around WebGPU
@@ -244,6 +254,56 @@ pub fn combos_divide_parallel_dispatches() -> u64 {
 
 pub(crate) fn record_combos_divide_parallel_dispatch() {
     WEBGPU_COMBOS_DIVIDE_PARALLEL_DISPATCHES.with(|count| count.set(count.get() + 1));
+}
+
+/// Override the rayon web-worker pool size used by the CPU witness kernels
+/// (0 = auto: `min(hardware_concurrency, 8)`). Takes effect only if set
+/// before the first `WebGpuHal::new` on this thread.
+pub fn set_wasm_thread_pool_workers(workers: usize) {
+    WEBGPU_WASM_THREAD_POOL_WORKERS.with(|w| w.set(workers));
+}
+
+/// Initialize the rayon web-worker thread pool once per module instance.
+///
+/// Runs the `wasm-bindgen-rayon` handshake: spawns the workers, re-instantiates
+/// the module in each against the shared memory, and installs them as the
+/// rayon global pool. Requires the atomics build + SharedArrayBuffer (without
+/// them the shared-memory module cannot instantiate at all, so reaching this
+/// code implies SAB exists). On failure the pool stays uninstalled and any
+/// later `par_iter` panics loudly — no silent serial fallback.
+async fn ensure_wasm_thread_pool() {
+    if WEBGPU_WASM_THREAD_POOL_STATE.with(|s| s.get()) != WasmThreadPoolState::Uninit {
+        return;
+    }
+    let configured = WEBGPU_WASM_THREAD_POOL_WORKERS.with(|w| w.get());
+    let workers = if configured == 0 {
+        let hardware_concurrency = js_sys::global()
+            .dyn_into::<web_sys::WorkerGlobalScope>()
+            .ok()
+            .map(|scope| scope.navigator().hardware_concurrency() as usize)
+            .unwrap_or(0);
+        if hardware_concurrency == 0 {
+            8
+        } else {
+            hardware_concurrency.min(8)
+        }
+    } else {
+        configured
+    };
+    let start_ms = js_sys::Date::now();
+    match JsFuture::from(wasm_bindgen_rayon::init_thread_pool(workers)).await {
+        Ok(_) => {
+            WEBGPU_WASM_THREAD_POOL_STATE.with(|s| s.set(WasmThreadPoolState::Ready));
+            log_webgpu_metric(&format!(
+                "wasm_thread_pool workers={workers} init_ms={:.0}",
+                js_sys::Date::now() - start_ms
+            ));
+        }
+        Err(err) => {
+            WEBGPU_WASM_THREAD_POOL_STATE.with(|s| s.set(WasmThreadPoolState::Failed));
+            log_webgpu_metric(&format!("wasm_thread_pool init_failed err={err:?}"));
+        }
+    }
 }
 
 /// Optional circuit-specific WebGPU implementation of the check-polynomial
@@ -8182,6 +8242,7 @@ pub fn with_authoritative_context<F: Future>(
 impl WebGpuHal {
     /// Request a browser WebGPU device and construct a HAL with the given hash suite.
     pub async fn new(hash_suite: HashSuite<BabyBear>) -> Result<Self> {
+        ensure_wasm_thread_pool().await;
         let device = request_device().await?;
         Ok(Self::from_device(device, hash_suite))
     }
