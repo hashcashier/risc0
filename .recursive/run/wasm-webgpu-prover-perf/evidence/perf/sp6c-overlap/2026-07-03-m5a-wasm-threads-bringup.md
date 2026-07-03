@@ -184,3 +184,21 @@ features) fails PRE-EXISTING at HEAD (dead-code `GpuAuthoritative` under
 -Dwarnings), unchanged by this diff; zkp native suite 36/36. fmt reflow
 after gating produced a byte-identical binary (debuginfo=0), so the gated
 bytes are the landing bytes.
+
+## M5e: parallel keccak witgen
+
+`run_witness_steps` Parallel arm → `into_par_iter` (C reference keccak-sys
+ffi.cpp is plain `poolstl::par` per cycle — no split, no leadership);
+keccak's own `BufferRow` gets the documented Send/Sync impls; the concrete
+preimage slices are captured outside the closure so the generic preflight
+order type stays off it.
+
+| Gate | M5d | M5e | Movement |
+|---|---:|---:|---:|
+| Parity suite | 4/4 | 4/4 | ✓ |
+| BusyLoop | 2236 ms | 2255 ms | flat |
+| KeccakUnion(1) | 40057 ms | **38945 ms** | **−2.8%** |
+| xgboost (no keccaks) | 17489 ms | 17052 ms | flat-to-better ✓ |
+| **Heavy 25-keccak fixture** | 119.5 s (M4e) | **107.7 s** | **−9.9%** |
+
+Span proof: `keccak_witgen` **2436 → 369 ms** (6.6×). Receipts verified.

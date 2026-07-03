@@ -25,6 +25,7 @@
 use std::marker::PhantomData;
 
 use anyhow::{ensure, Result};
+use rayon::prelude::*;
 use risc0_core::field::Elem as _;
 use risc0_zkp::{hal::Buffer, layout::Reg};
 
@@ -49,6 +50,13 @@ impl<T> Clone for BufferRow<T> {
 }
 
 impl<T> Copy for BufferRow<T> {}
+
+// SAFETY: raw column-major view for the witness steppers; the parallel
+// per-cycle protocol matches the C reference (keccak-sys ffi.cpp runs
+// stepExec under poolstl::par capturing the same raw buffers) — each cycle's
+// step writes only its own row, and `checked` set conflicts panic loudly.
+unsafe impl<T: Send> Send for BufferRow<T> {}
+unsafe impl<T: Sync> Sync for BufferRow<T> {}
 
 impl BufferRow<Val> {
     fn mutable(slice: &mut [Val], rows: usize, cols: usize, checked: bool) -> Self {
@@ -368,7 +376,18 @@ where
     );
 
     match mode {
-        StepMode::Parallel | StepMode::SeqForward => {
+        StepMode::Parallel => {
+            // C reference (keccak-sys ffi.cpp) runs stepExec under
+            // poolstl::par with no split or leadership — keccak witgen
+            // cycles are fully independent. Capture the concrete slices so
+            // the generic preflight order type stays off the closure.
+            let preimages = preflight.preimages.as_slice();
+            let preimage_idxs = preimage_idxs.as_slice();
+            (0..preflight.cycle)
+                .into_par_iter()
+                .try_for_each(|cycle| step_exec(preimages, preimage_idxs, cycle, data, global))?;
+        }
+        StepMode::SeqForward => {
             for cycle in 0..preflight.cycle {
                 step_exec(
                     preflight.preimages.as_slice(),
