@@ -14,7 +14,11 @@
 
 //! CPU implementation of the HAL.
 
-use std::{fmt::Debug, ops::Range, sync::Arc};
+use std::{
+    fmt::Debug,
+    ops::Range,
+    sync::{Arc, OnceLock},
+};
 
 use ndarray::{ArrayView, ArrayViewMut, Axis};
 use parking_lot::{
@@ -85,10 +89,67 @@ impl<T> Drop for TrackedVec<T> {
     }
 }
 
+/// Observer invoked the first time a lazily-allocated [CpuBuffer] materializes
+/// its backing storage, with `(name, bytes)`. The WebGPU HAL installs one to
+/// attribute which GPU-shadow buffers still cost wasm heap.
+static MATERIALIZE_OBSERVER: OnceLock<fn(&'static str, usize)> = OnceLock::new();
+
+/// Install a global observer for lazy [CpuBuffer] materialization events.
+/// Only the first install wins; later calls are ignored.
+pub fn set_buffer_materialize_observer(observer: fn(&'static str, usize)) {
+    let _ = MATERIALIZE_OBSERVER.set(observer);
+}
+
+fn notify_materialize<T>(name: &'static str, size: usize) {
+    if let Some(observer) = MATERIALIZE_OBSERVER.get() {
+        observer(name, size * std::mem::size_of::<T>());
+    }
+}
+
+/// Backing storage for [CpuBuffer]: either a live tracked allocation or a
+/// deferred one. `Pending` is logically `vec![fill(); size]`. The WebGPU HAL
+/// allocates a CPU shadow for every device buffer, and most shadows are never
+/// touched on the CPU, so both the allocation and its fill cost are deferred
+/// until the first CPU access.
+enum LazyVec<T> {
+    Pending { size: usize, fill: fn() -> T },
+    Ready(TrackedVec<T>),
+}
+
+impl<T> LazyVec<T> {
+    fn is_ready(&self) -> bool {
+        matches!(self, LazyVec::Ready(_))
+    }
+
+    fn ready(&self) -> &TrackedVec<T> {
+        match self {
+            LazyVec::Ready(vec) => vec,
+            LazyVec::Pending { .. } => panic!("CpuBuffer accessed before materialization"),
+        }
+    }
+
+    fn ready_mut(&mut self) -> &mut TrackedVec<T> {
+        match self {
+            LazyVec::Ready(vec) => vec,
+            LazyVec::Pending { .. } => panic!("CpuBuffer accessed before materialization"),
+        }
+    }
+}
+
+impl<T: Clone> LazyVec<T> {
+    fn materialize(&mut self, name: &'static str) -> &mut TrackedVec<T> {
+        if let LazyVec::Pending { size, fill } = *self {
+            notify_materialize::<T>(name, size);
+            *self = LazyVec::Ready(TrackedVec::new(vec![fill(); size]));
+        }
+        self.ready_mut()
+    }
+}
+
 #[derive(Clone)]
 pub struct CpuBuffer<T> {
     name: &'static str,
-    buf: Arc<RwLock<TrackedVec<T>>>,
+    buf: Arc<RwLock<LazyVec<T>>>,
     region: Region,
 }
 
@@ -170,10 +231,12 @@ impl<T: Default + Clone> CpuBuffer<T> {
             "CpuBuffer::new({name}) capacity overflow: len={size}, elem_size={elem_size}, type={}",
             std::any::type_name::<T>()
         );
-        let buf = vec![T::default(); size];
         CpuBuffer {
             name,
-            buf: Arc::new(RwLock::new(TrackedVec::new(buf))),
+            buf: Arc::new(RwLock::new(LazyVec::Pending {
+                size,
+                fill: T::default,
+            })),
             region: Region(0, size),
         }
     }
@@ -185,7 +248,7 @@ impl<T: Default + Clone> CpuBuffer<T> {
     fn copy_from(name: &'static str, slice: &[T]) -> Self {
         CpuBuffer {
             name,
-            buf: Arc::new(RwLock::new(TrackedVec::new(slice.to_vec()))),
+            buf: Arc::new(RwLock::new(LazyVec::Ready(TrackedVec::new(slice.to_vec())))),
             region: Region(0, slice.len()),
         }
     }
@@ -197,23 +260,71 @@ impl<T: Default + Clone> CpuBuffer<T> {
         let vec = (0..size).map(f).collect();
         CpuBuffer {
             name,
-            buf: Arc::new(RwLock::new(TrackedVec::new(vec))),
+            buf: Arc::new(RwLock::new(LazyVec::Ready(TrackedVec::new(vec)))),
             region: Region(0, size),
         }
     }
 
     pub fn as_slice(&self) -> MappedRwLockReadGuard<'_, [T]> {
+        self.ensure_materialized();
         let vec = self.buf.read();
-        RwLockReadGuard::map(vec, |vec| &vec.0[self.region.range()])
+        RwLockReadGuard::map(vec, |vec| &vec.ready().0[self.region.range()])
     }
 
     pub fn as_slice_mut(&self) -> MappedRwLockWriteGuard<'_, [T]> {
-        let vec = self.buf.write();
-        RwLockWriteGuard::map(vec, |vec| &mut vec.0[self.region.range()])
+        let mut vec = self.buf.write();
+        vec.materialize(self.name);
+        RwLockWriteGuard::map(vec, |vec| &mut vec.ready_mut().0[self.region.range()])
     }
 
     pub(crate) fn as_slice_sync(&self) -> SyncSlice<'_, T> {
         SyncSlice::new(self.as_slice_mut())
+    }
+}
+
+impl<T: Clone> CpuBuffer<T> {
+    fn ensure_materialized(&self) {
+        if !self.buf.read().is_ready() {
+            self.buf.write().materialize(self.name);
+        }
+    }
+
+    /// When the buffer is still an unmaterialized default-fill allocation,
+    /// returns the value every element logically holds; `None` once real
+    /// storage exists. Consumed by the WebGPU HAL's shadow-sync fast paths.
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    pub(crate) fn pending_fill_value(&self) -> Option<T> {
+        match &*self.buf.read() {
+            LazyVec::Pending { fill, .. } => Some(fill()),
+            LazyVec::Ready(_) => None,
+        }
+    }
+
+    /// Overwrite this buffer's whole region from `values`. When the backing
+    /// storage is still pending and the region covers the entire allocation,
+    /// materializes directly from `values`, skipping the default fill.
+    /// Consumed by the WebGPU HAL's readback paths.
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    pub(crate) fn copy_in_from_slice(&self, values: &[T]) {
+        assert_eq!(
+            values.len(),
+            self.region.size(),
+            "copy_in_from_slice length mismatch for CpuBuffer {}",
+            self.name
+        );
+        let mut guard = self.buf.write();
+        let pending_size = match &*guard {
+            LazyVec::Pending { size, .. } => Some(*size),
+            LazyVec::Ready(_) => None,
+        };
+        if let Some(size) = pending_size {
+            if self.region.offset() == 0 && self.region.size() == size {
+                notify_materialize::<T>(self.name, size);
+                *guard = LazyVec::Ready(TrackedVec::new(values.to_vec()));
+                return;
+            }
+        }
+        guard.materialize(self.name).0[self.region.range()].clone_from_slice(values);
     }
 }
 
@@ -222,7 +333,7 @@ impl<T: Default + Clone> From<Vec<T>> for CpuBuffer<T> {
         let size = vec.len();
         CpuBuffer {
             name: "vec",
-            buf: Arc::new(RwLock::new(TrackedVec::new(vec))),
+            buf: Arc::new(RwLock::new(LazyVec::Ready(TrackedVec::new(vec)))),
             region: Region(0, size),
         }
     }
@@ -248,22 +359,25 @@ impl<T: Clone> Buffer<T> for CpuBuffer<T> {
     }
 
     fn get_at(&self, idx: usize) -> T {
+        self.ensure_materialized();
         let buf = self.buf.read();
-        buf.0[idx].clone()
+        buf.ready().0[idx].clone()
     }
 
     fn view<F: FnOnce(&[T])>(&self, f: F) {
+        self.ensure_materialized();
         let buf = self.buf.read();
-        f(&buf.0[self.region.range()]);
+        f(&buf.ready().0[self.region.range()]);
     }
 
     fn view_mut<F: FnOnce(&mut [T])>(&self, f: F) {
         let mut buf = self.buf.write();
-        f(&mut buf.0[self.region.range()]);
+        f(&mut buf.materialize(self.name).0[self.region.range()]);
     }
 
     fn to_vec(&self) -> Vec<T> {
-        self.buf.read().0.clone()
+        self.ensure_materialized();
+        self.buf.read().ready().0.clone()
     }
 }
 

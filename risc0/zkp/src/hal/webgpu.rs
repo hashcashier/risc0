@@ -370,6 +370,14 @@ pub fn log_webgpu_metric(message: &str) {
     log_webgpu_stage(&format!("browser-prove:metric {message}"));
 }
 
+/// M4a lazy-shadow attribution: log CPU shadow materializations of at least
+/// 1 MiB so the stage log shows which buffers still pin wasm heap.
+fn log_cpu_shadow_materialize(name: &'static str, bytes: usize) {
+    if bytes >= (1 << 20) {
+        log_webgpu_metric(&format!("cpu_shadow_materialize name={name} bytes={bytes}"));
+    }
+}
+
 #[derive(Clone, Copy)]
 struct EvalCheckTap {
     group: usize,
@@ -7076,6 +7084,18 @@ impl<T> WebGpuBuffer<T> {
             self.cpu.name()
         );
 
+        // M4a lazy shadows: a never-materialized shadow is logically all
+        // `T::default()`. When that default is the zero bit pattern and the
+        // browser-zero-initialized GPU allocation is still untouched, the
+        // upload is a no-op — skip it without materializing the shadow.
+        if let Some(fill) = self.cpu.pending_fill_value() {
+            if self.gpu_known_zero.get() && bytemuck::bytes_of(&fill).iter().all(|&byte| byte == 0)
+            {
+                self.cpu_dirty.set(false);
+                return Ok(());
+            }
+        }
+
         if let Some(gpu) = self.raw_buffer() {
             let mut upload = Ok(());
             self.cpu.view(|cpu| {
@@ -7137,9 +7157,7 @@ impl<T> WebGpuBuffer<T> {
             values.len(),
             self.cpu.size()
         );
-        self.cpu.view_mut(|cpu| {
-            cpu.clone_from_slice(values);
-        });
+        self.cpu.copy_in_from_slice(values);
         self.mark_synced();
         Ok(())
     }
@@ -7191,9 +7209,7 @@ impl<T> WebGpuBuffer<T> {
         );
         let values: &[T] =
             unsafe { std::slice::from_raw_parts(u32s.as_ptr() as *const T, u32s.len()) };
-        self.cpu.view_mut(|cpu| {
-            cpu.clone_from_slice(values);
-        });
+        self.cpu.copy_in_from_slice(values);
         self.mark_synced();
         Ok(())
     }
@@ -8169,6 +8185,9 @@ impl WebGpuHal {
 
     /// Construct a HAL from a browser `GPUDevice` supplied by the crate consumer.
     pub fn from_device(device: web_sys::GpuDevice, hash_suite: HashSuite<BabyBear>) -> Self {
+        // M4a: attribute which lazy CPU shadows still materialize (>= 1 MiB)
+        // so heap-pinning buffers stay visible in the stage log.
+        crate::hal::cpu::set_buffer_materialize_observer(log_cpu_shadow_materialize);
         let use_poseidon2 = hash_suite.name == "poseidon2";
         let limits = device.limits();
         let queue = device.queue();
