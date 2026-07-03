@@ -312,6 +312,21 @@ async fn read_webgpu_merkle_query(
     Ok((samples.to_vec(), siblings.to_vec()))
 }
 
+/// M4b: WebGPU merkle provers are cheaply cloneable — buffers are `Rc` views
+/// onto shared GPU storage — which lets program-constant trees (the recursion
+/// code group) be cached and reused across proofs on the same device.
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+impl Clone for MerkleTreeProver<crate::hal::webgpu::WebGpuHal> {
+    fn clone(&self) -> Self {
+        Self {
+            params: self.params,
+            matrix: self.matrix.clone(),
+            nodes: self.nodes.clone(),
+            root: self.root,
+        }
+    }
+}
+
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 impl MerkleTreeProver<crate::hal::webgpu::WebGpuHal> {
     /// Async WebGPU variant of [`Self::new`].

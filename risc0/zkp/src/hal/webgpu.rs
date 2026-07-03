@@ -8034,6 +8034,9 @@ impl<T: Clone> super::Buffer<T> for WebGpuBuffer<T> {
 pub struct WebGpuHal {
     pub device: web_sys::GpuDevice,
     pub queue: web_sys::GpuQueue,
+    /// M4b: unique per-HAL id so caches keyed by device identity (e.g. the
+    /// program-constant code-group cache) never cross `GPUDevice` boundaries.
+    instance_id: u64,
     cpu: CpuHal<BabyBear>,
     poseidon2: Option<WebGpuPoseidon2Hash>,
     diagnostics: WebGpuDiagnosticsState,
@@ -8229,6 +8232,16 @@ impl WebGpuHal {
         let mut hal = Self {
             device,
             queue,
+            instance_id: {
+                thread_local! {
+                    static NEXT_HAL_INSTANCE_ID: Cell<u64> = const { Cell::new(0) };
+                }
+                NEXT_HAL_INSTANCE_ID.with(|next| {
+                    let id = next.get();
+                    next.set(id + 1);
+                    id
+                })
+            },
             cpu: CpuHal::new(hash_suite),
             poseidon2: None,
             diagnostics: WebGpuDiagnosticsState::default(),
@@ -8336,6 +8349,12 @@ impl WebGpuHal {
     /// without an immediate CPU mirror.
     pub fn gpu_authoritative(&self) -> bool {
         self.gpu_authoritative.get()
+    }
+
+    /// M4b: unique id for this HAL instance. Buffers are device-scoped, so
+    /// caches of GPU-resident artifacts must be keyed by this id.
+    pub fn instance_id(&self) -> u64 {
+        self.instance_id
     }
 
     /// SP6d iter 4: current gpu_active_ms for this HAL. Sum of all

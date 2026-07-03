@@ -506,6 +506,21 @@ impl<'a, H: Hal> Prover<'a, H> {
     }
 }
 
+// M4b: cache of program-constant committed poly groups (the recursion code
+// group), keyed by (HAL instance, control id, cycles, group size). The
+// group's coeffs/evaluated/merkle buffers are GPU-resident `Rc` views, and
+// under M4a lazy shadows a cached group pins ~zero wasm heap. Entries live
+// for the session; the program set is tiny (lift/join/union/identity).
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+thread_local! {
+    static CODE_GROUP_CACHE: std::cell::RefCell<
+        std::collections::HashMap<
+            (u64, crate::core::digest::Digest, usize, usize),
+            PolyGroup<crate::hal::webgpu::WebGpuHal>,
+        >,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
     /// Async WebGPU variant of [`Self::commit_group`].
@@ -523,6 +538,61 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
             authoritative,
         )
         .await
+    }
+
+    /// M4b: commit a program-constant witness group, reusing the fully built
+    /// `PolyGroup` (coeffs + LDE + merkle tree) from a prior proof on this
+    /// device when available. `cache_key` must uniquely identify the witness
+    /// content — for the recursion code group that is the control ID, whose
+    /// derivation (interpolate + fixed zk-shift + merkle root) is
+    /// deterministic in (program, po2). On a hit the transcript is replayed
+    /// via `MerkleTreeProver::commit_async`, which writes byte-identical top
+    /// digests and root commit.
+    pub async fn commit_group_cached_async(
+        &mut self,
+        tap_group_index: usize,
+        witness: &crate::hal::webgpu::WebGpuBuffer<risc0_core::field::baby_bear::BabyBearElem>,
+        cache_key: &crate::core::digest::Digest,
+    ) -> anyhow::Result<()> {
+        let group_size = self.taps.group_size(tap_group_index);
+        assert_eq!(witness.size() % group_size, 0);
+        assert_eq!(witness.size() / group_size, self.cycles);
+
+        let key = (self.hal.instance_id(), *cache_key, self.cycles, group_size);
+        let cached = CODE_GROUP_CACHE.with(|cache| cache.borrow().get(&key).cloned());
+
+        if let Some(group) = cached {
+            assert!(
+                self.groups[tap_group_index].is_none(),
+                "Attempted to commit group {} more than once",
+                self.taps.group_name(tap_group_index)
+            );
+            assert_eq!(group.count, group_size);
+            assert_eq!(group.coeffs.size(), witness.size());
+            crate::hal::webgpu::log_webgpu_metric(&format!(
+                "code_group_cache hit=1 hal={} cycles={} group_size={group_size}",
+                key.0, self.cycles
+            ));
+            let group_ref = self.groups[tap_group_index].insert(group);
+            group_ref
+                .merkle
+                .commit_async(self.hal, &mut self.iop)
+                .await?;
+            return Ok(());
+        }
+
+        crate::hal::webgpu::log_webgpu_metric(&format!(
+            "code_group_cache hit=0 hal={} cycles={} group_size={group_size}",
+            key.0, self.cycles
+        ));
+        self.commit_group_async(tap_group_index, witness).await?;
+        let group = self.groups[tap_group_index]
+            .as_ref()
+            .expect("commit_group_async populated the group");
+        CODE_GROUP_CACHE.with(|cache| {
+            cache.borrow_mut().insert(key, group.clone());
+        });
+        Ok(())
     }
 
     /// Async WebGPU variant of [`Self::commit_group`] with diagnostic ownership

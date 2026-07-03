@@ -1715,9 +1715,26 @@ impl RecursionProver for WebGpuRecursionProver {
                         "commit_group_async recursion_ctrl",
                         self.hal.as_ref(),
                     );
-                    prover
-                        .commit_group_async(REGISTER_GROUP_CTRL, &witgen.ctrl)
-                        .await?;
+                    // M4b: the ctrl (code) group is a pure function of
+                    // (program, po2) and the control ID is its canonical
+                    // identity — reuse the committed PolyGroup across proofs
+                    // on this device when the caller supplies one.
+                    match control_id.as_ref() {
+                        Some(control_id) => {
+                            prover
+                                .commit_group_cached_async(
+                                    REGISTER_GROUP_CTRL,
+                                    &witgen.ctrl,
+                                    control_id,
+                                )
+                                .await?
+                        }
+                        None => {
+                            prover
+                                .commit_group_async(REGISTER_GROUP_CTRL, &witgen.ctrl)
+                                .await?
+                        }
+                    }
                 }
                 {
                     let _t = WebGpuStageTimer::new_active_for(
