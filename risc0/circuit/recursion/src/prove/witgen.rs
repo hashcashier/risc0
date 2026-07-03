@@ -71,6 +71,9 @@ where
             )
             .context("recursion ctrl construction failure")?;
 
+        #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+        let alloc_timer =
+            risc0_zkp::hal::webgpu::WebGpuStageTimer::new("recursion_witgen_alloc_init");
         let data = hal.alloc_elem_init(
             "recursion_data",
             total_cycles * CIRCUIT.data_size(),
@@ -81,6 +84,8 @@ where
             total_cycles * CIRCUIT.accum_size(),
             BabyBearElem::INVALID,
         );
+        #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+        drop(alloc_timer);
 
         let work_cycles = zkr.code_rows() as u32;
         let raw_trace = RawPreflightTrace {
@@ -93,6 +98,9 @@ where
         };
 
         let witness_mode = StepMode::Parallel;
+        #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+        let generate_timer =
+            risc0_zkp::hal::webgpu::WebGpuStageTimer::new("recursion_witgen_generate");
         circuit_hal
             .generate_witness(
                 witness_mode,
@@ -104,6 +112,8 @@ where
                 &global,
             )
             .context("witness generation failure")?;
+        #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+        drop(generate_timer);
 
         // Add random noise to end of the data columns
         scope!("noise", {
@@ -123,11 +133,19 @@ where
         });
 
         // Zero out 'invalid' entries in data and output.
+        #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+        let zeroize_timer =
+            risc0_zkp::hal::webgpu::WebGpuStageTimer::new("recursion_witgen_zeroize");
         scope!("zeroize", {
             hal.eltwise_zeroize_elem(&data);
             hal.eltwise_zeroize_elem(&global);
         });
+        #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+        drop(zeroize_timer);
 
+        #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+        let post_zeroize_timer =
+            risc0_zkp::hal::webgpu::WebGpuStageTimer::new("recursion_witgen_post_zeroize");
         circuit_hal
             .post_witness_zeroize(
                 hal,
@@ -140,6 +158,8 @@ where
                 &global,
             )
             .context("post-zeroize witness generation failure")?;
+        #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+        drop(post_zeroize_timer);
 
         Ok(Self {
             work_cycles,
