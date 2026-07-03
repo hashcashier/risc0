@@ -153,3 +153,34 @@ leadership, mirroring C++ `parStepExec`; generated inc calls methods only,
 so the struct internals are free to change), rv32im_witgen residual 1560 ms
 (materialize + Amdahl tail), keccak witgen/preflight (~3.4 s per proof,
 KeccakUnion phase).
+
+## M5d: parallel recursion witgen (per-worker MachineContext)
+
+The generated steps require `&mut MachineContext`, so the restructure gives
+every rayon worker its own COPY of a raw-ptr view (no aliased Rust
+references): driver-owned `MachineStorage` holds the cycles/wom_rows/
+wom_index Vecs; `MachineContext` becomes a Copy view over them (the
+generated inc calls methods only — 10 accessors — so struct internals were
+free to change). Exec phase = 1:1 port of C++ `doStepExec` (par over ALL
+cycles, each task runs its dependency group only if leader: `cycle == 0 ||
+is_par_safe`); verify phase = plain per-cycle par (C++ `doStepVerifyWom`);
+`prepare_wom_for_verify` keeps its serial prefix but the WOM sort went
+`par_sort` (stable, identical order). `KernelArgs` (already raw ptrs) became
+Copy with documented Send/Sync.
+
+| Gate | M5c | M5d | Movement |
+|---|---:|---:|---:|
+| Parity suite | 4/4 | 4/4 | ✓ |
+| BusyLoop | 2330 ms | **2236 ms** | −4.0% |
+| KeccakUnion(1) | 42180 ms | **40057 ms** | **−5.0%** (union chain = recursion proofs) |
+| **xgboost** | **19454 ms** | **17489 ms** | **−10.1%** |
+
+Span proof (xgboost): `recursion_witgen_generate` **3107 → 635 ms** (4.9×),
+`recursion_witgen_new` 4300 → 1920 ms. Honest note: `rv32im_witgen`
+stretched 1560 → 2037 ms — lookahead lifts now put recursion witgen on the
+worker pool concurrently with segment witgen; per-span contention stretch,
+net wall −10.1%. Native `cargo check -p risc0-circuit-recursion` (default
+features) fails PRE-EXISTING at HEAD (dead-code `GpuAuthoritative` under
+-Dwarnings), unchanged by this diff; zkp native suite 36/36. fmt reflow
+after gating produced a byte-identical binary (debuginfo=0), so the gated
+bytes are the landing bytes.

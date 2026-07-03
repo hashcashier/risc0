@@ -30,6 +30,7 @@ use std::{
 };
 
 use anyhow::{ensure, Result};
+use rayon::prelude::*;
 use risc0_circuit_recursion_sys::{RawPreflightCycle, RawPreflightTrace, StepMode};
 use risc0_core::field::{
     baby_bear::{BabyBearElem, BabyBearExtElem},
@@ -120,11 +121,20 @@ impl PartialOrd for WomArgumentRow {
     }
 }
 
+#[derive(Clone, Copy)]
 struct KernelArgs {
     ptrs: [*mut Fp; 5],
     lens: [usize; 5],
     marker: PhantomData<Fp>,
 }
+
+// SAFETY: KernelArgs is a bounds-checked raw view over live HAL buffer
+// slices. Parallel witgen copies it into each rayon worker; concurrent
+// writes land in per-cycle-disjoint registers (and `set` panics via ensure!
+// on inconsistent overwrite) — the same discipline as the C++ reference,
+// which shares the arg pointer array across poolstl::par threads.
+unsafe impl Send for KernelArgs {}
+unsafe impl Sync for KernelArgs {}
 
 #[derive(Clone, Debug)]
 pub(crate) struct WomGpuVerifyPlan {
@@ -183,43 +193,150 @@ impl KernelArgs {
     }
 }
 
-struct MachineContext<'a> {
-    wom: &'a [FpExt],
+/// Driver-owned mutable state for one witness generation. `MachineContext`
+/// views borrow from this.
+struct MachineStorage {
     cycles: Vec<RawPreflightCycle>,
-    iops: &'a [FpExt],
-    byte_reads: &'a BTreeMap<usize, Vec<u32>>,
     wom_rows: Vec<WomArgumentRow>,
     wom_index: Vec<u32>,
 }
 
-impl<'a> MachineContext<'a> {
-    fn new(preflight: &'a RawPreflightTrace, byte_reads: &'a BTreeMap<usize, Vec<u32>>) -> Self {
+impl MachineStorage {
+    fn new(preflight: &RawPreflightTrace) -> Self {
         let cycles = unsafe {
             slice::from_raw_parts(preflight.cycles, preflight.num_cycles as usize).to_vec()
         };
-        let wom = unsafe { slice::from_raw_parts(preflight.wom, preflight.num_woms as usize) };
-        let iops = unsafe { slice::from_raw_parts(preflight.iops, preflight.num_iops as usize) };
         let wom_rows = vec![WomArgumentRow::invalid(); cycles.len() * K_MAX_WOM_ROWS_PER_CYCLE];
         let wom_index = vec![0; cycles.len()];
         Self {
-            wom,
             cycles,
-            iops,
-            byte_reads,
             wom_rows,
             wom_index,
         }
     }
+}
+
+struct MachineContext<'a> {
+    wom: &'a [FpExt],
+    iops: &'a [FpExt],
+    byte_reads: &'a BTreeMap<usize, Vec<u32>>,
+    // Raw views into the driver-owned MachineStorage. The generated step
+    // functions require `&mut MachineContext`, so parallel drivers hand each
+    // rayon worker its own COPY of this view — every worker then holds a
+    // unique `&mut` (no aliased Rust references). Concurrent access through
+    // the copies touches per-cycle-disjoint slots only (wom_index[cycle],
+    // wom_rows[cycle-slot], cycles[cycle].iop_idx), the same discipline as
+    // the C++ reference, which captures `this` across poolstl::par threads.
+    cycles: *mut RawPreflightCycle,
+    num_cycles: usize,
+    wom_rows: *mut WomArgumentRow,
+    wom_rows_len: usize,
+    wom_index: *mut u32,
+    _marker: PhantomData<&'a mut MachineStorage>,
+}
+
+impl Clone for MachineContext<'_> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl Copy for MachineContext<'_> {}
+
+// SAFETY: see the field comment — per-cycle-disjoint slot discipline,
+// mirroring the C++ reference's cross-thread capture.
+unsafe impl Send for MachineContext<'_> {}
+unsafe impl Sync for MachineContext<'_> {}
+
+impl<'a> MachineContext<'a> {
+    fn new(
+        preflight: &'a RawPreflightTrace,
+        byte_reads: &'a BTreeMap<usize, Vec<u32>>,
+        storage: &'a mut MachineStorage,
+    ) -> Self {
+        let wom = unsafe { slice::from_raw_parts(preflight.wom, preflight.num_woms as usize) };
+        let iops = unsafe { slice::from_raw_parts(preflight.iops, preflight.num_iops as usize) };
+        Self {
+            wom,
+            iops,
+            byte_reads,
+            cycles: storage.cycles.as_mut_ptr(),
+            num_cycles: storage.cycles.len(),
+            wom_rows: storage.wom_rows.as_mut_ptr(),
+            wom_rows_len: storage.wom_rows.len(),
+            wom_index: storage.wom_index.as_mut_ptr(),
+            _marker: PhantomData,
+        }
+    }
+
+    fn cycle(&self, cycle: usize) -> &RawPreflightCycle {
+        assert!(cycle < self.num_cycles, "cycle out of bounds");
+        unsafe { &*self.cycles.add(cycle) }
+    }
+
+    fn cycle_mut(&mut self, cycle: usize) -> &mut RawPreflightCycle {
+        assert!(cycle < self.num_cycles, "cycle out of bounds");
+        unsafe { &mut *self.cycles.add(cycle) }
+    }
+
+    fn wom_index_at(&self, cycle: usize) -> u32 {
+        assert!(cycle < self.num_cycles, "wom_index out of bounds");
+        unsafe { *self.wom_index.add(cycle) }
+    }
+
+    fn wom_index_set(&mut self, cycle: usize, value: u32) {
+        assert!(cycle < self.num_cycles, "wom_index out of bounds");
+        unsafe { *self.wom_index.add(cycle) = value };
+    }
+
+    fn wom_index_slice_mut(&mut self) -> &mut [u32] {
+        unsafe { slice::from_raw_parts_mut(self.wom_index, self.num_cycles) }
+    }
+
+    fn wom_row(&self, idx: usize) -> WomArgumentRow {
+        assert!(idx < self.wom_rows_len, "wom_rows out of bounds");
+        unsafe { *self.wom_rows.add(idx) }
+    }
+
+    fn wom_row_set(&mut self, idx: usize, row: WomArgumentRow) {
+        assert!(idx < self.wom_rows_len, "wom_rows out of bounds");
+        unsafe { *self.wom_rows.add(idx) = row };
+    }
+
+    fn wom_rows_slice_mut(&mut self) -> &mut [WomArgumentRow] {
+        unsafe { slice::from_raw_parts_mut(self.wom_rows, self.wom_rows_len) }
+    }
+
+    fn wom_index_slice(&self) -> &[u32] {
+        unsafe { slice::from_raw_parts(self.wom_index, self.num_cycles) }
+    }
+
+    fn wom_rows_slice(&self) -> &[WomArgumentRow] {
+        unsafe { slice::from_raw_parts(self.wom_rows, self.wom_rows_len) }
+    }
 
     fn do_step_exec(&mut self, mode: StepMode, steps: usize, args: &mut KernelArgs) -> Result<()> {
         match mode {
-            StepMode::Parallel | StepMode::SeqForward => {
-                for cycle in 0..self.cycles.len() {
+            StepMode::Parallel => {
+                // 1:1 port of the C++ reference (recursion-sys ffi.cpp
+                // MachineContext::doStepExec): poolstl::par over ALL cycles;
+                // each task runs its dependency group only if it is the
+                // group leader (cycle == 0 || is_par_safe).
+                let this = *self;
+                let args_snapshot = *args;
+                (0..self.num_cycles).into_par_iter().try_for_each(|cycle| {
+                    let mut ctx = this;
+                    let mut args = args_snapshot;
+                    ctx.par_step_exec(steps, cycle, &mut args)
+                })?;
+            }
+            StepMode::SeqForward => {
+                for cycle in 0..self.num_cycles {
                     step_exec(self, steps, cycle, args)?;
                 }
             }
             StepMode::SeqReverse => {
-                for cycle in (0..self.cycles.len()).rev() {
+                for cycle in (0..self.num_cycles).rev() {
                     self.par_step_exec(steps, cycle, args)?;
                 }
             }
@@ -233,10 +350,10 @@ impl<'a> MachineContext<'a> {
         mut cycle: usize,
         args: &mut KernelArgs,
     ) -> Result<()> {
-        if cycle == 0 || self.cycles[cycle].is_par_safe != 0 {
+        if cycle == 0 || self.cycle(cycle).is_par_safe != 0 {
             step_exec(self, steps, cycle, args)?;
             cycle += 1;
-            while cycle < self.cycles.len() && self.cycles[cycle].is_par_safe == 0 {
+            while cycle < self.num_cycles && self.cycle(cycle).is_par_safe == 0 {
                 step_exec(self, steps, cycle, args)?;
                 cycle += 1;
             }
@@ -251,11 +368,11 @@ impl<'a> MachineContext<'a> {
 
     fn gpu_verify_plan(&self, total_cycles: usize) -> Result<WomGpuVerifyPlan> {
         let mut valid_rows = 0u32;
-        let mut cycle_prefixes = Vec::with_capacity(self.wom_index.len());
+        let mut cycle_prefixes = Vec::with_capacity(self.num_cycles);
         let mut bucket_counts = Vec::<u32>::new();
         bucket_counts.push(0);
 
-        for (cycle, &count) in self.wom_index.iter().enumerate() {
+        for (cycle, &count) in self.wom_index_slice().iter().enumerate() {
             cycle_prefixes.push(valid_rows);
             valid_rows = valid_rows
                 .checked_add(count)
@@ -269,7 +386,7 @@ impl<'a> MachineContext<'a> {
             let base = cycle
                 .checked_mul(K_MAX_WOM_ROWS_PER_CYCLE)
                 .ok_or_else(|| anyhow::anyhow!("recursion WOM row base overflow"))?;
-            for row in &self.wom_rows[base..base + count] {
+            for row in &self.wom_rows_slice()[base..base + count] {
                 ensure!(
                     row.addr != K_INVALID_PATTERN,
                     "valid recursion WOM row left invalid"
@@ -303,7 +420,7 @@ impl<'a> MachineContext<'a> {
         );
 
         Ok(WomGpuVerifyPlan {
-            work_cycles: self.cycles.len() as u32,
+            work_cycles: self.num_cycles as u32,
             total_cycles: total_cycles as u32,
             valid_rows,
             cycle_prefixes,
@@ -312,16 +429,22 @@ impl<'a> MachineContext<'a> {
     }
 
     fn prepare_wom_for_verify(&mut self, steps: usize, args: &mut KernelArgs) -> Result<u32> {
-        let valid_rows = self
-            .wom_index
-            .iter()
-            .try_fold(0usize, |acc, &count| acc.checked_add(count as usize))
-            .expect("recursion WOM row count overflow");
-        self.wom_rows.sort();
-        record_wom_sort_profile(&self.wom_rows, valid_rows);
+        let valid_rows = {
+            let wom_index = self.wom_index_slice_mut();
+            wom_index
+                .iter()
+                .try_fold(0usize, |acc, &count| acc.checked_add(count as usize))
+                .expect("recursion WOM row count overflow")
+        };
+        // Stable parallel sort — identical order to the serial stable sort.
+        self.wom_rows_slice_mut().par_sort();
+        record_wom_sort_profile(
+            unsafe { slice::from_raw_parts(self.wom_rows, self.wom_rows_len) },
+            valid_rows,
+        );
 
         let mut running = 0u32;
-        for idx in &mut self.wom_index {
+        for idx in self.wom_index_slice_mut() {
             let cur = *idx;
             *idx = running;
             running += cur;
@@ -338,13 +461,26 @@ impl<'a> MachineContext<'a> {
         args: &mut KernelArgs,
     ) -> Result<()> {
         match mode {
-            StepMode::Parallel | StepMode::SeqForward => {
-                for cycle in 0..self.cycles.len() {
+            StepMode::Parallel => {
+                // C++ reference runs step_verify_mem per-cycle under
+                // poolstl::par with no leadership check — verify rows are
+                // cycle-independent (the WGSL verify_mem shader relies on
+                // the same fact).
+                let this = *self;
+                let args_snapshot = *args;
+                (0..self.num_cycles).into_par_iter().try_for_each(|cycle| {
+                    let mut ctx = this;
+                    let mut args = args_snapshot;
+                    step_verify_mem(&mut ctx, steps, cycle, &mut args).map(|_| ())
+                })?;
+            }
+            StepMode::SeqForward => {
+                for cycle in 0..self.num_cycles {
                     step_verify_mem(self, steps, cycle, args)?;
                 }
             }
             StepMode::SeqReverse => {
-                for cycle in (0..self.cycles.len()).rev() {
+                for cycle in (0..self.num_cycles).rev() {
                     step_verify_mem(self, steps, cycle, args)?;
                 }
             }
@@ -353,10 +489,10 @@ impl<'a> MachineContext<'a> {
     }
 
     fn inject_wom_backs(&mut self, steps: usize, args: &mut KernelArgs) -> Result<()> {
-        for cycle in 1..self.cycles.len() {
-            let idx = self.wom_index[cycle] as usize;
+        for cycle in 1..self.num_cycles {
+            let idx = self.wom_index_at(cycle) as usize;
             if idx != 0 {
-                let prev = self.wom_rows[idx - 1];
+                let prev = self.wom_row(idx - 1);
                 args.set(2, cycle - 1, Fp::new(prev.addr))?;
                 for (i, elem) in prev.value.elems().iter().copied().enumerate() {
                     args.set(2, (i + 1) * steps + cycle - 1, elem)?;
@@ -375,12 +511,12 @@ impl<'a> MachineContext<'a> {
     }
 
     fn read_iop_body(&mut self, cycle: usize, _args: [Fp; 3]) -> Result<[Fp; 4]> {
-        let iop_idx = self.cycles[cycle].iop_idx as usize;
+        let iop_idx = self.cycle(cycle).iop_idx as usize;
         ensure!(
             iop_idx < self.iops.len(),
             "recursion IOP read out of bounds"
         );
-        self.cycles[cycle].iop_idx += 1;
+        self.cycle_mut(cycle).iop_idx += 1;
         let elems = self.iops[iop_idx].elems();
         Ok([elems[0], elems[1], elems[2], elems[3]])
     }
@@ -397,24 +533,27 @@ impl<'a> MachineContext<'a> {
     }
 
     fn plonk_write_wom(&mut self, cycle: usize, args: [Fp; 5]) -> Result<()> {
-        let idx = self.wom_index[cycle] as usize;
+        let idx = self.wom_index_at(cycle) as usize;
         ensure!(
             idx < K_MAX_WOM_ROWS_PER_CYCLE,
             "too many WOM rows per cycle"
         );
-        self.wom_index[cycle] += 1;
-        self.wom_rows[cycle * K_MAX_WOM_ROWS_PER_CYCLE + idx] = WomArgumentRow {
-            addr: args[0].as_u32(),
-            value: FpExt::new(args[1], args[2], args[3], args[4]),
-        };
+        self.wom_index_set(cycle, idx as u32 + 1);
+        self.wom_row_set(
+            cycle * K_MAX_WOM_ROWS_PER_CYCLE + idx,
+            WomArgumentRow {
+                addr: args[0].as_u32(),
+                value: FpExt::new(args[1], args[2], args[3], args[4]),
+            },
+        );
         Ok(())
     }
 
     fn plonk_read_wom(&mut self, cycle: usize) -> Result<[Fp; 5]> {
-        let idx = self.wom_index[cycle] as usize;
-        ensure!(idx < self.wom_rows.len(), "WOM plonk read out of bounds");
-        self.wom_index[cycle] += 1;
-        let row = self.wom_rows[idx];
+        let idx = self.wom_index_at(cycle) as usize;
+        ensure!(idx < self.wom_rows_len, "WOM plonk read out of bounds");
+        self.wom_index_set(cycle, idx as u32 + 1);
+        let row = self.wom_row(idx);
         let elems = row.value.elems();
         Ok([Fp::new(row.addr), elems[0], elems[1], elems[2], elems[3]])
     }
@@ -570,7 +709,8 @@ pub(crate) fn generate_witness(
     ctrl.view(|ctrl| {
         global.view_mut(|global| {
             data.view_mut(|data| {
-                let mut ctx = MachineContext::new(preflight, byte_reads);
+                let mut storage = MachineStorage::new(preflight);
+                let mut ctx = MachineContext::new(preflight, byte_reads, &mut storage);
                 let mut args = KernelArgs::exec(ctrl, global, data);
                 result = ctx
                     .do_step_exec(mode, total_cycles, &mut args)
@@ -595,7 +735,8 @@ pub(crate) fn generate_witness_exec_plan(
     ctrl.view(|ctrl| {
         global.view_mut(|global| {
             data.view_mut(|data| {
-                let mut ctx = MachineContext::new(preflight, byte_reads);
+                let mut storage = MachineStorage::new(preflight);
+                let mut ctx = MachineContext::new(preflight, byte_reads, &mut storage);
                 let mut args = KernelArgs::exec(ctrl, global, data);
                 result = Some(
                     ctx.do_step_exec(mode, total_cycles, &mut args)
