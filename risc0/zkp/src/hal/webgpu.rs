@@ -285,6 +285,10 @@ async fn ensure_wasm_thread_pool() {
         if hardware_concurrency == 0 {
             8
         } else {
+            // Probed 2026-07-03 on 32-thread hardware: 16 workers regressed
+            // every gate ~20-25% (xgboost 17052→21159 ms) — oversubscribed
+            // rayon idle-spinning on shared memory taxes the busy workers.
+            // 8 is the measured optimum tier.
             hardware_concurrency.min(8)
         }
     } else {

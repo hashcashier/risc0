@@ -51,7 +51,10 @@ pub struct WebGpuProver {
 /// flight (one WebGPU device each). Two was the wasm32 memory ceiling at
 /// po2=18 before M4a (width 3 hit the allocator-OOM `unreachable`
 /// signature mid-phase); M4a lazy shadows cut the per-proof materialized
-/// footprint ~600→172 MB, so M4c retries width 3.
+/// footprint ~600→172 MB, so M4c retries width 3. Width 4 re-probed under
+/// the M5 threads regime + 4 GiB atomics ceiling (M6b, 2026-07-03): no OOM
+/// but dead flat on xgboost (17050 vs 17052 ms) and slightly worse on
+/// KeccakUnion — the phase is no longer limited by proof-level concurrency.
 pub(crate) const WEBGPU_SUCCINCT_PIPELINE_WIDTH: usize = 3;
 
 impl WebGpuProver {

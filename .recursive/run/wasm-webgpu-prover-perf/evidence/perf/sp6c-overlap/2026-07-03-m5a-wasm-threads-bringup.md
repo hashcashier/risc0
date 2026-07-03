@@ -202,3 +202,36 @@ order type stays off it.
 | **Heavy 25-keccak fixture** | 119.5 s (M4e) | **107.7 s** | **−9.9%** |
 
 Span proof: `keccak_witgen` **2436 → 369 ms** (6.6×). Receipts verified.
+
+## M6 probes: the current config is locally optimal under threads
+
+**M6a — worker count.** 16 workers regressed EVERY gate ~20-25% (xgboost
+17052→21159 ms, KeccakUnion 38945→49034 ms, BusyLoop +18%): oversubscribed
+rayon idle-spinning on shared memory taxes the busy workers. 31 not worth
+probing after that. `min(hardware_concurrency, 8)` stands (documented at the
+default site).
+
+**M6b — succinct width 4.** No OOM under the 4 GiB atomics ceiling (the M3-era
+2 GiB wall is genuinely gone) but dead flat on xgboost (17050 vs 17052 ms)
+and slightly worse on KeccakUnion (39623 vs 38945). Width 3 stands; the
+succinct phase is no longer limited by proof-level concurrency.
+
+**M6c — SP7 witgen/accum GPU acceleration re-check.** Full-disable probe
+blocked by design: the e2e tests are acceptance tests of the acceleration
+config (assert flag masks + dispatch row counters). Timeline analysis
+answered the underlying question instead: the 2311 ms
+`iter6d_d_witgen_prewarm_async` span starts 1.66 s BEFORE `prove_session`
+(during prover construction) and overlaps segment 0 for only ~650 ms —
+segment 0 stretches ~500 ms vs later segments, so the real critical-path
+cost is ~300-500 ms, not 2.3 s (absorbed-span illusion, M1 label-lie
+family). The acceleration actively dispatches in production; expected
+|delta| from removal is sub-500 ms either way — deprioritized versus
+segment-level pipelining.
+
+**Next ranked avenue (M6d candidate): segment-phase pipelining.** With
+gpu_active at 66% of the xgboost wall, the ~5.8 s idle is mostly per-segment
+CPU-only windows (witgen ~110-190 ms + accum stepper + preflight + executor
+slice, ×11) during which the GPU drains. Segments were kept strictly serial
+by the wasm32 ~2 GiB ceiling ("segment∥anything impossible at po2_18") —
+the 4 GiB atomics ceiling reopens overlapping segment N+1's
+preflight/witgen with segment N's GPU tail, M4e-style.

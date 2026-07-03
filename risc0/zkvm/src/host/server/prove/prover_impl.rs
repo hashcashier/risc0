@@ -690,15 +690,12 @@ impl ProverImpl {
             while !free_hals.is_empty() {
                 // Prefer ready joins: they release receipts and advance
                 // the tree toward the root; lifts are the slack work.
-                let ready_join = internal_nodes
-                    .iter()
-                    .copied()
-                    .find(|&(lo, hi)| {
-                        let mid = lo + (hi - lo).div_ceil(2);
-                        !spawned.contains(&(lo, hi))
-                            && done.contains_key(&(lo, mid))
-                            && done.contains_key(&(mid, hi))
-                    });
+                let ready_join = internal_nodes.iter().copied().find(|&(lo, hi)| {
+                    let mid = lo + (hi - lo).div_ceil(2);
+                    !spawned.contains(&(lo, hi))
+                        && done.contains_key(&(lo, mid))
+                        && done.contains_key(&(mid, hi))
+                });
                 if let Some((lo, hi)) = ready_join {
                     spawned.insert((lo, hi));
                     let mid = lo + (hi - lo).div_ceil(2);
