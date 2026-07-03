@@ -274,7 +274,9 @@ impl WebGpuStageTimer {
         stage_sink: Option<Rc<RefCell<Vec<WebGpuStageDiagnostics>>>>,
     ) -> Self {
         let start_ms = js_sys::Date::now();
-        log_webgpu_stage(&format!("browser-prove:stage start t={start_ms:.1} {label}"));
+        log_webgpu_stage(&format!(
+            "browser-prove:stage start t={start_ms:.1} {label}"
+        ));
         Self {
             label,
             start_ms,
@@ -2093,6 +2095,8 @@ fn zerofier_inv(idx: u32) -> u32 {
 
 {EXT_BANK_DECLS}
 
+{MIX_BANK_DECLS}
+
 @compute @workgroup_size({WORKGROUP_SIZE})
 fn main(
     @builtin(global_invocation_id) gid: vec3<u32>,
@@ -2173,29 +2177,32 @@ fn main(
             }
             case 7u: {
                 let out = instr_word(op_idx, 1u);
-                mix_tot[lane][out] = vec4<u32>(0u, 0u, 0u, 0u);
-                mix_mul[lane][out] = load_mix_pow(instr_word(op_idx, 2u));
+                mix_tot_store(lane, out, vec4<u32>(0u, 0u, 0u, 0u));
+                mix_mul_store(lane, out, load_mix_pow(instr_word(op_idx, 2u)));
             }
             case 8u: {
                 let out = instr_word(op_idx, 1u);
                 let chain = instr_word(op_idx, 2u);
                 let inner = instr_word(op_idx, 3u);
-                mix_tot[lane][out] = ext_add(
-                    mix_tot[lane][chain],
-                    ext_scale(mix_mul[lane][chain], fp[lane][inner]),
-                );
-                mix_mul[lane][out] = load_mix_pow(instr_word(op_idx, 4u));
+                mix_tot_store(lane, out, ext_add(
+                    mix_tot_load(lane, chain),
+                    ext_scale(mix_mul_load(lane, chain), fp[lane][inner]),
+                ));
+                mix_mul_store(lane, out, load_mix_pow(instr_word(op_idx, 4u)));
             }
             case 9u: {
                 let out = instr_word(op_idx, 1u);
                 let chain = instr_word(op_idx, 2u);
                 let cond = instr_word(op_idx, 3u);
                 let inner = instr_word(op_idx, 4u);
-                mix_tot[lane][out] = ext_add(
-                    mix_tot[lane][chain],
-                    ext_scale(ext_mul(mix_tot[lane][inner], mix_mul[lane][chain]), fp[lane][cond]),
-                );
-                mix_mul[lane][out] = load_mix_pow(instr_word(op_idx, 5u));
+                mix_tot_store(lane, out, ext_add(
+                    mix_tot_load(lane, chain),
+                    ext_scale(
+                        ext_mul(mix_tot_load(lane, inner), mix_mul_load(lane, chain)),
+                        fp[lane][cond],
+                    ),
+                ));
+                mix_mul_store(lane, out, load_mix_pow(instr_word(op_idx, 5u)));
             }
             case 1u: {
                 ext_store(lane, instr_word(op_idx, 1u), vec4<u32>(
@@ -2251,31 +2258,31 @@ fn main(
                 let out = instr_word(op_idx, 1u);
                 let chain = instr_word(op_idx, 2u);
                 let inner = instr_word(op_idx, 3u);
-                mix_tot[lane][out] = ext_add(
-                    mix_tot[lane][chain],
-                    ext_mul(mix_mul[lane][chain], ext_load(lane, inner)),
-                );
-                mix_mul[lane][out] = load_mix_pow(instr_word(op_idx, 4u));
+                mix_tot_store(lane, out, ext_add(
+                    mix_tot_load(lane, chain),
+                    ext_mul(mix_mul_load(lane, chain), ext_load(lane, inner)),
+                ));
+                mix_mul_store(lane, out, load_mix_pow(instr_word(op_idx, 4u)));
             }
             case 18u: {
                 let out = instr_word(op_idx, 1u);
                 let chain = instr_word(op_idx, 2u);
                 let cond = instr_word(op_idx, 3u);
                 let inner = instr_word(op_idx, 4u);
-                mix_tot[lane][out] = ext_add(
-                    mix_tot[lane][chain],
+                mix_tot_store(lane, out, ext_add(
+                    mix_tot_load(lane, chain),
                     ext_mul(
-                        ext_mul(mix_tot[lane][inner], mix_mul[lane][chain]),
+                        ext_mul(mix_tot_load(lane, inner), mix_mul_load(lane, chain)),
                         ext_load(lane, cond),
                     ),
-                );
-                mix_mul[lane][out] = load_mix_pow(instr_word(op_idx, 5u));
+                ));
+                mix_mul_store(lane, out, load_mix_pow(instr_word(op_idx, 5u)));
             }
             default: {}
         }
     }
 
-    let result = ext_scale(mix_tot[lane][params.ret_mix_slot], zerofier_inv(cycle));
+    let result = ext_scale(mix_tot_load(lane, params.ret_mix_slot), zerofier_inv(cycle));
     check.data[params.check_base + 0u * params.domain + cycle] = result.x;
     check.data[params.check_base + 1u * params.domain + cycle] = result.y;
     check.data[params.check_base + 2u * params.domain + cycle] = result.z;
@@ -2294,18 +2301,15 @@ fn build_eval_check_base_interpreter_wgsl(
     let ext_slots = ext_slots.max(1);
     let mix_slots = mix_slots.max(1);
     let ext_words = ext_slots * 4;
+    let mix_words = mix_slots * 4;
     let scratch_lanes = if private_parallel { 1 } else { workgroup_size };
     let scratch_decls = if private_parallel {
         String::new()
     } else {
-        format!(
-            "var<workgroup> fp: array<array<u32, {fp_slots}>, {scratch_lanes}>;\nvar<workgroup> mix_tot: array<array<vec4<u32>, {mix_slots}>, {scratch_lanes}>;\nvar<workgroup> mix_mul: array<array<vec4<u32>, {mix_slots}>, {scratch_lanes}>;"
-        )
+        format!("var<workgroup> fp: array<array<u32, {fp_slots}>, {scratch_lanes}>;")
     };
     let local_decls = if private_parallel {
-        format!(
-            "    var fp: array<u32, {fp_slots}>;\n    var mix_tot: array<vec4<u32>, {mix_slots}>;\n    var mix_mul: array<vec4<u32>, {mix_slots}>;"
-        )
+        format!("    var fp: array<u32, {fp_slots}>;")
     } else {
         String::new()
     };
@@ -2348,6 +2352,68 @@ fn build_eval_check_base_interpreter_wgsl(
              }}"
         )
     };
+    // M3b: the mix accumulators are stored as scalar u32 words (mix value
+    // k at words 4k..4k+3), exactly like the M2a ext bank. vec4-typed
+    // dynamically-indexed local arrays are the pathological case under
+    // Chrome/Dawn (~17x a scalar access once past the register-select
+    // size threshold); rv32im runs with mix_slots=29, right at that
+    // boundary. Helpers live at module scope so both scratch modes share
+    // the case bodies.
+    let mix_bank_decls = if private_parallel {
+        format!(
+            "var<private> mixw_tot: array<u32, {mix_words}>;\n\
+             var<private> mixw_mul: array<u32, {mix_words}>;\n\
+             fn mix_tot_load(lane: u32, idx: u32) -> vec4<u32> {{\n\
+                 let base = idx * 4u;\n\
+                 return vec4<u32>(mixw_tot[base], mixw_tot[base + 1u], mixw_tot[base + 2u], mixw_tot[base + 3u]);\n\
+             }}\n\
+             fn mix_tot_store(lane: u32, idx: u32, value: vec4<u32>) {{\n\
+                 let base = idx * 4u;\n\
+                 mixw_tot[base] = value.x;\n\
+                 mixw_tot[base + 1u] = value.y;\n\
+                 mixw_tot[base + 2u] = value.z;\n\
+                 mixw_tot[base + 3u] = value.w;\n\
+             }}\n\
+             fn mix_mul_load(lane: u32, idx: u32) -> vec4<u32> {{\n\
+                 let base = idx * 4u;\n\
+                 return vec4<u32>(mixw_mul[base], mixw_mul[base + 1u], mixw_mul[base + 2u], mixw_mul[base + 3u]);\n\
+             }}\n\
+             fn mix_mul_store(lane: u32, idx: u32, value: vec4<u32>) {{\n\
+                 let base = idx * 4u;\n\
+                 mixw_mul[base] = value.x;\n\
+                 mixw_mul[base + 1u] = value.y;\n\
+                 mixw_mul[base + 2u] = value.z;\n\
+                 mixw_mul[base + 3u] = value.w;\n\
+             }}"
+        )
+    } else {
+        format!(
+            "var<workgroup> mixw_tot: array<array<u32, {mix_words}>, {scratch_lanes}>;\n\
+             var<workgroup> mixw_mul: array<array<u32, {mix_words}>, {scratch_lanes}>;\n\
+             fn mix_tot_load(lane: u32, idx: u32) -> vec4<u32> {{\n\
+                 let base = idx * 4u;\n\
+                 return vec4<u32>(mixw_tot[lane][base], mixw_tot[lane][base + 1u], mixw_tot[lane][base + 2u], mixw_tot[lane][base + 3u]);\n\
+             }}\n\
+             fn mix_tot_store(lane: u32, idx: u32, value: vec4<u32>) {{\n\
+                 let base = idx * 4u;\n\
+                 mixw_tot[lane][base] = value.x;\n\
+                 mixw_tot[lane][base + 1u] = value.y;\n\
+                 mixw_tot[lane][base + 2u] = value.z;\n\
+                 mixw_tot[lane][base + 3u] = value.w;\n\
+             }}\n\
+             fn mix_mul_load(lane: u32, idx: u32) -> vec4<u32> {{\n\
+                 let base = idx * 4u;\n\
+                 return vec4<u32>(mixw_mul[lane][base], mixw_mul[lane][base + 1u], mixw_mul[lane][base + 2u], mixw_mul[lane][base + 3u]);\n\
+             }}\n\
+             fn mix_mul_store(lane: u32, idx: u32, value: vec4<u32>) {{\n\
+                 let base = idx * 4u;\n\
+                 mixw_mul[lane][base] = value.x;\n\
+                 mixw_mul[lane][base + 1u] = value.y;\n\
+                 mixw_mul[lane][base + 2u] = value.z;\n\
+                 mixw_mul[lane][base + 3u] = value.w;\n\
+             }}"
+        )
+    };
     let lane_index = if private_parallel { "0u" } else { "lid.x" };
     let linear_dispatch_stride = workgroup_size * WEBGPU_MAX_WORKGROUPS_PER_DIMENSION;
 
@@ -2357,6 +2423,7 @@ fn build_eval_check_base_interpreter_wgsl(
         .replace("{BASE_SCRATCH_DECLS}", &scratch_decls)
         .replace("{BASE_LOCAL_DECLS}", &local_decls)
         .replace("{EXT_BANK_DECLS}", &ext_bank_decls)
+        .replace("{MIX_BANK_DECLS}", &mix_bank_decls)
         .replace("{LANE_INDEX}", lane_index)
         .replace("{WORKGROUP_SIZE}", &workgroup_size.to_string())
         .replace(
@@ -2368,8 +2435,6 @@ fn build_eval_check_base_interpreter_wgsl(
         // array dimension is pure overhead — flatten the remaining
         // scratch accesses to match the all-ext interpreter's shape.
         wgsl.replace("fp[lane]", "fp")
-            .replace("mix_tot[lane]", "mix_tot")
-            .replace("mix_mul[lane]", "mix_mul")
     } else {
         wgsl
     }
