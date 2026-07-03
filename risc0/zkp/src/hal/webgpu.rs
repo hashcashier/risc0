@@ -18,8 +18,10 @@ use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, HashSet},
     fmt::{Debug, Write as _},
+    future::Future,
     marker::PhantomData,
     mem,
+    pin::Pin,
     rc::Rc,
 };
 
@@ -265,42 +267,40 @@ pub trait WebGpuCircuitEvalCheck {
 }
 
 impl WebGpuStageTimer {
-    pub fn new(label: impl Into<String>) -> Self {
-        let label = label.into();
-        log_webgpu_stage(&format!("browser-prove:stage start {label}"));
+    fn start(
+        label: String,
+        gpu_active: bool,
+        hal_active_counter: Option<Rc<Cell<f64>>>,
+        stage_sink: Option<Rc<RefCell<Vec<WebGpuStageDiagnostics>>>>,
+    ) -> Self {
+        let start_ms = js_sys::Date::now();
+        log_webgpu_stage(&format!("browser-prove:stage start t={start_ms:.1} {label}"));
         Self {
             label,
-            start_ms: js_sys::Date::now(),
-            gpu_active: false,
-            hal_active_counter: None,
-            stage_sink: None,
+            start_ms,
+            gpu_active,
+            hal_active_counter,
+            stage_sink,
         }
     }
 
+    pub fn new(label: impl Into<String>) -> Self {
+        Self::start(label.into(), false, None, None)
+    }
+
     pub fn new_active(label: impl Into<String>) -> Self {
-        let label = label.into();
-        log_webgpu_stage(&format!("browser-prove:stage start {label}"));
-        Self {
-            label,
-            start_ms: js_sys::Date::now(),
-            gpu_active: true,
-            hal_active_counter: None,
-            stage_sink: None,
-        }
+        Self::start(label.into(), true, None, None)
     }
 
     /// HAL-scoped timer that records detailed stage diagnostics without adding
     /// to the HAL's aggregate `gpu_active_ms`.
     pub fn new_for(label: impl Into<String>, hal: &WebGpuHal) -> Self {
-        let label = label.into();
-        log_webgpu_stage(&format!("browser-prove:stage start {label}"));
-        Self {
-            label,
-            start_ms: js_sys::Date::now(),
-            gpu_active: false,
-            hal_active_counter: None,
-            stage_sink: Some(hal.stage_diagnostics_handle()),
-        }
+        Self::start(
+            label.into(),
+            false,
+            None,
+            Some(hal.stage_diagnostics_handle()),
+        )
     }
 
     /// SP6d iter 4: HAL-scoped active timer. The HAL's counter is
@@ -308,15 +308,12 @@ impl WebGpuStageTimer {
     /// when running under a multi-HAL pool so each HAL's gpu_idle_ratio
     /// is accurate.
     pub fn new_active_for(label: impl Into<String>, hal: &WebGpuHal) -> Self {
-        let label = label.into();
-        log_webgpu_stage(&format!("browser-prove:stage start {label}"));
-        Self {
-            label,
-            start_ms: js_sys::Date::now(),
-            gpu_active: true,
-            hal_active_counter: Some(hal.gpu_active_ms_handle()),
-            stage_sink: Some(hal.stage_diagnostics_handle()),
-        }
+        Self::start(
+            label.into(),
+            true,
+            Some(hal.gpu_active_ms_handle()),
+            Some(hal.stage_diagnostics_handle()),
+        )
     }
 
     pub fn snapshot_gpu_active_ms() -> f64 {
@@ -330,7 +327,8 @@ impl WebGpuStageTimer {
 
 impl Drop for WebGpuStageTimer {
     fn drop(&mut self) {
-        let elapsed_ms = js_sys::Date::now() - self.start_ms;
+        let end_ms = js_sys::Date::now();
+        let elapsed_ms = end_ms - self.start_ms;
         if let Some(stage_sink) = &self.stage_sink {
             let elapsed_us = if elapsed_ms.is_finite() && elapsed_ms > 0.0 {
                 (elapsed_ms * 1000.0).round() as u64
@@ -350,12 +348,12 @@ impl Drop for WebGpuStageTimer {
                 WEBGPU_GPU_ACTIVE_MS.with(|c| c.set(c.get() + elapsed_ms));
             }
             log_webgpu_stage(&format!(
-                "browser-prove:stage done {} elapsed_ms={elapsed_ms:.3} gpu_active=true",
+                "browser-prove:stage done t={end_ms:.1} {} elapsed_ms={elapsed_ms:.3} gpu_active=true",
                 self.label
             ));
         } else {
             log_webgpu_stage(&format!(
-                "browser-prove:stage done {} elapsed_ms={elapsed_ms:.3}",
+                "browser-prove:stage done t={end_ms:.1} {} elapsed_ms={elapsed_ms:.3}",
                 self.label
             ));
         }
@@ -8028,6 +8026,72 @@ pub struct WebGpuAuthoritativeScope<'a> {
 impl Drop for WebGpuAuthoritativeScope<'_> {
     fn drop(&mut self) {
         self.hal.set_gpu_authoritative(self.previous);
+    }
+}
+
+/// Virtualizes the HAL's GPU-authoritative flag for one proof future so
+/// two proofs can interleave on a single-threaded executor.
+///
+/// [`WebGpuAuthoritativeScope`] restores the flag with stack discipline,
+/// which breaks when two futures' scopes overlap across `await` points
+/// (A opens, B opens capturing A's value, A closes, and B now runs under
+/// the wrong mode — silently flipping GPU dispatches to CPU fallbacks).
+/// This wrapper gives the inner future a private copy of the flag: each
+/// `poll` installs the future's copy, and on exit captures whatever the
+/// future's own scopes changed it to before restoring the ambient value.
+/// Scope guards created and dropped inside the future therefore observe
+/// exactly the values they would see when run serially.
+pub fn with_authoritative_context<F: Future>(
+    hal: Rc<WebGpuHal>,
+    inner: F,
+) -> impl Future<Output = F::Output> {
+    struct Ctx<F> {
+        hal: Rc<WebGpuHal>,
+        value: bool,
+        inner: Option<Pin<Box<F>>>,
+    }
+
+    impl<F: Future> Future for Ctx<F> {
+        type Output = F::Output;
+
+        fn poll(
+            self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<F::Output> {
+            let this = self.get_mut();
+            let ambient = this.hal.gpu_authoritative();
+            this.hal.set_gpu_authoritative(this.value);
+            let result = this
+                .inner
+                .as_mut()
+                .expect("authoritative-context future polled after drop")
+                .as_mut()
+                .poll(cx);
+            this.value = this.hal.gpu_authoritative();
+            this.hal.set_gpu_authoritative(ambient);
+            result
+        }
+    }
+
+    impl<F> Drop for Ctx<F> {
+        fn drop(&mut self) {
+            // Cancellation drops the inner future's scope guards; run them
+            // under this future's flag copy so they cannot poison the
+            // ambient value.
+            if let Some(inner) = self.inner.take() {
+                let ambient = self.hal.gpu_authoritative();
+                self.hal.set_gpu_authoritative(self.value);
+                drop(inner);
+                self.hal.set_gpu_authoritative(ambient);
+            }
+        }
+    }
+
+    let value = hal.gpu_authoritative();
+    Ctx {
+        hal,
+        value,
+        inner: Some(Box::pin(inner)),
     }
 }
 

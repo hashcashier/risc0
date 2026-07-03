@@ -1657,23 +1657,34 @@ impl RecursionProver for WebGpuRecursionProver {
         Box::pin(async move {
             risc0_core::scope!("prove");
 
-            let mut preflight = Preflight::new(input);
-            for (cycle, row) in program.code_by_row().enumerate() {
-                preflight.step(cycle, row)?;
-            }
+            let preflight = {
+                let _t = WebGpuStageTimer::new(format!(
+                    "recursion_preflight code_rows={}",
+                    program.code_rows()
+                ));
+                let mut preflight = Preflight::new(input);
+                for (cycle, row) in program.code_by_row().enumerate() {
+                    preflight.step(cycle, row)?;
+                }
+                preflight
+            };
 
-            let witgen = crate::prove::witgen::WitnessGenerator::new(
-                self.hal.as_ref(),
-                self.circuit_hal.as_ref(),
-                &program,
-                &preflight,
-                control_id,
-            )?;
+            let witgen = {
+                let _t = WebGpuStageTimer::new("recursion_witgen_new");
+                crate::prove::witgen::WitnessGenerator::new(
+                    self.hal.as_ref(),
+                    self.circuit_hal.as_ref(),
+                    &program,
+                    &preflight,
+                    control_id,
+                )?
+            };
 
             let global = &witgen.global;
             let hashfn = &self.hal.get_hash_suite().hashfn;
             let mut prover = Prover::new(self.hal.as_ref(), TAPSET);
 
+            let _header_timer = WebGpuStageTimer::new("recursion_header_commit");
             prover
                 .iop()
                 .commit(&hashfn.hash_elem_slice(&PROOF_SYSTEM_INFO.encode()));
@@ -1695,6 +1706,7 @@ impl RecursionProver for WebGpuRecursionProver {
             prover.iop().commit(&header_digest);
             prover.iop().write_field_elem_slice(header.as_slice());
             prover.set_po2(program.po2);
+            drop(_header_timer);
 
             {
                 let _gpu_scope = self.hal.gpu_authoritative_scope(true);

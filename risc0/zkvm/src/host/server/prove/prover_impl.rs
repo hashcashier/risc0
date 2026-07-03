@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, HashSet, VecDeque};
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 use std::rc::Rc;
 
@@ -53,41 +53,19 @@ pub(crate) const WEBGPU_DEFAULT_SEGMENT_LIMIT_PO2: u32 = 18;
 pub(crate) const WEBGPU_DEFAULT_KECCAK_MAX_PO2: u32 = 14;
 
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
-struct WebGpuStageTimer {
-    label: String,
-    start_ms: f64,
-}
-
-#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
-impl WebGpuStageTimer {
-    fn new(label: impl Into<String>) -> Self {
-        let label = label.into();
-        web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(
-            "browser-prove:stage start {label}"
-        )));
-        Self {
-            label,
-            start_ms: js_sys::Date::now(),
-        }
-    }
-}
-
-#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
-impl Drop for WebGpuStageTimer {
-    fn drop(&mut self) {
-        let elapsed_ms = js_sys::Date::now() - self.start_ms;
-        web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(
-            "browser-prove:stage done {} elapsed_ms={elapsed_ms:.0}",
-            self.label
-        )));
-    }
-}
+use risc0_zkp::hal::webgpu::WebGpuStageTimer;
 
 /// An implementation of a Prover that runs locally.
 pub struct ProverImpl {
     opts: ProverOpts,
     #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
     webgpu_hal: Option<Rc<WebGpuHal>>,
+    /// Extra WebGPU devices dedicated to the succinct-phase scheduler.
+    /// Readbacks wait for the whole device queue, so proofs interleaved
+    /// on one device serialize (wall = CPU + GPU); per-proof devices
+    /// give each proof an independent queue.
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    webgpu_recursion_hals: Vec<Rc<WebGpuHal>>,
 }
 
 impl ProverImpl {
@@ -97,6 +75,8 @@ impl ProverImpl {
             opts,
             #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
             webgpu_hal: None,
+            #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+            webgpu_recursion_hals: Vec::new(),
         }
     }
 
@@ -106,7 +86,15 @@ impl ProverImpl {
         Self {
             opts,
             webgpu_hal: Some(hal),
+            webgpu_recursion_hals: Vec::new(),
         }
+    }
+
+    /// Attach extra WebGPU devices for the succinct-phase scheduler.
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+    pub fn with_webgpu_recursion_hals(mut self, hals: Vec<Rc<WebGpuHal>>) -> Self {
+        self.webgpu_recursion_hals = hals;
+        self
     }
 
     fn segment_prover(&self) -> Result<Box<dyn risc0_circuit_rv32im::prove::SegmentProver>> {
@@ -426,12 +414,16 @@ impl ProverImpl {
         Ok(receipt)
     }
 
-    async fn lift_async(&self, receipt: &SegmentReceipt) -> Result<SuccinctReceipt<ReceiptClaim>> {
+    async fn lift_async_on(
+        &self,
+        receipt: &SegmentReceipt,
+        hal: Rc<WebGpuHal>,
+    ) -> Result<SuccinctReceipt<ReceiptClaim>> {
         let _timer = WebGpuStageTimer::new(format!("lift_async segment_index={}", receipt.index));
         let receipt = {
             let _timer =
                 WebGpuStageTimer::new(format!("lift_prove_async segment_index={}", receipt.index));
-            crate::host::recursion::prove::lift_webgpu(receipt, self.webgpu_hal()?).await?
+            crate::host::recursion::prove::lift_webgpu(receipt, hal).await?
         };
         {
             let _timer = WebGpuStageTimer::new("verify_lift");
@@ -440,15 +432,16 @@ impl ProverImpl {
         Ok(receipt)
     }
 
-    async fn join_async(
+    async fn join_async_on(
         &self,
         a: &SuccinctReceipt<ReceiptClaim>,
         b: &SuccinctReceipt<ReceiptClaim>,
+        hal: Rc<WebGpuHal>,
     ) -> Result<SuccinctReceipt<ReceiptClaim>> {
         let _timer = WebGpuStageTimer::new("join_async");
         let receipt = {
             let _timer = WebGpuStageTimer::new("join_prove_async");
-            crate::host::recursion::prove::join_webgpu(a, b, self.webgpu_hal()?).await?
+            crate::host::recursion::prove::join_webgpu(a, b, hal).await?
         };
         {
             let _timer = WebGpuStageTimer::new("verify_join");
@@ -535,17 +528,130 @@ impl ProverImpl {
         &self,
         composite_receipt: &CompositeReceipt,
     ) -> Result<SuccinctReceipt<ReceiptClaim>> {
-        let mut continuation_receipt = None;
-        for right in composite_receipt.segments.iter() {
-            let lifted = self.lift_async(right).await?;
-            continuation_receipt = Some(match continuation_receipt {
-                Some(left) => self.join_async(&left, &lifted).await?,
-                None => lifted,
-            });
+        // M3c: run the lift/join phase as a balanced join tree under a
+        // width-2 scheduler instead of a serial left fold.
+        //
+        // Joins are associative over adjacent execution spans, so any
+        // pairing that preserves segment order yields the same session
+        // claim; a balanced tree cuts the dependency depth from N-1 to
+        // ceil(log2 N), turning the join chain from the critical path
+        // into schedulable work. Two proofs run interleaved at a time
+        // (recursion∥recursion is the concurrency SP6d validated for
+        // wasm32 memory; segment∥anything OOMs at po2=18): while one
+        // blocks on a merkle-root readback (GPU busy), the other's CPU
+        // witgen fills the wait. Each proof future carries a private
+        // copy of the HAL's GPU-authoritative flag
+        // (`with_authoritative_context`) because the plain scope guards
+        // assume stack discipline, which interleaved awaits violate.
+        use futures::future::FutureExt;
+        use futures::stream::{FuturesUnordered, StreamExt};
+
+        let hal = self.webgpu_hal()?;
+        let segment_count = composite_receipt.segments.len();
+        ensure!(
+            segment_count > 0,
+            "malformed composite receipt has no continuation segment receipts"
+        );
+
+        // Balanced tree over the segment range [0, N): every internal
+        // node (lo, hi) splits at the midpoint into (lo, mid) + (mid, hi).
+        let mut internal_nodes = Vec::new();
+        let mut stack = vec![(0usize, segment_count)];
+        while let Some((lo, hi)) = stack.pop() {
+            if hi - lo > 1 {
+                let mid = lo + (hi - lo).div_ceil(2);
+                internal_nodes.push((lo, hi));
+                stack.push((lo, mid));
+                stack.push((mid, hi));
+            }
         }
-        let mut continuation_receipt = continuation_receipt.ok_or_else(|| {
-            anyhow!("malformed composite receipt has no continuation segment receipts")
-        })?;
+
+        // One HAL per in-flight proof. A readback (`mapAsync`) waits for
+        // everything previously submitted on its device queue, so proofs
+        // sharing one device serialize at every transcript readback
+        // (measured: wall ≈ CPU + GPU). Distinct devices have independent
+        // queues. The main HAL goes first in the list so `pop()` hands
+        // proofs the dedicated recursion devices before the main one,
+        // whose queue may still hold residual segment-phase work. Without
+        // extra devices, fall back to interleaving on the main one —
+        // still slightly better than a serial fold.
+        let mut free_hals: Vec<Rc<WebGpuHal>> = if segment_count > 1 {
+            let mut hals = vec![hal.clone()];
+            hals.extend(self.webgpu_recursion_hals.iter().cloned());
+            if hals.len() == 1 {
+                hals.push(hal.clone());
+            }
+            hals
+        } else {
+            vec![hal.clone()]
+        };
+        type ProofResult = Result<(usize, usize, SuccinctReceipt<ReceiptClaim>, Rc<WebGpuHal>)>;
+        let mut done: BTreeMap<(usize, usize), SuccinctReceipt<ReceiptClaim>> = BTreeMap::new();
+        let mut spawned: HashSet<(usize, usize)> = HashSet::new();
+        let mut next_leaf = 0usize;
+        let mut in_flight: FuturesUnordered<
+            std::pin::Pin<Box<dyn std::future::Future<Output = ProofResult> + '_>>,
+        > = FuturesUnordered::new();
+
+        loop {
+            while !free_hals.is_empty() {
+                // Prefer ready joins: they release receipts and advance
+                // the tree toward the root; lifts are the slack work.
+                let ready_join = internal_nodes
+                    .iter()
+                    .copied()
+                    .find(|&(lo, hi)| {
+                        let mid = lo + (hi - lo).div_ceil(2);
+                        !spawned.contains(&(lo, hi))
+                            && done.contains_key(&(lo, mid))
+                            && done.contains_key(&(mid, hi))
+                    });
+                if let Some((lo, hi)) = ready_join {
+                    spawned.insert((lo, hi));
+                    let mid = lo + (hi - lo).div_ceil(2);
+                    let left = done.remove(&(lo, mid)).expect("checked ready join left");
+                    let right = done.remove(&(mid, hi)).expect("checked ready join right");
+                    let proof_hal = free_hals.pop().expect("checked non-empty free hal list");
+                    in_flight.push(
+                        risc0_zkp::hal::webgpu::with_authoritative_context(proof_hal.clone(), {
+                            async move {
+                                let joined =
+                                    self.join_async_on(&left, &right, proof_hal.clone()).await?;
+                                Ok((lo, hi, joined, proof_hal))
+                            }
+                        })
+                        .boxed_local(),
+                    );
+                } else if next_leaf < segment_count {
+                    let index = next_leaf;
+                    next_leaf += 1;
+                    spawned.insert((index, index + 1));
+                    let segment = &composite_receipt.segments[index];
+                    let proof_hal = free_hals.pop().expect("checked non-empty free hal list");
+                    in_flight.push(
+                        risc0_zkp::hal::webgpu::with_authoritative_context(proof_hal.clone(), {
+                            async move {
+                                let lifted = self.lift_async_on(segment, proof_hal.clone()).await?;
+                                Ok((index, index + 1, lifted, proof_hal))
+                            }
+                        })
+                        .boxed_local(),
+                    );
+                } else {
+                    break;
+                }
+            }
+            let Some(completed) = in_flight.next().await else {
+                break;
+            };
+            let (lo, hi, receipt, proof_hal) = completed?;
+            free_hals.push(proof_hal);
+            done.insert((lo, hi), receipt);
+        }
+
+        let mut continuation_receipt = done
+            .remove(&(0, segment_count))
+            .expect("join tree scheduler must complete the root node");
 
         for assumption in composite_receipt.assumption_receipts.iter() {
             continuation_receipt = match assumption {

@@ -443,6 +443,7 @@ pub(crate) fn get_webgpu_prover_server(
 pub(crate) async fn prove_webgpu_with_ctx(
     opts: &ProverOpts,
     hal: Rc<WebGpuHal>,
+    recursion_hals: Vec<Rc<WebGpuHal>>,
     env: ExecutorEnv<'_>,
     ctx: &VerifierContext,
     elf: &[u8],
@@ -452,6 +453,7 @@ pub(crate) async fn prove_webgpu_with_ctx(
         "browser WebGPU proving does not support dev-mode"
     );
     ProverImpl::new_webgpu(opts.clone(), hal)
+        .with_webgpu_recursion_hals(recursion_hals)
         .prove_with_ctx_async(env, ctx, elf)
         .await
 }
@@ -461,6 +463,7 @@ pub(crate) async fn prove_webgpu_with_ctx(
 pub(crate) async fn compress_webgpu(
     opts: &ProverOpts,
     hal: Rc<WebGpuHal>,
+    recursion_hals: Vec<Rc<WebGpuHal>>,
     receipt: &Receipt,
 ) -> Result<Receipt> {
     ensure!(
@@ -468,6 +471,7 @@ pub(crate) async fn compress_webgpu(
         "browser WebGPU proving does not support dev-mode"
     );
     ProverImpl::new_webgpu(opts.clone(), hal)
+        .with_webgpu_recursion_hals(recursion_hals)
         .compress_async(opts, receipt)
         .await
 }

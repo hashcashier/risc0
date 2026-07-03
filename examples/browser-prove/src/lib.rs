@@ -259,6 +259,24 @@ mod tests {
             diagnostics.cpu_fallbacks, expected_cpu_fallbacks,
             "{name}: WebGPU proof path used CPU fallbacks"
         );
+        for (slot, recursion) in prover.recursion_diagnostics().into_iter().enumerate() {
+            assert_eq!(
+                recursion.cpu_only_ops, 0,
+                "{name}: succinct-phase device {slot} used CPU-only HAL operations"
+            );
+            assert_eq!(
+                recursion.cpu_fallbacks, 0,
+                "{name}: succinct-phase device {slot} used CPU fallbacks"
+            );
+            console_log!(
+                "browser-prove:webgpu {name}: recursion_hal slot={} gpu_dispatches={} queue_submits={} cpu_fallbacks={} cpu_only_ops={}",
+                slot,
+                recursion.gpu_dispatches,
+                recursion.queue_submits,
+                recursion.cpu_fallbacks,
+                recursion.cpu_only_ops,
+            );
+        }
         console_log!(
             "browser-prove:webgpu {name}: gpu_dispatches={} raw_compute_dispatches={} queue_submits={} cpu_mirrors={} cpu_fallbacks={} cpu_only_ops={} uploads={} upload_bytes={} device_copies={} device_copy_bytes={} readbacks={} readback_bytes={} bind_group_layout_creations={} bind_group_layout_cache_hits={} bind_group_creations={} compute_pipeline_creations={} compute_pipeline_cache_hits={} buffers={} buffer_bytes={}",
             diagnostics.gpu_dispatches,

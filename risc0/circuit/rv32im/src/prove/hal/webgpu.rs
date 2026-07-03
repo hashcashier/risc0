@@ -6862,6 +6862,7 @@ impl SegmentProver for WebGpuSegmentProver {
             // (GPU shadow_init + per-arm chunks + sync_gpu_to_cpu) BEFORE
             // sync `generate_witness` runs. This is the fix for the
             // CPU/GPU shadow desync blocker that step 6.2.7 identified.
+            let setup_timer = WebGpuStageTimer::new("rv32im_prove_setup");
             let (global_vec, injector, cycles, trace, _po2_inner) =
                 super::super::witgen::WitnessGenerator::<WebGpuHal>::preflight_components(
                     preflight_results,
@@ -6871,9 +6872,13 @@ impl SegmentProver for WebGpuSegmentProver {
             >::allocate_buffers(
                 hal, &global_vec, cycles, &injector
             );
-            circuit_hal
-                .pre_witgen_dispatch_async(&trace, &data_buf, &global_buf)
-                .await?;
+            drop(setup_timer);
+            {
+                let _t = WebGpuStageTimer::new("rv32im_pre_witgen_dispatch");
+                circuit_hal
+                    .pre_witgen_dispatch_async(&trace, &data_buf, &global_buf)
+                    .await?;
+            }
             // SP7 iter 6d-g step 6.2.13 (2026-05-16): if diff mode is on,
             // snapshot GPU result from CPU shadow, reset shadow to
             // INVALID, re-scatter injector, force mask=0 so rust_steps
@@ -7119,6 +7124,7 @@ impl SegmentProver for WebGpuSegmentProver {
             let mut prover = Prover::new(hal, TAPSET);
             let hashfn = &hal.get_hash_suite().hashfn;
 
+            let header_timer = WebGpuStageTimer::new("rv32im_header_commit");
             prover.iop().write_u32_slice(&[RV32IM_SEAL_VERSION]);
             prover
                 .iop()
@@ -7141,6 +7147,7 @@ impl SegmentProver for WebGpuSegmentProver {
             prover.iop().commit(&header_digest);
             prover.iop().write_field_elem_slice(header.as_slice());
             prover.set_po2(po2 as usize);
+            drop(header_timer);
 
             let async_scopes = crate::prove::webgpu_async_authoritative_scopes();
             {
@@ -7159,9 +7166,11 @@ impl SegmentProver for WebGpuSegmentProver {
                 }
             }
 
+            let accum_shadow_timer = WebGpuStageTimer::new("rv32im_accum_shadow_sync");
             let accum_shadow_rows = circuit_hal
                 .sync_witgen_replace_accum_shadow_rows(&witgen.trace, &witgen.data)
                 .await?;
+            drop(accum_shadow_timer);
             if accum_shadow_rows != 0 {
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
                     "rv32im_witgen_accum_shadow_gpu_sync rows={accum_shadow_rows}"
@@ -7173,7 +7182,10 @@ impl SegmentProver for WebGpuSegmentProver {
                 let _t = WebGpuStageTimer::new("rv32im_witgen_accum");
                 witgen.accum(hal, circuit_hal, &mix)?
             };
-            circuit_hal.post_accum_candidate_sync_async().await?;
+            {
+                let _t = WebGpuStageTimer::new("rv32im_post_accum_sync");
+                circuit_hal.post_accum_candidate_sync_async().await?;
+            }
 
             let async_scopes = crate::prove::webgpu_async_authoritative_scopes();
             {

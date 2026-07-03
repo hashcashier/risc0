@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use anyhow::Result;
@@ -39,7 +40,19 @@ pub async fn webgpu_prover() -> Result<Rc<WebGpuProver>> {
 pub struct WebGpuProver {
     name: String,
     hal: Rc<WebGpuHal>,
+    /// Lazily-acquired extra devices for the succinct-phase scheduler
+    /// (independent queues so concurrent recursion proofs don't serialize
+    /// at transcript readbacks). Cached for the prover's lifetime so
+    /// their pipeline compiles amortize across prove calls.
+    recursion_hals: RefCell<Vec<Rc<WebGpuHal>>>,
 }
+
+/// Number of recursion proofs the succinct-phase scheduler keeps in
+/// flight (one WebGPU device each). Two is the wasm32 memory ceiling at
+/// po2=18: width 3 aborts with the allocator-OOM `unreachable` signature
+/// mid-phase (measured 2026-07-03; consistent with SP6d's finding that
+/// concurrency is heap-bound near 2 GiB).
+pub(crate) const WEBGPU_SUCCINCT_PIPELINE_WIDTH: usize = 2;
 
 impl WebGpuProver {
     /// Request a WebGPU device from the browser and construct a prover.
@@ -56,12 +69,44 @@ impl WebGpuProver {
         Self {
             name: name.to_string(),
             hal,
+            recursion_hals: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Acquire (once) the extra WebGPU devices for succinct-phase
+    /// concurrency. Returns however many the browser granted; proving
+    /// falls back to interleaving on fewer queues when short.
+    async fn ensure_recursion_hals(&self, count: usize) -> Vec<Rc<WebGpuHal>> {
+        while self.recursion_hals.borrow().len() < count {
+            match WebGpuHal::new(Poseidon2HashSuite::new_suite()).await {
+                Ok(hal) => {
+                    self.recursion_hals.borrow_mut().push(Rc::new(hal));
+                }
+                Err(err) => {
+                    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+                        "recursion_hal_unavailable have={} want={count} err={err:#}",
+                        self.recursion_hals.borrow().len()
+                    ));
+                    break;
+                }
+            }
+        }
+        self.recursion_hals.borrow().clone()
     }
 
     /// Return backend usage diagnostics accumulated by the underlying WebGPU HAL.
     pub fn diagnostics(&self) -> WebGpuDiagnostics {
         self.hal.diagnostics()
+    }
+
+    /// Diagnostics for the extra succinct-phase devices, if any were
+    /// acquired.
+    pub fn recursion_diagnostics(&self) -> Vec<WebGpuDiagnostics> {
+        self.recursion_hals
+            .borrow()
+            .iter()
+            .map(|hal| hal.diagnostics())
+            .collect()
     }
 
     /// Return the negotiated WebGPU device limits used by representative
@@ -177,12 +222,16 @@ impl WebGpuProver {
         elf: &[u8],
         opts: &ProverOpts,
     ) -> Result<ProveInfo> {
-        prove_webgpu_with_ctx(opts, self.hal.clone(), env, ctx, elf).await
+        let recursion_hals = self
+            .ensure_recursion_hals(WEBGPU_SUCCINCT_PIPELINE_WIDTH - 1)
+            .await;
+        prove_webgpu_with_ctx(opts, self.hal.clone(), recursion_hals, env, ctx, elf).await
     }
 
     /// Async browser WebGPU variant of [`Prover::compress`].
     pub async fn compress_async(&self, opts: &ProverOpts, receipt: &Receipt) -> Result<Receipt> {
-        compress_webgpu(opts, self.hal.clone(), receipt).await
+        let recursion_hals = self.recursion_hals.borrow().clone();
+        compress_webgpu(opts, self.hal.clone(), recursion_hals, receipt).await
     }
 }
 

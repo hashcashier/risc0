@@ -15,6 +15,8 @@
 pub mod zkr;
 
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+use risc0_zkp::hal::webgpu::WebGpuStageTimer;
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 use std::rc::Rc;
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -92,9 +94,13 @@ pub async fn lift_webgpu(
     hal: Rc<risc0_zkp::hal::webgpu::WebGpuHal>,
 ) -> Result<SuccinctReceipt<ReceiptClaim>> {
     tracing::debug!("Proving lift: claim = {:#?}", segment_receipt.claim);
-    let mut prover = Prover::new_lift(segment_receipt, ProverOpts::succinct())?;
+    let mut prover = {
+        let _t = WebGpuStageTimer::new("recursion_prover_setup lift");
+        Prover::new_lift(segment_receipt, ProverOpts::succinct())?
+    };
 
     let receipt = prover.run_with_webgpu_hal(hal).await?;
+    let _t = WebGpuStageTimer::new("recursion_receipt_finish lift");
     let claim_decoded = ReceiptClaim::decode(&mut receipt.out_stream())?;
     tracing::debug!("Proving lift finished: decoded claim = {claim_decoded:#?}");
 
@@ -162,9 +168,13 @@ pub async fn join_webgpu(
     tracing::debug!("Proving join: a.claim = {:#?}", a.claim);
     tracing::debug!("Proving join: b.claim = {:#?}", b.claim);
 
-    let mut prover = Prover::new_join(a, b, ProverOpts::succinct())?;
+    let mut prover = {
+        let _t = WebGpuStageTimer::new("recursion_prover_setup join");
+        Prover::new_join(a, b, ProverOpts::succinct())?
+    };
     let receipt = prover.run_with_webgpu_hal(hal).await?;
 
+    let _t = WebGpuStageTimer::new("recursion_receipt_finish join");
     let claim_decoded = ReceiptClaim::decode(&mut receipt.out_stream())?;
     tracing::debug!("Proving join finished: decoded claim = {claim_decoded:#?}");
 
