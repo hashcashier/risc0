@@ -263,12 +263,105 @@ impl ProverImpl {
 
         let mut zkr_receipts = HashMap::new();
         let mut keccak_receipts = VecDeque::new();
-        for (_idx, proof_request) in session.pending_keccaks.iter().enumerate() {
-            let _timer = WebGpuStageTimer::new(format!("prove_keccak_request index={_idx}"));
-            let receipt = prove_keccak_webgpu(proof_request, self.webgpu_hal()?).await?;
-            tracing::debug!("adding keccak assumption: {}", receipt.claim.digest());
-            self.insert_union_receipt_async(&mut keccak_receipts, receipt)
-                .await?;
+        // M4e: pipeline keccak proofs across the dedicated recursion
+        // devices while the union peak-stack consumes receipts strictly
+        // in request order on the main device. The union tree shape is
+        // protocol-fixed (the guest computes the same binary-counter
+        // tree over the request digests), so the scheduler only overlaps
+        // work — consumption order is a correctness requirement. Union
+        // inserts run as tasks inside the same FuturesUnordered (owning
+        // the peak stack for their turn) so in-flight keccak proofs keep
+        // being polled while a union proof awaits its readbacks.
+        if !session.pending_keccaks.is_empty() {
+            use futures::future::FutureExt;
+            use futures::stream::{FuturesUnordered, StreamExt};
+
+            enum KeccakPhaseTask {
+                Keccak(usize, SuccinctReceipt<Unknown>, Rc<WebGpuHal>),
+                Union(VecDeque<(u32, SuccinctReceipt<Unknown>)>, usize),
+            }
+
+            let keccak_count = session.pending_keccaks.len();
+            // Keccak proofs get the dedicated devices; the main HAL runs
+            // the union chain (it carries segment-phase queue residue
+            // anyway). Without extras this degenerates to the serial
+            // pre-M4e behavior on the main device.
+            let main_hal = self.webgpu_hal()?;
+            let mut free_hals: Vec<Rc<WebGpuHal>> = self.webgpu_recursion_hals.clone();
+            if free_hals.is_empty() {
+                free_hals.push(main_hal.clone());
+            }
+            let mut in_flight: FuturesUnordered<
+                std::pin::Pin<Box<dyn std::future::Future<Output = Result<KeccakPhaseTask>> + '_>>,
+            > = FuturesUnordered::new();
+            let mut done: BTreeMap<usize, SuccinctReceipt<Unknown>> = BTreeMap::new();
+            let mut peaks = Some(VecDeque::new());
+            let mut next_spawn = 0usize;
+            let mut next_union = 0usize;
+
+            while next_union < keccak_count {
+                while next_spawn < keccak_count && !free_hals.is_empty() {
+                    let index = next_spawn;
+                    next_spawn += 1;
+                    let proof_request = &session.pending_keccaks[index];
+                    let proof_hal = free_hals.pop().expect("checked non-empty free hal list");
+                    in_flight.push(
+                        risc0_zkp::hal::webgpu::with_authoritative_context(proof_hal.clone(), {
+                            async move {
+                                let _timer = WebGpuStageTimer::new(format!(
+                                    "prove_keccak_request index={index}"
+                                ));
+                                let receipt =
+                                    prove_keccak_webgpu(proof_request, proof_hal.clone()).await?;
+                                Ok(KeccakPhaseTask::Keccak(index, receipt, proof_hal))
+                            }
+                        })
+                        .boxed_local(),
+                    );
+                }
+                if peaks.is_some() && done.contains_key(&next_union) {
+                    let mut batch = Vec::new();
+                    while let Some(receipt) = done.remove(&(next_union + batch.len())) {
+                        batch.push(receipt);
+                    }
+                    let batch_len = batch.len();
+                    let mut union_peaks = peaks.take().expect("checked peak stack present");
+                    in_flight.push(
+                        risc0_zkp::hal::webgpu::with_authoritative_context(main_hal.clone(), {
+                            async move {
+                                for receipt in batch {
+                                    tracing::debug!(
+                                        "adding keccak assumption: {}",
+                                        receipt.claim.digest()
+                                    );
+                                    self.insert_union_receipt_async(&mut union_peaks, receipt)
+                                        .await?;
+                                }
+                                Ok(KeccakPhaseTask::Union(union_peaks, batch_len))
+                            }
+                        })
+                        .boxed_local(),
+                    );
+                }
+                let Some(completed) = in_flight.next().await else {
+                    bail!(
+                        "keccak pipeline stalled: {next_union} of {keccak_count} receipts unioned"
+                    );
+                };
+                match completed? {
+                    KeccakPhaseTask::Keccak(index, receipt, proof_hal) => {
+                        free_hals.push(proof_hal);
+                        done.insert(index, receipt);
+                    }
+                    KeccakPhaseTask::Union(union_peaks, consumed) => {
+                        peaks = Some(union_peaks);
+                        next_union += consumed;
+                    }
+                }
+            }
+            keccak_receipts = peaks
+                .take()
+                .expect("keccak pipeline left the peak stack in flight");
         }
 
         {
