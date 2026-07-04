@@ -38,19 +38,29 @@ pub(crate) struct WitnessGenerator<H: Hal> {
     pub accum: H::Buffer<H::Elem>,
 }
 
+/// Buffers allocated for one recursion witness generation, before the
+/// witness pass has filled them. M7a splits [`WitnessGenerator::new`] at
+/// this point so the browser WebGPU path can run the CPU witness pass on a
+/// pool worker between [`WitnessGenerator::alloc_buffers`] and
+/// [`WitnessGenerator::finish_after_generate`].
+pub(crate) struct WitgenBuffers<H: Hal> {
+    pub work_cycles: u32,
+    pub total_cycles: u32,
+    pub global: H::Buffer<H::Elem>,
+    pub ctrl: H::Buffer<H::Elem>,
+    pub data: H::Buffer<H::Elem>,
+    pub accum: H::Buffer<H::Elem>,
+}
+
 impl<H> WitnessGenerator<H>
 where
     H: Hal<Field = BabyBear, Elem = BabyBearElem, ExtElem = BabyBearExtElem>,
 {
-    pub fn new<C: CircuitWitnessGenerator<H>>(
+    pub fn alloc_buffers(
         hal: &H,
-        circuit_hal: &C,
         zkr: &Program,
-        preflight: &Preflight,
         ctrl_cache_key: Option<Digest>,
-    ) -> Result<Self> {
-        scope!("witgen");
-
+    ) -> Result<WitgenBuffers<H>> {
         let total_cycles = 1 << zkr.po2;
 
         let global = vec![BabyBearElem::INVALID; CircuitImpl::OUTPUT_SIZE];
@@ -87,33 +97,46 @@ where
         #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
         drop(alloc_timer);
 
-        let work_cycles = zkr.code_rows() as u32;
-        let raw_trace = RawPreflightTrace {
+        Ok(WitgenBuffers {
+            work_cycles: zkr.code_rows() as u32,
+            total_cycles: total_cycles as u32,
+            global,
+            ctrl,
+            data,
+            accum,
+        })
+    }
+
+    pub fn raw_trace(preflight: &Preflight, work_cycles: u32) -> RawPreflightTrace {
+        RawPreflightTrace {
             wom: preflight.trace.wom.as_ptr(),
             cycles: preflight.trace.cycles.as_ptr(),
             iops: preflight.trace.iops.as_ptr(),
             num_woms: preflight.trace.wom.len() as u32,
             num_cycles: work_cycles,
             num_iops: preflight.trace.iops.len() as u32,
-        };
+        }
+    }
 
-        let witness_mode = StepMode::Parallel;
-        #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
-        let generate_timer =
-            risc0_zkp::hal::webgpu::WebGpuStageTimer::new("recursion_witgen_generate");
-        circuit_hal
-            .generate_witness(
-                witness_mode,
-                total_cycles as u32,
-                &raw_trace,
-                preflight.byte_reads(),
-                &ctrl,
-                &data,
-                &global,
-            )
-            .context("witness generation failure")?;
-        #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
-        drop(generate_timer);
+    /// Noise, zeroize, and the deferred GPU witness dispatches — everything
+    /// after the CPU witness pass has filled `bufs`.
+    pub fn finish_after_generate<C: CircuitWitnessGenerator<H>>(
+        hal: &H,
+        circuit_hal: &C,
+        bufs: WitgenBuffers<H>,
+        preflight: &Preflight,
+        witness_mode: StepMode,
+    ) -> Result<Self> {
+        let WitgenBuffers {
+            work_cycles,
+            total_cycles,
+            global,
+            ctrl,
+            data,
+            accum,
+        } = bufs;
+        let total_cycles = total_cycles as usize;
+        let raw_trace = Self::raw_trace(preflight, work_cycles);
 
         // Add random noise to end of the data columns
         scope!("noise", {
@@ -169,6 +192,39 @@ where
             data,
             accum,
         })
+    }
+
+    pub fn new<C: CircuitWitnessGenerator<H>>(
+        hal: &H,
+        circuit_hal: &C,
+        zkr: &Program,
+        preflight: &Preflight,
+        ctrl_cache_key: Option<Digest>,
+    ) -> Result<Self> {
+        scope!("witgen");
+
+        let bufs = Self::alloc_buffers(hal, zkr, ctrl_cache_key)?;
+        let raw_trace = Self::raw_trace(preflight, bufs.work_cycles);
+
+        let witness_mode = StepMode::Parallel;
+        #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+        let generate_timer =
+            risc0_zkp::hal::webgpu::WebGpuStageTimer::new("recursion_witgen_generate");
+        circuit_hal
+            .generate_witness(
+                witness_mode,
+                bufs.total_cycles,
+                &raw_trace,
+                preflight.byte_reads(),
+                &bufs.ctrl,
+                &bufs.data,
+                &bufs.global,
+            )
+            .context("witness generation failure")?;
+        #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+        drop(generate_timer);
+
+        Self::finish_after_generate(hal, circuit_hal, bufs, preflight, witness_mode)
     }
 
     pub fn accum<C: CircuitAccumulator<H>>(

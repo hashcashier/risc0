@@ -20,7 +20,7 @@ use std::{
     sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
 };
 
-use anyhow::{ensure, Context as _, Result};
+use anyhow::{anyhow, ensure, Context as _, Result};
 use risc0_circuit_recursion_sys::{RawPreflightTrace, StepMode};
 use risc0_zkp::{
     adapter::{CircuitInfo as _, TapsProvider as _, PROOF_SYSTEM_INFO},
@@ -1620,6 +1620,122 @@ struct WebGpuRecursionProver {
     circuit_hal: Rc<WebGpuCircuitHal>,
 }
 
+/// M7a: run the recursion preflight replay on a pool worker. The replay is
+/// pure CPU over owned data (`program` + `input`); keeping it off this wasm
+/// thread lets in-flight readback callbacks of OTHER proofs complete while
+/// it grinds (the M6d starvation physics — a commit phase is a chain of
+/// short readbacks whose completions require this thread's event loop).
+/// `program` travels through the worker and back untouched.
+async fn preflight_offloaded_async(
+    program: crate::prove::Program,
+    input: std::collections::VecDeque<u32>,
+) -> Result<(crate::prove::Program, Preflight)> {
+    let _t = WebGpuStageTimer::new(format!(
+        "recursion_preflight code_rows={} offload=pool",
+        program.code_rows()
+    ));
+    let (tx, rx) = futures::channel::oneshot::channel();
+    rayon::spawn(move || {
+        let result = (|| -> Result<Preflight> {
+            let mut preflight = Preflight::new(input);
+            for (cycle, row) in program.code_by_row().enumerate() {
+                preflight.step(cycle, row)?;
+            }
+            Ok(preflight)
+        })();
+        let _ = tx.send((result, program));
+    });
+    let (result, program) = rx
+        .await
+        .map_err(|_| anyhow!("recursion preflight offload worker dropped its result channel"))?;
+    Ok((program, result?))
+}
+
+/// M7a: [`crate::prove::witgen::WitnessGenerator::new`] with the CPU witness
+/// pass on a pool worker. Buffer allocation, noise, zeroize, and the
+/// deferred GPU dispatches stay on this thread (JS objects and GPU
+/// submission cannot leave it); the exec-plan build — the dominant CPU
+/// chunk — runs on the pool over `Send` CPU shadow handles, exactly the
+/// M6d `generate_witness_offloaded_async` pattern from rv32im. `preflight`
+/// travels through the worker and back (the caller still needs its output).
+///
+/// When the GPU verify_mem candidate is disabled (diagnostics), this falls
+/// back to the inline blocking constructor: those runs prove one receipt at
+/// a time, so there are no concurrent readbacks to starve.
+async fn witgen_new_offloaded_async(
+    hal: &Rc<WebGpuHal>,
+    circuit_hal: &WebGpuCircuitHal,
+    program: &crate::prove::Program,
+    preflight: Preflight,
+    control_id: Option<risc0_zkp::core::digest::Digest>,
+) -> Result<(crate::prove::witgen::WitnessGenerator<WebGpuHal>, Preflight)> {
+    use crate::prove::witgen::WitnessGenerator;
+
+    if !RECURSION_WITGEN_GPU_VERIFY_MEM_CANDIDATE_ENABLED.load(AtomicOrdering::SeqCst) {
+        let _t = WebGpuStageTimer::new("recursion_witgen_new");
+        let witgen =
+            WitnessGenerator::new(hal.as_ref(), circuit_hal, program, &preflight, control_id)?;
+        return Ok((witgen, preflight));
+    }
+
+    let _t = WebGpuStageTimer::new("recursion_witgen_new");
+    let bufs = WitnessGenerator::<WebGpuHal>::alloc_buffers(hal.as_ref(), program, control_id)?;
+
+    let generate_timer = WebGpuStageTimer::new("recursion_witgen_generate offload=pool");
+    let ctrl_shadow = bufs.ctrl.begin_cpu_shadow_offload();
+    let data_shadow = bufs.data.begin_cpu_shadow_offload_mut();
+    let global_shadow = bufs.global.begin_cpu_shadow_offload_mut();
+    let total_cycles = bufs.total_cycles;
+    let work_cycles = bufs.work_cycles;
+    let (tx, rx) = futures::channel::oneshot::channel();
+    rayon::spawn(move || {
+        // The raw-pointer trace view is built AND consumed on this worker,
+        // from the owned Preflight — no pointer crosses a thread boundary.
+        let result = {
+            let raw_trace = WitnessGenerator::<WebGpuHal>::raw_trace(&preflight, work_cycles);
+            super::rust_kernels::generate_witness_exec_plan_on_shadows(
+                StepMode::Parallel,
+                total_cycles,
+                &raw_trace,
+                preflight.byte_reads(),
+                &ctrl_shadow,
+                &data_shadow,
+                &global_shadow,
+            )
+        };
+        let _ = tx.send((result, preflight));
+    });
+    let (plan_result, preflight) = rx
+        .await
+        .map_err(|_| anyhow!("recursion witgen offload worker dropped its result channel"))?;
+    bufs.data.finish_cpu_shadow_offload_mut();
+    bufs.global.finish_cpu_shadow_offload_mut();
+    let plan = plan_result.context("witness generation failure")?;
+    drop(generate_timer);
+
+    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+        "recursion_witgen_gpu_verify_mem_candidate_plan work_cycles={} total_cycles={} valid_rows={} buckets={}",
+        plan.work_cycles,
+        plan.total_cycles,
+        plan.valid_rows,
+        plan.bucket_bases.len()
+    ));
+    // Stash + synchronous consumption below (post_witness_zeroize inside
+    // finish_after_generate) with no await between — interleaved proofs on
+    // this thread cannot observe another proof's plan.
+    RECURSION_WITGEN_GPU_VERIFY_MEM_PLAN.with(|slot| {
+        *slot.borrow_mut() = Some(plan);
+    });
+    let witgen = WitnessGenerator::finish_after_generate(
+        hal.as_ref(),
+        circuit_hal,
+        bufs,
+        &preflight,
+        StepMode::Parallel,
+    )?;
+    Ok((witgen, preflight))
+}
+
 impl RecursionProver for WebGpuRecursionProver {
     fn prove(
         &self,
@@ -1657,28 +1773,20 @@ impl RecursionProver for WebGpuRecursionProver {
         Box::pin(async move {
             risc0_core::scope!("prove");
 
-            let preflight = {
-                let _t = WebGpuStageTimer::new(format!(
-                    "recursion_preflight code_rows={}",
-                    program.code_rows()
-                ));
-                let mut preflight = Preflight::new(input);
-                for (cycle, row) in program.code_by_row().enumerate() {
-                    preflight.step(cycle, row)?;
-                }
-                preflight
-            };
+            // M7a: both CPU-heavy prologue passes run on pool workers so
+            // this thread keeps servicing other in-flight proofs' readback
+            // callbacks (concurrent lifts/joins in composite_to_succinct,
+            // and — under M7-style cross-phase overlap — a segment commit).
+            let (program, preflight) = preflight_offloaded_async(program, input).await?;
 
-            let witgen = {
-                let _t = WebGpuStageTimer::new("recursion_witgen_new");
-                crate::prove::witgen::WitnessGenerator::new(
-                    self.hal.as_ref(),
-                    self.circuit_hal.as_ref(),
-                    &program,
-                    &preflight,
-                    control_id,
-                )?
-            };
+            let (witgen, preflight) = witgen_new_offloaded_async(
+                &self.hal,
+                self.circuit_hal.as_ref(),
+                &program,
+                preflight,
+                control_id,
+            )
+            .await?;
 
             let global = &witgen.global;
             let hashfn = &self.hal.get_hash_suite().hashfn;

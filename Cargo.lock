@@ -7076,6 +7076,7 @@ dependencies = [
  "cfg-if",
  "cust",
  "downloader",
+ "futures",
  "hex",
  "js-sys",
  "lazy-regex",

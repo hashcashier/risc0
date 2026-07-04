@@ -123,6 +123,56 @@ impl ProverImpl {
     }
 }
 
+/// M7a: run a receipt integrity check on a pool worker instead of blocking
+/// this wasm thread. Each check is pure CPU over the owned receipt
+/// (~15 ms), but a block of that size under in-flight readbacks delays
+/// every other proof's mapAsync callback (the M6d starvation physics).
+/// The receipt travels through the worker and back via the oneshot.
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+async fn verify_integrity_offloaded<R, F>(receipt: R, verify: F) -> Result<R>
+where
+    R: Send + 'static,
+    F: FnOnce(&R) -> Result<()> + Send + 'static,
+{
+    let (tx, rx) = futures::channel::oneshot::channel();
+    rayon::spawn(move || {
+        let result = verify(&receipt);
+        let _ = tx.send((result, receipt));
+    });
+    let (result, receipt) = rx
+        .await
+        .map_err(|_| anyhow!("verify offload worker dropped its result channel"))?;
+    result?;
+    Ok(receipt)
+}
+
+/// Join-tree nodes `(lo, hi, mid)` over segments `[0, N)`: every internal
+/// node `(lo, hi)` joins `(lo, mid)` + `(mid, hi)` at the midpoint, giving
+/// a balanced tree (depth `ceil(log2 N)`). Joins are associative over
+/// adjacent execution spans, so any adjacency-preserving shape yields the
+/// same session claim — the shape only affects scheduling. The `mid` is
+/// carried in the node (not recomputed) so every consumer agrees on the
+/// shape. An M7 probe (2026-07-04) reshaped this tree to isolate the
+/// final leaf under the root so early joins could finish the whole
+/// `(0, N-1)` subtree during the segment phase; it collapsed the
+/// post-segment tail 5.0 -> 3.3 s but stretched the segment window by
+/// more (xgboost 14348 -> 14554 ms) — a second concurrent recursion
+/// proof under the segment phase costs more than it hides.
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+fn join_tree_internal_nodes(segment_count: usize) -> Vec<(usize, usize, usize)> {
+    let mut internal_nodes = Vec::new();
+    let mut stack = vec![(0usize, segment_count)];
+    while let Some((lo, hi)) = stack.pop() {
+        if hi - lo > 1 {
+            let mid = lo + (hi - lo).div_ceil(2);
+            internal_nodes.push((lo, hi, mid));
+            stack.push((lo, mid));
+            stack.push((mid, hi));
+        }
+    }
+    internal_nodes
+}
+
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 impl ProverImpl {
     fn webgpu_hal(&self) -> Result<Rc<WebGpuHal>> {
@@ -249,8 +299,74 @@ impl ProverImpl {
         // N+1's witgen phase starts, i.e. before segment N's receipt
         // exists. Empty in every browser fixture; noted for future hook
         // users.
-        let mut segments = Vec::new();
+        // M7b/M7c: early lifts under the segment phase. A lift's only
+        // input is one finished SegmentReceipt, and lifting is the leaf
+        // tier of the composite_to_succinct join tree — so for Succinct
+        // receipts ONE dedicated recursion device lifts segment i the
+        // moment commit(i) lands, instead of idling until the whole
+        // segment phase ends. Only non-final segments qualify: the final
+        // segment's claim gets the session output merged after this loop.
+        //
+        // Scheduling physics (measured on xgboost, 11 segments,
+        // 2026-07-04):
+        // - M7a is the prerequisite — recursion preflight/witgen/verify
+        //   CPU runs on pool workers, so an in-flight lift no longer
+        //   blocks this thread's readback callbacks mid-commit (the M6d
+        //   iteration-1 starvation).
+        // - Width is capped at ONE early proof at a time, measured twice:
+        //   two concurrent lifts hid 12.0 s of span but stretched the
+        //   segment window 6.9 -> 9.8 s (xgboost 14695 vs 14348 ms at
+        //   width 1); adding the second device back as a join-only worker
+        //   collapsed the post-segment tail 5.0 -> 3.3 s but stretched
+        //   the window to 11.1 s (14554 ms) with gpu_idle_ratio DOWN
+        //   (0.30 -> 0.22) — a second concurrent recursion proof costs
+        //   more than it hides, part un-offloaded main-thread CPU (zkp
+        //   transcript + FRI continuations, ~0.2 s/proof), part physical
+        //   GPU contention with the commit kernels. One lift device
+        //   (cadence ~0.7 s vs segment cadence ~0.9 s) is the measured
+        //   optimum of this machinery family.
+        // - Early futures only advance while an await polls them, so both
+        //   pipeline awaits below drive `early_tasks` alongside the main
+        //   future via `future::select`; anything still in flight when
+        //   the loop ends is drained before the keccak phase claims the
+        //   recursion devices. Unstarted leftovers seed the join-tree
+        //   scheduler in composite_to_succinct.
+        use futures::future::FutureExt;
+        use futures::stream::{FuturesUnordered, StreamExt};
+        type EarlyTask<'a> = std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<(
+                            (usize, usize),
+                            SuccinctReceipt<ReceiptClaim>,
+                            Rc<WebGpuHal>,
+                        )>,
+                    > + 'a,
+            >,
+        >;
         let segment_count = session.segments.len();
+        let early_enabled = self.opts.receipt_kind == ReceiptKind::Succinct
+            && segment_count > 1
+            && !self.webgpu_recursion_hals.is_empty();
+        let mut early_tasks: FuturesUnordered<EarlyTask<'_>> = FuturesUnordered::new();
+        let mut early_done: BTreeMap<(usize, usize), SuccinctReceipt<ReceiptClaim>> =
+            BTreeMap::new();
+        let mut early_spawned: HashSet<(usize, usize)> = HashSet::new();
+        let mut lift_queue: VecDeque<(usize, SegmentReceipt)> = VecDeque::new();
+        let mut lift_hal: Option<Rc<WebGpuHal>> = if early_enabled {
+            self.webgpu_recursion_hals.first().cloned()
+        } else {
+            None
+        };
+        let spawn_lift = |hal: Rc<WebGpuHal>, index: usize, seg: SegmentReceipt| {
+            risc0_zkp::hal::webgpu::with_authoritative_context(hal.clone(), async move {
+                let lifted = self.lift_async_on(&seg, hal.clone()).await?;
+                Ok(((index, index + 1), lifted, hal))
+            })
+            .boxed_local()
+        };
+
+        let mut segments = Vec::new();
         let mut staged = None;
         for index in 0..segment_count {
             let current = match staged.take() {
@@ -263,7 +379,7 @@ impl ProverImpl {
                     .await?
                 }
             };
-            if index + 1 < segment_count {
+            let receipt = if index + 1 < segment_count {
                 let hal = self.webgpu_hal()?;
                 let commit_fut = risc0_zkp::hal::webgpu::with_authoritative_context(
                     hal.clone(),
@@ -273,17 +389,82 @@ impl ProverImpl {
                     hal,
                     self.segment_witgen_stage_async(session, index + 1),
                 );
-                let (receipt, next) = futures::future::try_join(commit_fut, witgen_fut).await?;
-                segments.push(receipt);
+                let mut main = Box::pin(futures::future::try_join(commit_fut, witgen_fut));
+                let (receipt, next) = loop {
+                    if early_tasks.is_empty() {
+                        break main.await?;
+                    }
+                    match futures::future::select(main, early_tasks.select_next_some()).await {
+                        futures::future::Either::Left((joined, _early_next)) => break joined?,
+                        futures::future::Either::Right((completed, main_rest)) => {
+                            main = main_rest;
+                            let (node, early_receipt, hal) = completed?;
+                            early_done.insert(node, early_receipt);
+                            match lift_queue.pop_front() {
+                                Some((qi, qseg)) => {
+                                    early_spawned.insert((qi, qi + 1));
+                                    early_tasks.push(spawn_lift(hal, qi, qseg));
+                                }
+                                None => lift_hal = Some(hal),
+                            }
+                        }
+                    }
+                };
                 staged = Some(next);
+                receipt
             } else {
-                segments.push(
-                    risc0_zkp::hal::webgpu::with_authoritative_context(
-                        self.webgpu_hal()?,
-                        self.segment_commit_stage_async(ctx, session, current),
-                    )
-                    .await?,
-                );
+                let mut main = Box::pin(risc0_zkp::hal::webgpu::with_authoritative_context(
+                    self.webgpu_hal()?,
+                    self.segment_commit_stage_async(ctx, session, current),
+                ));
+                loop {
+                    if early_tasks.is_empty() {
+                        break main.await?;
+                    }
+                    match futures::future::select(main, early_tasks.select_next_some()).await {
+                        futures::future::Either::Left((receipt, _early_next)) => break receipt?,
+                        futures::future::Either::Right((completed, main_rest)) => {
+                            main = main_rest;
+                            let (node, early_receipt, hal) = completed?;
+                            early_done.insert(node, early_receipt);
+                            match lift_queue.pop_front() {
+                                Some((qi, qseg)) => {
+                                    early_spawned.insert((qi, qi + 1));
+                                    early_tasks.push(spawn_lift(hal, qi, qseg));
+                                }
+                                None => lift_hal = Some(hal),
+                            }
+                        }
+                    }
+                }
+            };
+            if early_enabled && index + 1 < segment_count {
+                lift_queue.push_back((index, receipt.clone()));
+                if let Some(hal) = lift_hal.take() {
+                    let (qi, qseg) = lift_queue.pop_front().expect("just queued a lift");
+                    early_spawned.insert((qi, qi + 1));
+                    early_tasks.push(spawn_lift(hal, qi, qseg));
+                }
+            }
+            segments.push(receipt);
+        }
+
+        if early_enabled {
+            // Await in-flight early tasks so the recursion devices are
+            // free for the keccak phase (and so the futures keep being
+            // polled at all — nothing after this point drives
+            // `early_tasks`). No new work is dispatched here; unstarted
+            // leftovers seed the join-tree scheduler, which finishes them
+            // with the full device set.
+            let _timer = WebGpuStageTimer::new(format!(
+                "early_task_drain in_flight={} queued_lifts={} done_nodes={}",
+                early_tasks.len(),
+                lift_queue.len(),
+                early_done.len()
+            ));
+            while let Some(completed) = early_tasks.next().await {
+                let (node, early_receipt, _hal) = completed?;
+                early_done.insert(node, early_receipt);
             }
         }
 
@@ -477,7 +658,9 @@ impl ProverImpl {
         );
 
         let _timer = WebGpuStageTimer::new("composite_to_succinct_async");
-        let succinct_receipt = self.composite_to_succinct_async(&composite_receipt).await?;
+        let succinct_receipt = self
+            .composite_to_succinct_with_predone_async(&composite_receipt, early_spawned, early_done)
+            .await?;
         drop(_timer);
         let wall_ms: f64 = js_sys::Date::now() - prove_session_wall_start;
         let active_ms: f64 = self
@@ -653,10 +836,11 @@ impl ProverImpl {
                 WebGpuStageTimer::new(format!("lift_prove_async segment_index={}", receipt.index));
             crate::host::recursion::prove::lift_webgpu(receipt, hal).await?
         };
-        {
+        let receipt = {
             let _timer = WebGpuStageTimer::new("verify_lift");
-            receipt.verify_integrity().context("verify lift")?;
-        }
+            verify_integrity_offloaded(receipt, |r| r.verify_integrity().context("verify lift"))
+                .await?
+        };
         Ok(receipt)
     }
 
@@ -671,10 +855,11 @@ impl ProverImpl {
             let _timer = WebGpuStageTimer::new("join_prove_async");
             crate::host::recursion::prove::join_webgpu(a, b, hal).await?
         };
-        {
+        let receipt = {
             let _timer = WebGpuStageTimer::new("verify_join");
-            receipt.verify_integrity().context("verify join")?;
-        }
+            verify_integrity_offloaded(receipt, |r| r.verify_integrity().context("verify join"))
+                .await?
+        };
         Ok(receipt)
     }
 
@@ -693,10 +878,11 @@ impl ProverImpl {
             )
             .await?
         };
-        {
+        let receipt = {
             let _timer = WebGpuStageTimer::new("verify_resolve");
-            receipt.verify_integrity().context("verify resolve")?;
-        }
+            verify_integrity_offloaded(receipt, |r| r.verify_integrity().context("verify resolve"))
+                .await?
+        };
         Ok(receipt)
     }
 
@@ -711,10 +897,11 @@ impl ProverImpl {
             let _timer = WebGpuStageTimer::new("union_prove_async");
             crate::host::recursion::prove::union_webgpu(a, b, self.webgpu_hal()?).await?
         };
-        {
+        let receipt = {
             let _timer = WebGpuStageTimer::new("verify_union");
-            receipt.verify_integrity().context("verify union")?;
-        }
+            verify_integrity_offloaded(receipt, |r| r.verify_integrity().context("verify union"))
+                .await?
+        };
         Ok(receipt.into_unknown())
     }
 
@@ -756,6 +943,27 @@ impl ProverImpl {
         &self,
         composite_receipt: &CompositeReceipt,
     ) -> Result<SuccinctReceipt<ReceiptClaim>> {
+        self.composite_to_succinct_with_predone_async(
+            composite_receipt,
+            HashSet::new(),
+            BTreeMap::new(),
+        )
+        .await
+    }
+
+    /// [`Self::composite_to_succinct_async`] with join-tree nodes that
+    /// were already proven (M7: early lifts run under the segment phase).
+    /// `predone` holds finished, unconsumed node receipts; `prespawned`
+    /// additionally covers nodes whose receipts were already consumed.
+    /// Today the early machinery only produces leaves, which exist in any
+    /// tree shape; if it ever produces internal nodes again, it must use
+    /// the same [`join_tree_internal_nodes`] shape as this scheduler.
+    pub(crate) async fn composite_to_succinct_with_predone_async(
+        &self,
+        composite_receipt: &CompositeReceipt,
+        prespawned: HashSet<(usize, usize)>,
+        predone: BTreeMap<(usize, usize), SuccinctReceipt<ReceiptClaim>>,
+    ) -> Result<SuccinctReceipt<ReceiptClaim>> {
         // M3c: run the lift/join phase as a balanced join tree under a
         // width-2 scheduler instead of a serial left fold.
         //
@@ -781,18 +989,7 @@ impl ProverImpl {
             "malformed composite receipt has no continuation segment receipts"
         );
 
-        // Balanced tree over the segment range [0, N): every internal
-        // node (lo, hi) splits at the midpoint into (lo, mid) + (mid, hi).
-        let mut internal_nodes = Vec::new();
-        let mut stack = vec![(0usize, segment_count)];
-        while let Some((lo, hi)) = stack.pop() {
-            if hi - lo > 1 {
-                let mid = lo + (hi - lo).div_ceil(2);
-                internal_nodes.push((lo, hi));
-                stack.push((lo, mid));
-                stack.push((mid, hi));
-            }
-        }
+        let internal_nodes = join_tree_internal_nodes(segment_count);
 
         // One HAL per in-flight proof. A readback (`mapAsync`) waits for
         // everything previously submitted on its device queue, so proofs
@@ -816,6 +1013,23 @@ impl ProverImpl {
         type ProofResult = Result<(usize, usize, SuccinctReceipt<ReceiptClaim>, Rc<WebGpuHal>)>;
         let mut done: BTreeMap<(usize, usize), SuccinctReceipt<ReceiptClaim>> = BTreeMap::new();
         let mut spawned: HashSet<(usize, usize)> = HashSet::new();
+        for &(lo, hi) in &prespawned {
+            ensure!(
+                hi <= segment_count
+                    && (hi == lo + 1 || internal_nodes.iter().any(|&(l, h, _)| (l, h) == (lo, hi))),
+                "pre-proven node ({lo}, {hi}) is not part of the join tree over {segment_count} segments"
+            );
+        }
+        for (node, receipt) in predone {
+            ensure!(
+                prespawned.contains(&node),
+                "pre-proven node ({}, {}) missing from the prespawned set",
+                node.0,
+                node.1
+            );
+            done.insert(node, receipt);
+        }
+        spawned.extend(prespawned);
         let mut next_leaf = 0usize;
         let mut in_flight: FuturesUnordered<
             std::pin::Pin<Box<dyn std::future::Future<Output = ProofResult> + '_>>,
@@ -823,17 +1037,19 @@ impl ProverImpl {
 
         loop {
             while !free_hals.is_empty() {
+                // Skip leaves that arrived pre-lifted.
+                while next_leaf < segment_count && spawned.contains(&(next_leaf, next_leaf + 1)) {
+                    next_leaf += 1;
+                }
                 // Prefer ready joins: they release receipts and advance
                 // the tree toward the root; lifts are the slack work.
-                let ready_join = internal_nodes.iter().copied().find(|&(lo, hi)| {
-                    let mid = lo + (hi - lo).div_ceil(2);
+                let ready_join = internal_nodes.iter().copied().find(|&(lo, hi, mid)| {
                     !spawned.contains(&(lo, hi))
                         && done.contains_key(&(lo, mid))
                         && done.contains_key(&(mid, hi))
                 });
-                if let Some((lo, hi)) = ready_join {
+                if let Some((lo, hi, mid)) = ready_join {
                     spawned.insert((lo, hi));
-                    let mid = lo + (hi - lo).div_ceil(2);
                     let left = done.remove(&(lo, mid)).expect("checked ready join left");
                     let right = done.remove(&(mid, hi)).expect("checked ready join right");
                     let proof_hal = free_hals.pop().expect("checked non-empty free hal list");

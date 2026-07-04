@@ -26,6 +26,9 @@ tracing = { version = "0.1", default-features = false, features = [
 metal = { workspace = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+futures = { version = "0.3", default-features = false, features = [
+  "alloc",
+], optional = true }
 js-sys = { version = "0.3", optional = true }
 
 [target.'cfg(not(target_os = "zkvm"))'.dependencies]
@@ -81,4 +84,4 @@ prove = [
 ]
 std = ["risc0-zkp/std"]
 test = []
-webgpu = ["prove", "risc0-zkp/webgpu", "dep:js-sys"]
+webgpu = ["prove", "risc0-zkp/webgpu", "dep:futures", "dep:js-sys"]

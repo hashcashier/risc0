@@ -721,6 +721,22 @@ pub(crate) fn generate_witness(
     result
 }
 
+fn exec_plan_on_slices(
+    mode: StepMode,
+    total_cycles: usize,
+    preflight: &RawPreflightTrace,
+    byte_reads: &BTreeMap<usize, Vec<u32>>,
+    ctrl: &[Fp],
+    global: &mut [Fp],
+    data: &mut [Fp],
+) -> Result<WomGpuVerifyPlan> {
+    let mut storage = MachineStorage::new(preflight);
+    let mut ctx = MachineContext::new(preflight, byte_reads, &mut storage);
+    let mut args = KernelArgs::exec(ctrl, global, data);
+    ctx.do_step_exec(mode, total_cycles, &mut args)
+        .and_then(|_| ctx.gpu_verify_plan(total_cycles))
+}
+
 pub(crate) fn generate_witness_exec_plan(
     mode: StepMode,
     total_cycles: u32,
@@ -735,13 +751,50 @@ pub(crate) fn generate_witness_exec_plan(
     ctrl.view(|ctrl| {
         global.view_mut(|global| {
             data.view_mut(|data| {
-                let mut storage = MachineStorage::new(preflight);
-                let mut ctx = MachineContext::new(preflight, byte_reads, &mut storage);
-                let mut args = KernelArgs::exec(ctrl, global, data);
-                result = Some(
-                    ctx.do_step_exec(mode, total_cycles, &mut args)
-                        .and_then(|_| ctx.gpu_verify_plan(total_cycles)),
-                );
+                result = Some(exec_plan_on_slices(
+                    mode,
+                    total_cycles,
+                    preflight,
+                    byte_reads,
+                    ctrl,
+                    global,
+                    data,
+                ));
+            });
+        });
+    });
+    result.expect("recursion exec-plan witness generation did not run")
+}
+
+/// M7a: exec-plan witness pass over `Send + Sync` CPU shadow handles, for a
+/// pool worker. Mirrors [`generate_witness_exec_plan`] exactly — the caller
+/// holds the `begin/finish_cpu_shadow_offload` flag discipline on the owning
+/// `WebGpuBuffer`s around this call (see the rv32im M6d precedent,
+/// `generate_witness_on_shadows`).
+pub(crate) fn generate_witness_exec_plan_on_shadows(
+    mode: StepMode,
+    total_cycles: u32,
+    preflight: &RawPreflightTrace,
+    byte_reads: &BTreeMap<usize, Vec<u32>>,
+    ctrl: &risc0_zkp::hal::cpu::CpuBuffer<Fp>,
+    data: &risc0_zkp::hal::cpu::CpuBuffer<Fp>,
+    global: &risc0_zkp::hal::cpu::CpuBuffer<Fp>,
+) -> Result<WomGpuVerifyPlan> {
+    use risc0_zkp::hal::Buffer as _;
+    let total_cycles = total_cycles as usize;
+    let mut result = None;
+    ctrl.view(|ctrl| {
+        global.view_mut(|global| {
+            data.view_mut(|data| {
+                result = Some(exec_plan_on_slices(
+                    mode,
+                    total_cycles,
+                    preflight,
+                    byte_reads,
+                    ctrl,
+                    global,
+                    data,
+                ));
             });
         });
     });
