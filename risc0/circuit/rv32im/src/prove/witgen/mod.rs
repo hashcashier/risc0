@@ -179,17 +179,33 @@ where
         circuit_hal
             .generate_witness(mode, &trace, &global, &data)
             .context("witness generation failure")?;
+        Ok(Self::assemble_after_witgen(
+            hal, trace, cycles, global, code, data,
+        ))
+    }
+
+    /// M6d: the post-witgen half of [`Self::populate_from_parts`] —
+    /// zeroize + accum allocation + struct assembly — for async callers
+    /// that ran the witness pass out of line (pool-offloaded witgen).
+    pub fn assemble_after_witgen(
+        hal: &H,
+        trace: PreflightTrace,
+        cycles: usize,
+        global: MetaBuffer<H>,
+        code: MetaBuffer<H>,
+        data: MetaBuffer<H>,
+    ) -> Self {
         hal.eltwise_zeroize_elem(&global.buf);
         hal.eltwise_zeroize_elem(&data.buf);
         let accum = MetaBuffer::new("accum", hal, cycles, REGCOUNT_ACCUM, true);
-        Ok(Self {
+        Self {
             cycles,
             global,
             code,
             data,
             accum,
             trace,
-        })
+        }
     }
 
     /// SP7 iter 6d-g step 6.2.8: accessors so async callers can pull

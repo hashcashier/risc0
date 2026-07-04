@@ -1102,7 +1102,7 @@ fn eqz_elided() -> bool {
     EQZ_ELIDED.load(Ordering::Relaxed)
 }
 
-struct EqzElisionGuard {
+pub(crate) struct EqzElisionGuard {
     previous: bool,
 }
 
@@ -1112,9 +1112,18 @@ impl Drop for EqzElisionGuard {
     }
 }
 
-pub(crate) fn with_eqz_elided<R>(f: impl FnOnce() -> R) -> R {
+/// M6d: guard form of [`with_eqz_elided`] for the pool-offloaded witgen
+/// pass, where elision must stay on across an `.await` rather than a
+/// closure. Every taker sets the flag true and restores its previous
+/// value, so overlapping guard lifetimes (an offloaded witgen spanning
+/// another segment's blocking accum scope) compose correctly.
+pub(crate) fn begin_eqz_elided() -> EqzElisionGuard {
     let previous = EQZ_ELIDED.swap(true, Ordering::AcqRel);
-    let _guard = EqzElisionGuard { previous };
+    EqzElisionGuard { previous }
+}
+
+pub(crate) fn with_eqz_elided<R>(f: impl FnOnce() -> R) -> R {
+    let _guard = begin_eqz_elided();
     f()
 }
 
@@ -1291,6 +1300,7 @@ fn divide_rv32im(mut numer: u32, mut denom: u32, sign_type: u32) -> (u32, u32) {
 
 pub(crate) fn generate_witness<H>(
     mode: StepMode,
+    replace_arm_mask: u16,
     preflight: &PreflightTrace,
     global: &MetaBuffer<H>,
     data: &MetaBuffer<H>,
@@ -1303,13 +1313,46 @@ where
         global.buf.view(|global_view| {
             let data = BufferRow::mutable(data_view, data.rows, data.cols, data.checked);
             let global = BufferRow::global(global_view, global.rows, global.cols, global.checked);
-            result = run_witness_steps(mode, preflight, data, global);
+            result = run_witness_steps(mode, replace_arm_mask, preflight, data, global);
+        });
+    });
+    result
+}
+
+/// M6d: [`generate_witness`] over bare `CpuBuffer` shadow handles, for the
+/// pool-offloaded witgen pass. `CpuBuffer` is `Send + Sync`, so a rayon
+/// worker can run this while the main wasm thread keeps servicing another
+/// segment's readback callbacks. View discipline matches
+/// `generate_witness`: mutable pass over `data`, read view of `global`;
+/// the caller applies the `WebGpuBuffer` dirty-flag halves around it.
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn generate_witness_on_shadows(
+    mode: StepMode,
+    replace_arm_mask: u16,
+    preflight: &PreflightTrace,
+    global: &risc0_zkp::hal::cpu::CpuBuffer<Val>,
+    global_rows: usize,
+    global_cols: usize,
+    global_checked: bool,
+    data: &risc0_zkp::hal::cpu::CpuBuffer<Val>,
+    data_rows: usize,
+    data_cols: usize,
+    data_checked: bool,
+) -> Result<()> {
+    let mut result = Ok(());
+    data.view_mut(|data_view| {
+        global.view(|global_view| {
+            let data = BufferRow::mutable(data_view, data_rows, data_cols, data_checked);
+            let global = BufferRow::global(global_view, global_rows, global_cols, global_checked);
+            result = run_witness_steps(mode, replace_arm_mask, preflight, data, global);
         });
     });
     result
 }
 
 pub(crate) fn step_accum<H>(
+    replace_arm_mask: u16,
     preflight: &PreflightTrace,
     data: &MetaBuffer<H>,
     accum: &MetaBuffer<H>,
@@ -1319,10 +1362,11 @@ pub(crate) fn step_accum<H>(
 where
     H: risc0_zkp::hal::Hal<Field = CircuitField, Elem = Val, ExtElem = ExtVal>,
 {
-    step_accum_inner(preflight, data, accum, global, mix, true)
+    step_accum_inner(replace_arm_mask, preflight, data, accum, global, mix, true)
 }
 
 pub(crate) fn repair_witgen_gpu_replace_shadow_for_accum<H>(
+    replace_arm_mask: u16,
     preflight: &PreflightTrace,
     global: &MetaBuffer<H>,
     data: &MetaBuffer<H>,
@@ -1347,7 +1391,7 @@ where
             for cycle in 0..preflight.cycles.len() {
                 let major = preflight.cycles[cycle].major;
                 let minor = preflight.cycles[cycle].minor;
-                if !cycle_short_circuited(major, minor) {
+                if !cycle_short_circuited(replace_arm_mask, major, minor) {
                     continue;
                 }
                 let ctx = ExecContext::new(preflight, &tables, cycle);
@@ -1371,6 +1415,7 @@ where
 }
 
 pub(crate) fn step_accum_without_machine_column_carry<H>(
+    replace_arm_mask: u16,
     preflight: &PreflightTrace,
     data: &MetaBuffer<H>,
     accum: &MetaBuffer<H>,
@@ -1380,7 +1425,7 @@ pub(crate) fn step_accum_without_machine_column_carry<H>(
 where
     H: risc0_zkp::hal::Hal<Field = CircuitField, Elem = Val, ExtElem = ExtVal>,
 {
-    step_accum_inner(preflight, data, accum, global, mix, false)
+    step_accum_inner(replace_arm_mask, preflight, data, accum, global, mix, false)
 }
 
 pub(crate) fn step_accum_without_major_or_postprocess<H>(
@@ -1506,6 +1551,7 @@ where
 }
 
 fn step_accum_inner<H>(
+    replace_arm_mask: u16,
     preflight: &PreflightTrace,
     data: &MetaBuffer<H>,
     accum: &MetaBuffer<H>,
@@ -1530,6 +1576,7 @@ where
                         BufferRow::global(global_view, global.rows, global.cols, global.checked);
                     let mix = BufferRow::global(mix_view, mix.rows, mix.cols, mix.checked);
                     result = run_accum_steps(
+                        replace_arm_mask,
                         preflight,
                         data,
                         accum,
@@ -1546,6 +1593,7 @@ where
 
 fn run_witness_steps(
     mode: StepMode,
+    replace_arm_mask: u16,
     preflight: &PreflightTrace,
     data: BufferRow<Val>,
     global: BufferRow<Val>,
@@ -1562,27 +1610,27 @@ fn run_witness_steps(
             // independent — preflight pre-resolves cross-cycle data flow —
             // and the phase boundary is the barrier between lookup-count
             // accumulation and table-row emission reading final counts.
-            (0..split)
-                .into_par_iter()
-                .try_for_each(|cycle| step_exec(preflight, &tables, cycle, data, global))?;
-            (split..last_cycle)
-                .into_par_iter()
-                .try_for_each(|cycle| step_exec(preflight, &tables, cycle, data, global))?;
+            (0..split).into_par_iter().try_for_each(|cycle| {
+                step_exec(replace_arm_mask, preflight, &tables, cycle, data, global)
+            })?;
+            (split..last_cycle).into_par_iter().try_for_each(|cycle| {
+                step_exec(replace_arm_mask, preflight, &tables, cycle, data, global)
+            })?;
         }
         StepMode::SeqForward => {
             for cycle in 0..split {
-                step_exec(preflight, &tables, cycle, data, global)?;
+                step_exec(replace_arm_mask, preflight, &tables, cycle, data, global)?;
             }
             for cycle in split..last_cycle {
-                step_exec(preflight, &tables, cycle, data, global)?;
+                step_exec(replace_arm_mask, preflight, &tables, cycle, data, global)?;
             }
         }
         StepMode::SeqReverse => {
             for cycle in (0..split).rev() {
-                step_exec(preflight, &tables, cycle, data, global)?;
+                step_exec(replace_arm_mask, preflight, &tables, cycle, data, global)?;
             }
             for cycle in (split..last_cycle).rev() {
-                step_exec(preflight, &tables, cycle, data, global)?;
+                step_exec(replace_arm_mask, preflight, &tables, cycle, data, global)?;
             }
         }
     }
@@ -1668,6 +1716,7 @@ fn run_accum_raw_steps_skip_replaced_misc0_or_majors(
 }
 
 fn run_accum_steps(
+    replace_arm_mask: u16,
     preflight: &PreflightTrace,
     data: BufferRow<Val>,
     accum: BufferRow<Val>,
@@ -1693,7 +1742,7 @@ fn run_accum_steps(
     (0..last_cycle).into_par_iter().try_for_each(|cycle| {
         let major = preflight.cycles[cycle].major;
         let minor = preflight.cycles[cycle].minor;
-        if direct_misc0_enabled && cycle_short_circuited(major, minor) && major == 0 {
+        if direct_misc0_enabled && cycle_short_circuited(replace_arm_mask, major, minor) && major == 0 {
             direct_misc0_accum_step(cycle, data, accum, mix).map_err(|e| {
                 anyhow::anyhow!(
                     "direct MISC0 step_TopAccum failed at cycle={cycle} major={major} minor={minor}: {e}"
@@ -1922,10 +1971,14 @@ fn apply_machine_column_carry(accum: BufferRow<Val>, last_cycle: usize) {
 }
 
 // SP7 iter-6d-g step 6.2.3: per-segment arm mask. Bit k set => major
-// opcode k's cycles short-circuit step_Top. WebGPU HAL sets this before
-// `generate_witness` runs based on which per-arm GPU kernels actually
-// dispatched this segment (kernel ready + cycles > 0). CPU HAL leaves
-// it 0 (no short-circuit ever).
+// opcode k's cycles short-circuit step_Top. M6d: this global is a
+// DIAGNOSTICS MIRROR only — it records the mask most recently computed by
+// `pre_witgen_dispatch_async` so tests can assert which arms dispatched.
+// The correctness-bearing copy lives per prove on `WebGpuCircuitHal`
+// (`witgen_replace_arm_mask` Cell) and flows into rust_steps as an
+// explicit parameter, because the M6d segment pipeline overlaps segment
+// N+1's witgen (which computes ITS mask) with segment N's accum phase
+// (which still reads N's mask). CPU HAL passes 0 (no short-circuit ever).
 static WITGEN_GPU_REPLACE_ARM_MASK: AtomicU16 = AtomicU16::new(0);
 const WITGEN_GPU_MEM0_REPLACE_MINOR_MASK_ALL: u16 = 0x001f;
 static WITGEN_GPU_MEM0_REPLACE_MINOR_MASK: AtomicU16 =
@@ -1998,12 +2051,11 @@ pub fn witgen_gpu_direct_misc0_accum_rows() -> usize {
     WITGEN_GPU_DIRECT_MISC0_ACCUM_ROWS.load(Ordering::Acquire)
 }
 
-fn cycle_short_circuited(major: u8, minor: u8) -> bool {
+fn cycle_short_circuited(replace_arm_mask: u16, major: u8, minor: u8) -> bool {
     if major >= 13 {
         return false;
     }
-    let mask = WITGEN_GPU_REPLACE_ARM_MASK.load(Ordering::Acquire);
-    if (mask & (1u16 << major)) == 0 {
+    if (replace_arm_mask & (1u16 << major)) == 0 {
         return false;
     }
     (major == 0 && misc0_simple_short_circuit_minor(minor))
@@ -2018,90 +2070,80 @@ mod tests {
 
     #[test]
     fn misc0_arithmetic_and_bitwise_cycles_are_short_circuitable_when_arm_mask_enabled() {
-        set_witgen_gpu_replace_arm_mask(1);
         for minor in [0, 1, 2, 3, 4, 7] {
             assert!(
-                cycle_short_circuited(0, minor),
+                cycle_short_circuited(1, 0, minor),
                 "MISC0 minor {minor} should be covered by GPU-witgen replacement"
             );
         }
         for minor in [5, 6] {
             assert!(
-                !cycle_short_circuited(0, minor),
+                !cycle_short_circuited(1, 0, minor),
                 "MISC0 compare minor {minor} remains CPU-covered because sparse shadow repair is wall-negative"
             );
         }
-        set_witgen_gpu_replace_arm_mask(0);
     }
 
     #[test]
     fn misc2_cycles_are_short_circuitable_when_arm_mask_enabled() {
-        set_witgen_gpu_replace_arm_mask(1u16 << 2);
         for minor in [0, 2, 3, 4, 5, 6, 7] {
             assert!(
-                cycle_short_circuited(2, minor),
+                cycle_short_circuited(1u16 << 2, 2, minor),
                 "MISC2 minor {minor} should be covered by GPU-witgen replacement"
             );
         }
         assert!(
-            !cycle_short_circuited(2, 1),
+            !cycle_short_circuited(1u16 << 2, 2, 1),
             "MISC2 minor 1 remains CPU-covered until its nested source-reg mux is complete"
         );
-        set_witgen_gpu_replace_arm_mask(0);
     }
 
     #[test]
     fn mem0_load_cycles_are_short_circuitable_when_arm_mask_enabled() {
-        set_witgen_gpu_replace_arm_mask(1u16 << 5);
         for minor in [0, 1, 2, 3, 4] {
             assert!(
-                cycle_short_circuited(5, minor),
+                cycle_short_circuited(1u16 << 5, 5, minor),
                 "MEM0 minor {minor} should be covered by GPU-witgen replacement"
             );
         }
         for minor in [5, 6, 7] {
             assert!(
-                !cycle_short_circuited(5, minor),
+                !cycle_short_circuited(1u16 << 5, 5, minor),
                 "MEM0 minor {minor} should remain CPU-covered"
             );
         }
-        set_witgen_gpu_replace_arm_mask(0);
     }
 
     #[test]
     fn mem0_minor_mask_filters_short_circuitable_load_cycles() {
         set_witgen_gpu_mem0_replace_minor_mask(1u16 << 2);
-        set_witgen_gpu_replace_arm_mask(1u16 << 5);
         assert!(
-            cycle_short_circuited(5, 2),
+            cycle_short_circuited(1u16 << 5, 5, 2),
             "MEM0 LW minor should remain short-circuitable when selected"
         );
         for minor in [0, 1, 3, 4, 5, 6, 7] {
             assert!(
-                !cycle_short_circuited(5, minor),
+                !cycle_short_circuited(1u16 << 5, 5, minor),
                 "MEM0 minor {minor} should stay CPU-covered when the LW-only mask is active"
             );
         }
-        set_witgen_gpu_replace_arm_mask(0);
         set_witgen_gpu_mem0_replace_minor_mask(0x001f);
     }
 
     #[test]
     fn mem1_store_cycles_are_short_circuitable_when_arm_mask_enabled() {
-        set_witgen_gpu_replace_arm_mask(1u16 << 6);
         for minor in [0, 1, 2] {
             assert!(
-                cycle_short_circuited(6, minor),
+                cycle_short_circuited(1u16 << 6, 6, minor),
                 "MEM1 minor {minor} should be covered by GPU-witgen replacement"
             );
         }
         for minor in [3, 4, 5, 6, 7] {
             assert!(
-                !cycle_short_circuited(6, minor),
+                !cycle_short_circuited(1u16 << 6, 6, minor),
                 "illegal MEM1 minor {minor} should remain CPU-covered"
             );
         }
-        set_witgen_gpu_replace_arm_mask(0);
     }
 
     #[test]
@@ -2205,6 +2247,7 @@ mod tests {
 }
 
 fn step_exec(
+    replace_arm_mask: u16,
     preflight: &PreflightTrace,
     tables: &LookupTables,
     cycle: usize,
@@ -2213,7 +2256,7 @@ fn step_exec(
 ) -> Result<()> {
     let major = preflight.cycles[cycle].major;
     let minor = preflight.cycles[cycle].minor;
-    if cycle_short_circuited(major, minor) {
+    if cycle_short_circuited(replace_arm_mask, major, minor) {
         replay_short_circuit_side_effects(preflight, tables, cycle, data)?;
         WITGEN_GPU_SHORT_CIRCUIT_CYCLES.fetch_add(1, Ordering::Relaxed);
         return Ok(());

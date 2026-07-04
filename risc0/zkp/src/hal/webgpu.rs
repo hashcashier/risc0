@@ -7958,6 +7958,40 @@ impl<T> WebGpuBuffer<T> {
             self.cpu.name()
         );
     }
+
+    /// M6d: begin a pool-offloaded mutable pass over the CPU shadow. Same
+    /// currency discipline as [`Buffer::view_mut`], but instead of running
+    /// the closure inline (which blocks this wasm thread and starves other
+    /// in-flight proofs' readback callbacks), it hands back the
+    /// `Send + Sync` [`CpuBuffer`] handle for a worker thread to mutate.
+    /// Until the worker finishes, no other access to this buffer (through
+    /// any clone) is allowed; afterwards the caller must invoke
+    /// [`Self::finish_cpu_shadow_offload_mut`] to record the CPU write,
+    /// exactly as `view_mut` would have.
+    pub fn begin_cpu_shadow_offload_mut(&self) -> CpuBuffer<T>
+    where
+        T: Clone,
+    {
+        self.assert_cpu_current("begin_cpu_shadow_offload_mut");
+        self.cpu.clone()
+    }
+
+    /// M6d: read-only counterpart of
+    /// [`Self::begin_cpu_shadow_offload_mut`]; pairs with a worker-side
+    /// `view` and needs no completion call (matching [`Buffer::view`]).
+    pub fn begin_cpu_shadow_offload(&self) -> CpuBuffer<T>
+    where
+        T: Clone,
+    {
+        self.assert_cpu_current("begin_cpu_shadow_offload");
+        self.cpu.clone()
+    }
+
+    /// M6d: complete an offloaded mutable shadow pass — the flag half of
+    /// [`Buffer::view_mut`].
+    pub fn finish_cpu_shadow_offload_mut(&self) {
+        self.mark_cpu_dirty();
+    }
 }
 
 impl WebGpuBuffer<BabyBearElem> {

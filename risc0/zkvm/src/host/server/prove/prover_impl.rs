@@ -55,6 +55,20 @@ pub(crate) const WEBGPU_DEFAULT_KECCAK_MAX_PO2: u32 = 14;
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 use risc0_zkp::hal::webgpu::WebGpuStageTimer;
 
+/// M6d: output of a segment's witgen pipeline stage, awaiting its commit
+/// stage. Carries the claim-side data the commit stage needs (the
+/// rv32im-level job consumes the circuit `PreflightResults`) plus the
+/// resolved segment so post-prove hooks fire with the same argument as
+/// the serial path did.
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+struct StagedSegmentJob {
+    job: risc0_circuit_rv32im::prove::WebGpuSegmentJob,
+    po2: u32,
+    output: Option<crate::Output>,
+    segment_index: u32,
+    segment: Segment,
+}
+
 /// An implementation of a Prover that runs locally.
 pub struct ProverImpl {
     opts: ProverOpts,
@@ -214,25 +228,62 @@ impl ProverImpl {
             "browser WebGPU async proving does not yet support PoVW receipts"
         );
 
+        // M6d: two-deep segment pipeline. A segment prove is a CPU-heavy
+        // witgen phase (preflight + buffer setup + rayon witness
+        // generation) followed by a GPU-heavy commit phase (transcript
+        // commits + eval_check + FRI, dominated by queue drains and
+        // readback waits). Segments are independent proofs, so segment
+        // N+1's witgen phase runs under segment N's commit tail —
+        // `try_join` polls both on this thread; the M5 worker pool grinds
+        // witgen while commit awaits its readbacks. Depth stays at 2: a
+        // third in-flight segment costs ~350 MB of shadows for no overlap
+        // gain (the witgen phase is the shorter stage), and commit phases
+        // never overlap each other (readbacks serialize on the one device
+        // queue anyway). Per-prove witgen state rides on the job's private
+        // circuit HAL; the zkp-level GPU-authoritative flag is isolated
+        // per stage future via `with_authoritative_context`, because the
+        // plain scope guards assume stack discipline that interleaved
+        // awaits violate.
+        //
+        // Hook ordering caveat: `on_pre_prove_segment(N+1)` fires when
+        // N+1's witgen phase starts, i.e. before segment N's receipt
+        // exists. Empty in every browser fixture; noted for future hook
+        // users.
         let mut segments = Vec::new();
-        for segment_ref in session.segments.iter() {
-            let segment = segment_ref.resolve()?;
-            for hook in &session.hooks {
-                hook.on_pre_prove_segment(&segment);
-            }
-            let _timer = WebGpuStageTimer::new(format!(
-                "prove_segment_async index={} po2={} user_cycles={}",
-                segment.index,
-                segment.po2(),
-                segment.user_cycles()
-            ));
-            let preflight_results = self.segment_preflight(&segment)?;
-            segments.push(
-                self.prove_segment_core_async(ctx, preflight_results)
+        let segment_count = session.segments.len();
+        let mut staged = None;
+        for index in 0..segment_count {
+            let current = match staged.take() {
+                Some(staged) => staged,
+                None => {
+                    risc0_zkp::hal::webgpu::with_authoritative_context(
+                        self.webgpu_hal()?,
+                        self.segment_witgen_stage_async(session, index),
+                    )
+                    .await?
+                }
+            };
+            if index + 1 < segment_count {
+                let hal = self.webgpu_hal()?;
+                let commit_fut = risc0_zkp::hal::webgpu::with_authoritative_context(
+                    hal.clone(),
+                    self.segment_commit_stage_async(ctx, session, current),
+                );
+                let witgen_fut = risc0_zkp::hal::webgpu::with_authoritative_context(
+                    hal,
+                    self.segment_witgen_stage_async(session, index + 1),
+                );
+                let (receipt, next) = futures::future::try_join(commit_fut, witgen_fut).await?;
+                segments.push(receipt);
+                staged = Some(next);
+            } else {
+                segments.push(
+                    risc0_zkp::hal::webgpu::with_authoritative_context(
+                        self.webgpu_hal()?,
+                        self.segment_commit_stage_async(ctx, session, current),
+                    )
                     .await?,
-            );
-            for hook in &session.hooks {
-                hook.on_post_prove_segment(&segment);
+                );
             }
         }
 
@@ -453,37 +504,85 @@ impl ProverImpl {
         })
     }
 
-    pub(crate) async fn prove_segment_core_async(
+    /// M6d pipeline stage A: resolve + preflight + witgen phase for one
+    /// segment. Transcript-free, so it may run while another segment's
+    /// commit stage is in flight. The witness CPU pass runs on pool
+    /// workers so this wasm thread stays free to service that commit
+    /// stage's readback callbacks; offloading the (~30 ms) preflight
+    /// replay too was probed on 2026-07-04 and measured wall-neutral
+    /// (xgboost 15267 -> 15532 ms), so it stays inline.
+    async fn segment_witgen_stage_async(
+        &self,
+        session: &Session,
+        index: usize,
+    ) -> Result<StagedSegmentJob> {
+        let segment = session.segments[index].resolve()?;
+        for hook in &session.hooks {
+            hook.on_pre_prove_segment(&segment);
+        }
+        let _timer = WebGpuStageTimer::new(format!(
+            "segment_witgen_phase index={} po2={} user_cycles={}",
+            segment.index,
+            segment.po2(),
+            segment.user_cycles()
+        ));
+        let preflight_results = self.segment_preflight(&segment)?;
+        let po2 = preflight_results.inner.po2();
+        let job = risc0_circuit_rv32im::prove::webgpu_segment_witgen_phase(
+            self.webgpu_hal()?,
+            preflight_results.inner,
+        )
+        .await?;
+        Ok(StagedSegmentJob {
+            job,
+            po2,
+            output: preflight_results.output,
+            segment_index: preflight_results.segment_index,
+            segment,
+        })
+    }
+
+    /// M6d pipeline stage B: transcript commits + finalize + receipt
+    /// decode + verify for a staged segment, then post-prove hooks.
+    async fn segment_commit_stage_async(
         &self,
         ctx: &VerifierContext,
-        preflight_results: PreflightResults,
+        session: &Session,
+        staged: StagedSegmentJob,
     ) -> Result<SegmentReceipt> {
-        tracing::debug!("prove_segment_core_async");
+        let StagedSegmentJob {
+            job,
+            po2,
+            output,
+            segment_index,
+            segment,
+        } = staged;
+        let receipt = self
+            .finish_segment_commit_async(ctx, job, po2, output, segment_index)
+            .await?;
+        for hook in &session.hooks {
+            hook.on_post_prove_segment(&segment);
+        }
+        Ok(receipt)
+    }
+
+    /// Commit phase + receipt decode + verify. Shared by the M6d segment
+    /// pipeline and the SP6d pool's `prove_segment_core_async` (whose
+    /// callers run session hooks themselves).
+    async fn finish_segment_commit_async(
+        &self,
+        ctx: &VerifierContext,
+        job: risc0_circuit_rv32im::prove::WebGpuSegmentJob,
+        po2: u32,
+        output: Option<crate::Output>,
+        segment_index: u32,
+    ) -> Result<SegmentReceipt> {
         let _timer = WebGpuStageTimer::new(format!(
-            "prove_segment_core_async index={} po2={}",
-            preflight_results.segment_index,
-            preflight_results.inner.po2()
+            "segment_commit_phase index={segment_index} po2={po2}"
         ));
-
-        ensure!(
-            self.opts.hashfn == "poseidon2",
-            "provided `ProverOpts` has unsupported `hashfn` value of \"{}\"; \
-            supported `hashfn` values are: \"poseidon2\".",
-            &self.opts.hashfn
-        );
-
-        let po2 = preflight_results.inner.po2();
-        let seal = {
-            let _timer = WebGpuStageTimer::new(format!(
-                "segment_prove_core_async index={} po2={po2}",
-                preflight_results.segment_index
-            ));
-            self.segment_prover()?
-                .prove_core_async(preflight_results.inner)
-                .await?
-        };
+        let seal = risc0_circuit_rv32im::prove::webgpu_segment_commit_phase(job).await?;
         let mut claim = ReceiptClaim::decode_from_seal_v2(&seal, Some(po2))?;
-        claim.output = preflight_results.output.into();
+        claim.output = output.into();
 
         let verifier_parameters = ctx
             .segment_verifier_parameters
@@ -492,7 +591,7 @@ impl ProverImpl {
             .digest();
         let receipt = SegmentReceipt {
             seal,
-            index: preflight_results.segment_index,
+            index: segment_index,
             hashfn: self.opts.hashfn.clone(),
             claim,
             verifier_parameters,
@@ -503,8 +602,44 @@ impl ProverImpl {
                 .verify_integrity_with_context(ctx)
                 .with_context(|| format!("verify segment index={}", receipt.index))?;
         }
-
         Ok(receipt)
+    }
+
+    /// Serial composition of the M6d pipeline stages, kept for callers
+    /// that schedule segments themselves (the SP6d multi-device pool
+    /// orchestrator). Hooks are the caller's responsibility here.
+    pub(crate) async fn prove_segment_core_async(
+        &self,
+        ctx: &VerifierContext,
+        preflight_results: PreflightResults,
+    ) -> Result<SegmentReceipt> {
+        tracing::debug!("prove_segment_core_async");
+        let po2 = preflight_results.inner.po2();
+        let _timer = WebGpuStageTimer::new(format!(
+            "prove_segment_core_async index={} po2={po2}",
+            preflight_results.segment_index
+        ));
+
+        ensure!(
+            self.opts.hashfn == "poseidon2",
+            "provided `ProverOpts` has unsupported `hashfn` value of \"{}\"; \
+            supported `hashfn` values are: \"poseidon2\".",
+            &self.opts.hashfn
+        );
+
+        let job = risc0_circuit_rv32im::prove::webgpu_segment_witgen_phase(
+            self.webgpu_hal()?,
+            preflight_results.inner,
+        )
+        .await?;
+        self.finish_segment_commit_async(
+            ctx,
+            job,
+            po2,
+            preflight_results.output,
+            preflight_results.segment_index,
+        )
+        .await
     }
 
     async fn lift_async_on(
