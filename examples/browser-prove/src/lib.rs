@@ -12020,9 +12020,9 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
         use risc0_circuit_rv32im::prove::{
             accum_gpu_control0_direct_rows, accum_gpu_mem0_direct_rows, accum_gpu_mem1_direct_rows,
             accum_gpu_misc0_direct_rows, accum_gpu_misc1_direct_rows, accum_gpu_misc2_direct_rows,
-            witgen_accum_shadow_replay_rows, witgen_gpu_mem0_extra_prewarm_requests,
-            witgen_gpu_mem0_replace_minor_mask, witgen_gpu_replace_on_demand_kernel_compiles,
-            witgen_gpu_short_circuit_cycles,
+            accum_gpu_poseidon1_direct_rows, witgen_accum_shadow_replay_rows,
+            witgen_gpu_mem0_extra_prewarm_requests, witgen_gpu_mem0_replace_minor_mask,
+            witgen_gpu_replace_on_demand_kernel_compiles, witgen_gpu_short_circuit_cycles,
         };
         use xgboost_methods::{XGBOOST_ELF, XGBOOST_ID};
 
@@ -12043,6 +12043,7 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
         let mem0_before = accum_gpu_mem0_direct_rows();
         let mem1_before = accum_gpu_mem1_direct_rows();
         let control0_before = accum_gpu_control0_direct_rows();
+        let poseidon1_before = accum_gpu_poseidon1_direct_rows();
         let on_demand_before = witgen_gpu_replace_on_demand_kernel_compiles();
         let shadow_replay_before = witgen_accum_shadow_replay_rows();
         let recursion_accum_dispatches_before = recursion_accum_gpu_dispatches();
@@ -12106,6 +12107,10 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
         assert!(
             accum_gpu_control0_direct_rows() > control0_before,
             "default xgboost proof should use GPU CONTROL0 direct accumulation"
+        );
+        assert!(
+            accum_gpu_poseidon1_direct_rows() > poseidon1_before,
+            "default xgboost proof should use GPU POSEIDON1 direct accumulation"
         );
         assert!(
             witgen_gpu_mem0_extra_prewarm_requests() <= 1,

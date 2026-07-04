@@ -1687,28 +1687,32 @@ fn run_accum_raw_steps_skip_replaced_misc0_or_majors(
     let tables = LookupTables::default();
     let last_cycle = preflight.cycles.len();
 
+    let run_pass = |mask: u16| -> Result<()> {
+        (0..last_cycle).into_par_iter().try_for_each(|cycle| {
+            let major = preflight.cycles[cycle].major;
+            let minor = preflight.cycles[cycle].minor;
+            let skip_major = major < 16 && (mask & (1u16 << major)) != 0;
+            if (skip_replaced_misc0 && major == 0 && misc0_simple_short_circuit_minor(minor))
+                || (skip_replaced_mem0 && major == 5 && mem0_short_circuit_minor(minor))
+                || skip_major
+            {
+                return Ok(());
+            }
+            let ctx = ExecContext::new(preflight, &tables, cycle);
+            step_TopAccum(&ctx, accum, data, global, mix).map_err(|e| {
+                anyhow::anyhow!(
+                    "step_TopAccum failed at cycle={cycle} major={major} minor={minor}: {e}"
+                )
+            })
+        })
+    };
+
     #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
     let step_top_accum_timer = risc0_zkp::hal::webgpu::WebGpuStageTimer::new(format!(
         "rv32im_accumulate step_top_accum_cpu_skip_replaced_misc0={skip_replaced_misc0}_mem0={skip_replaced_mem0}_major_mask=0x{skip_major_mask:04x} cycles={last_cycle}"
     ));
     // Parallel per the C reference's phase1 (see run_accum_raw_steps_skip_major).
-    (0..last_cycle).into_par_iter().try_for_each(|cycle| {
-        let major = preflight.cycles[cycle].major;
-        let minor = preflight.cycles[cycle].minor;
-        let skip_major = major < 16 && (skip_major_mask & (1u16 << major)) != 0;
-        if (skip_replaced_misc0 && major == 0 && misc0_simple_short_circuit_minor(minor))
-            || (skip_replaced_mem0 && major == 5 && mem0_short_circuit_minor(minor))
-            || skip_major
-        {
-            return Ok(());
-        }
-        let ctx = ExecContext::new(preflight, &tables, cycle);
-        step_TopAccum(&ctx, accum, data, global, mix).map_err(|e| {
-            anyhow::anyhow!(
-                "step_TopAccum failed at cycle={cycle} major={major} minor={minor}: {e}"
-            )
-        })
-    })?;
+    run_pass(skip_major_mask)?;
     #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
     drop(step_top_accum_timer);
 

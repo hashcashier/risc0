@@ -109,6 +109,12 @@ pub use hal::webgpu::set_accum_gpu_control0_direct_enabled;
 pub use hal::webgpu::accum_gpu_control0_direct_rows;
 
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::set_accum_gpu_poseidon1_direct_enabled;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
+pub use hal::webgpu::accum_gpu_poseidon1_direct_rows;
+
+#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 pub use hal::webgpu::set_witgen_gpu_mem0_replace_candidate_enabled;
 
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]

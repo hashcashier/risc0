@@ -225,6 +225,8 @@ pub static ACCUM_GPU_MEM1_DIRECT_ENABLED: AtomicBool = AtomicBool::new(false);
 static ACCUM_GPU_MEM1_DIRECT_ROWS: AtomicUsize = AtomicUsize::new(0);
 pub static ACCUM_GPU_CONTROL0_DIRECT_ENABLED: AtomicBool = AtomicBool::new(false);
 static ACCUM_GPU_CONTROL0_DIRECT_ROWS: AtomicUsize = AtomicUsize::new(0);
+pub static ACCUM_GPU_POSEIDON1_DIRECT_ENABLED: AtomicBool = AtomicBool::new(false);
+static ACCUM_GPU_POSEIDON1_DIRECT_ROWS: AtomicUsize = AtomicUsize::new(0);
 static WITGEN_GPU_MEM0_REPLACE_CANDIDATE_ENABLED: AtomicBool = AtomicBool::new(false);
 const WITGEN_GPU_MEM0_REPLACE_MINOR_MASK_ALL: u16 = 0x001f;
 static WITGEN_GPU_MEM0_REPLACE_MINOR_MASK: AtomicU16 =
@@ -324,6 +326,15 @@ pub fn set_accum_gpu_control0_direct_enabled(enabled: bool) {
 
 pub fn accum_gpu_control0_direct_rows() -> usize {
     ACCUM_GPU_CONTROL0_DIRECT_ROWS.load(Ordering::SeqCst)
+}
+
+pub fn set_accum_gpu_poseidon1_direct_enabled(enabled: bool) {
+    ACCUM_GPU_POSEIDON1_DIRECT_ROWS.store(0, Ordering::SeqCst);
+    ACCUM_GPU_POSEIDON1_DIRECT_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
+pub fn accum_gpu_poseidon1_direct_rows() -> usize {
+    ACCUM_GPU_POSEIDON1_DIRECT_ROWS.load(Ordering::SeqCst)
 }
 
 pub fn set_witgen_gpu_mem0_replace_candidate_enabled(enabled: bool) {
@@ -611,6 +622,11 @@ thread_local! {
     /// Narrow CONTROL0 accumulator replacement. CONTROL0 witness rows stay
     /// CPU-owned; only their lookup accumulator contributions move to WebGPU.
     static ACCUM_CONTROL0_DIRECT_KERNEL: RefCell<Option<WebGpuKernel>> =
+        const { RefCell::new(None) };
+    /// M8b: narrow POSEIDON1 accumulator replacement. Paging-hash witness
+    /// rows stay CPU-owned; only their two cycle-table accumulator terms
+    /// move to WebGPU.
+    static ACCUM_POSEIDON1_DIRECT_KERNEL: RefCell<Option<WebGpuKernel>> =
         const { RefCell::new(None) };
     /// Latest scratch-vs-CPU row compare result buffer, readable by the
     /// async browser test after proof generation finishes.
@@ -2150,6 +2166,268 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     wgsl
 }
 
+/// M8b: direct WebGPU accumulator for POSEIDON1 (major 10) rows — the
+/// paged-memory hashing cycles that dominate the CPU accum stepper's
+/// remaining cycle count (173 K of 416 K stepped cycles per xgboost run;
+/// the four uncovered majors 3/8/9/10 each cost ~25% of the pass). A
+/// POSEIDON1 row's only argument contributions are the two cycle-table
+/// terms; its user-accum state is the BigInt nop constants, and the
+/// cross-row recurrences stay in the terminal-prefix + machine-column-
+/// carry passes, exactly like the six production direct arms. This is
+/// the hand-written scalar form those arms use — NOT the SP7n
+/// zirgen-generated arm10 kernel, which was rejected on 2026-05-18 after
+/// its generated body queued 45 s of hidden GPU work on BusyLoop.
+fn accum_poseidon1_direct_wgsl() -> String {
+    let poseidon1 = LAYOUT_TOP.inst_result.arm10;
+    let user = LAYOUT_TOP_ACCUM.user._0;
+    let randomness = LAYOUT_MIX.randomness;
+
+    let mut wgsl = String::with_capacity(8_000);
+    writeln!(
+        wgsl,
+        "const MIX_OFFSET: u32 = {}u;",
+        randomness._offset.offset
+    )
+    .unwrap();
+    writeln!(
+        wgsl,
+        "const MIX_CYCLE: u32 = {}u;",
+        randomness.cycle_arg.cycle.offset
+    )
+    .unwrap();
+
+    write_cycle_arg_const(&mut wgsl, "POSEIDON1_ARG1", poseidon1._0.arg1);
+    write_cycle_arg_const(&mut wgsl, "POSEIDON1_ARG2", poseidon1._0.arg2);
+
+    writeln!(
+        wgsl,
+        "const ACC_USER_POLY: u32 = {}u;",
+        user.state.poly._super.offset
+    )
+    .unwrap();
+    writeln!(
+        wgsl,
+        "const ACC_USER_TERM: u32 = {}u;",
+        user.state.term._super.offset
+    )
+    .unwrap();
+    writeln!(
+        wgsl,
+        "const ACC_USER_TOTAL: u32 = {}u;",
+        user.state.total._super.offset
+    )
+    .unwrap();
+    writeln!(
+        wgsl,
+        "const ACC_USER_TMP: u32 = {}u;",
+        user.state_redef.arm3.tmp._super.offset
+    )
+    .unwrap();
+    for (idx, bit) in user.poly_op._super.iter().enumerate() {
+        writeln!(
+            wgsl,
+            "const ACC_USER_POLY_OP{idx}: u32 = {}u;",
+            bit._super.offset
+        )
+        .unwrap();
+    }
+    writeln!(
+        wgsl,
+        "const ACC_COL0: u32 = {}u;",
+        LAYOUT_TOP_ACCUM.columns[0].offset
+    )
+    .unwrap();
+    writeln!(
+        wgsl,
+        "const ACC_COL19: u32 = {}u;",
+        LAYOUT_TOP_ACCUM.columns[19].offset
+    )
+    .unwrap();
+
+    wgsl.push_str(
+        r#"
+const P: u32 = 2013265921u;
+const M: u32 = 2281701377u;
+const NBETA: u32 = 1073741848u;
+const MONT_ONE: u32 = 268435454u;
+
+alias Val = u32;
+alias ExtVal = vec4<u32>;
+
+struct Params {
+  data_rows: u32,
+  accum_rows: u32,
+  row_count: u32,
+  data_base: u32,
+  accum_base: u32,
+  mix_base: u32,
+  _pad0: u32,
+  _pad1: u32,
+}
+
+@group(0) @binding(0) var<storage, read> data: array<u32>;
+@group(0) @binding(1) var<storage, read_write> accum: array<u32>;
+@group(0) @binding(2) var<storage, read> mix: array<u32>;
+@group(0) @binding(3) var<storage, read> rows: array<u32>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+fn add(lhs: Val, rhs: Val) -> Val {
+  let sum = lhs + rhs;
+  if (sum >= P) {
+    return sum - P;
+  }
+  return sum;
+}
+
+fn sub(lhs: Val, rhs: Val) -> Val {
+  if (lhs >= rhs) {
+    return lhs - rhs;
+  }
+  return lhs + P - rhs;
+}
+
+fn mul_wide(lhs: u32, rhs: u32) -> vec2<u32> {
+  let lhs_lo = lhs & 0xffffu;
+  let lhs_hi = lhs >> 16u;
+  let rhs_lo = rhs & 0xffffu;
+  let rhs_hi = rhs >> 16u;
+  let p0 = lhs_lo * rhs_lo;
+  let p1 = lhs_hi * rhs_lo;
+  let p2 = lhs_lo * rhs_hi;
+  let p3 = lhs_hi * rhs_hi;
+  let carry = (p0 >> 16u) + (p1 & 0xffffu) + (p2 & 0xffffu);
+  let lo = (p0 & 0xffffu) | ((carry & 0xffffu) << 16u);
+  let hi = p3 + (p1 >> 16u) + (p2 >> 16u) + (carry >> 16u);
+  return vec2<u32>(lo, hi);
+}
+
+fn mul(lhs: Val, rhs: Val) -> Val {
+  let product = mul_wide(lhs, rhs);
+  let low = 0u - product.x;
+  let red = M * low;
+  let red_product = mul_wide(red, P);
+  var ret = product.y + red_product.y;
+  if (product.x + red_product.x < product.x) {
+    ret = ret + 1u;
+  }
+  if (ret >= P) {
+    return ret - P;
+  }
+  return ret;
+}
+
+fn pow(base: Val, exp: u32) -> Val {
+  var result: Val = MONT_ONE;
+  var b: Val = base;
+  var e: u32 = exp;
+  while (e != 0u) {
+    if ((e & 1u) != 0u) {
+      result = mul(result, b);
+    }
+    b = mul(b, b);
+    e = e >> 1u;
+  }
+  return result;
+}
+
+fn inv(x: Val) -> Val {
+  return pow(x, P - 2u);
+}
+
+fn ext_add(lhs: ExtVal, rhs: ExtVal) -> ExtVal {
+  return ExtVal(
+    add(lhs.x, rhs.x),
+    add(lhs.y, rhs.y),
+    add(lhs.z, rhs.z),
+    add(lhs.w, rhs.w),
+  );
+}
+
+fn ext_scale(lhs: ExtVal, rhs: Val) -> ExtVal {
+  return ExtVal(
+    mul(lhs.x, rhs),
+    mul(lhs.y, rhs),
+    mul(lhs.z, rhs),
+    mul(lhs.w, rhs),
+  );
+}
+
+fn ext_inv(x: ExtVal) -> ExtVal {
+  let beta = sub(0u, NBETA);
+  var b0 = add(mul(x.x, x.x), mul(beta, sub(mul(x.y, add(x.w, x.w)), mul(x.z, x.z))));
+  var b2 = add(sub(mul(x.x, add(x.z, x.z)), mul(x.y, x.y)), mul(beta, mul(x.w, x.w)));
+  let c = add(mul(b0, b0), mul(beta, mul(b2, b2)));
+  let ic = inv(c);
+  b0 = mul(b0, ic);
+  b2 = mul(b2, ic);
+  return ExtVal(
+    add(mul(x.x, b0), mul(beta, mul(x.z, b2))),
+    add(sub(0u, mul(x.y, b0)), mul(NBETA, mul(x.w, b2))),
+    add(sub(0u, mul(x.x, b2)), mul(x.z, b0)),
+    sub(mul(x.y, b2), mul(x.w, b0)),
+  );
+}
+
+fn data_at(row: u32, col: u32) -> Val {
+  return data[params.data_base + col * params.data_rows + row];
+}
+
+fn mix_ext(offset: u32) -> ExtVal {
+  let base = params.mix_base + offset;
+  return ExtVal(mix[base], mix[base + 1u], mix[base + 2u], mix[base + 3u]);
+}
+
+fn store_val(row: u32, col: u32, value: Val) {
+  accum[params.accum_base + col * params.accum_rows + row] = value;
+}
+
+fn store_ext(row: u32, col: u32, value: ExtVal) {
+  store_val(row, col, value.x);
+  store_val(row, col + 1u, value.y);
+  store_val(row, col + 2u, value.z);
+  store_val(row, col + 3u, value.w);
+}
+
+fn cycle_term(row: u32, count_col: u32, cycle_col: u32) -> ExtVal {
+  var denom = ext_scale(mix_ext(MIX_CYCLE), data_at(row, cycle_col));
+  denom = ext_add(denom, mix_ext(MIX_OFFSET));
+  return ext_scale(ext_inv(denom), data_at(row, count_col));
+}
+
+fn store_user_accum(row: u32) {
+  store_ext(row, ACC_USER_POLY, ExtVal(0u, 0u, 0u, 0u));
+  store_ext(row, ACC_USER_TERM, ExtVal(MONT_ONE, 0u, 0u, 0u));
+  store_ext(row, ACC_USER_TOTAL, ExtVal(0u, 0u, 0u, 0u));
+  store_val(row, ACC_USER_POLY_OP0, MONT_ONE);
+  store_val(row, ACC_USER_POLY_OP1, 0u);
+  store_val(row, ACC_USER_POLY_OP2, 0u);
+  store_val(row, ACC_USER_POLY_OP3, 0u);
+  store_val(row, ACC_USER_POLY_OP4, 0u);
+  store_val(row, ACC_USER_POLY_OP5, 0u);
+  store_val(row, ACC_USER_POLY_OP6, 0u);
+  store_ext(row, ACC_USER_TMP, ExtVal(0u, 0u, 0u, 0u));
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x >= params.row_count) {
+    return;
+  }
+  let row = rows[gid.x];
+  store_user_accum(row);
+
+  var cur = ExtVal(0u, 0u, 0u, 0u);
+
+  cur = ext_add(cur, cycle_term(row, POSEIDON1_ARG1_COUNT, POSEIDON1_ARG1_CYCLE));
+  cur = ext_add(cur, cycle_term(row, POSEIDON1_ARG2_COUNT, POSEIDON1_ARG2_CYCLE));
+  store_ext(row, ACC_COL0, cur);
+  store_ext(row, ACC_COL19, cur);
+}
+"#,
+    );
+    wgsl
+}
+
 fn accum_misc_direct_wgsl(
     misc: &'static FinalizeMiscLayout,
     cycle_table: &'static DoCycleTableLayout,
@@ -2537,6 +2815,7 @@ enum AccumMiscDirectKind {
     Mem0,
     Mem1,
     Control0,
+    Poseidon1,
 }
 
 impl AccumMiscDirectKind {
@@ -2548,6 +2827,7 @@ impl AccumMiscDirectKind {
             Self::Mem0 => "MEM0",
             Self::Mem1 => "MEM1",
             Self::Control0 => "CONTROL0",
+            Self::Poseidon1 => "POSEIDON1",
         }
     }
 
@@ -2559,6 +2839,7 @@ impl AccumMiscDirectKind {
             Self::Mem0 => "rv32im_accum_mem0_direct_rows",
             Self::Mem1 => "rv32im_accum_mem1_direct_rows",
             Self::Control0 => "rv32im_accum_control0_direct_rows",
+            Self::Poseidon1 => "rv32im_accum_poseidon1_direct_rows",
         }
     }
 
@@ -2570,6 +2851,7 @@ impl AccumMiscDirectKind {
             Self::Mem0 => "rv32im_accum_mem0_direct_params",
             Self::Mem1 => "rv32im_accum_mem1_direct_params",
             Self::Control0 => "rv32im_accum_control0_direct_params",
+            Self::Poseidon1 => "rv32im_accum_poseidon1_direct_params",
         }
     }
 
@@ -2581,6 +2863,7 @@ impl AccumMiscDirectKind {
             Self::Mem0 => "rv32im_accum_mem0_direct_layout",
             Self::Mem1 => "rv32im_accum_mem1_direct_layout",
             Self::Control0 => "rv32im_accum_control0_direct_layout",
+            Self::Poseidon1 => "rv32im_accum_poseidon1_direct_layout",
         }
     }
 
@@ -2592,6 +2875,7 @@ impl AccumMiscDirectKind {
             Self::Mem0 => "rv32im_accum_mem0_direct_bind_group",
             Self::Mem1 => "rv32im_accum_mem1_direct_bind_group",
             Self::Control0 => "rv32im_accum_control0_direct_bind_group",
+            Self::Poseidon1 => "rv32im_accum_poseidon1_direct_bind_group",
         }
     }
 
@@ -2614,6 +2898,9 @@ impl AccumMiscDirectKind {
             }
             Self::Control0 => {
                 ACCUM_GPU_CONTROL0_DIRECT_ROWS.fetch_add(rows, Ordering::SeqCst);
+            }
+            Self::Poseidon1 => {
+                ACCUM_GPU_POSEIDON1_DIRECT_ROWS.fetch_add(rows, Ordering::SeqCst);
             }
         }
     }
@@ -5781,6 +6068,31 @@ impl WebGpuCircuitHal {
         Ok(kernel)
     }
 
+    fn lookup_accum_poseidon1_direct_kernel(&self) -> Result<WebGpuKernel> {
+        if let Some(kernel) = ACCUM_POSEIDON1_DIRECT_KERNEL.with(|cell| cell.borrow().clone()) {
+            return Ok(kernel);
+        }
+        let layout = self.hal.create_bind_group_layout(
+            "rv32im_accum_poseidon1_direct_layout",
+            &[
+                WebGpuBindingLayout::read_only_storage(0, 0),
+                WebGpuBindingLayout::storage(1, 0),
+                WebGpuBindingLayout::read_only_storage(2, 0),
+                WebGpuBindingLayout::read_only_storage(3, 0),
+                WebGpuBindingLayout::uniform(4, 32),
+            ],
+        )?;
+        let wgsl = accum_poseidon1_direct_wgsl();
+        let kernel = self.hal.create_compute_kernel(
+            "rv32im_accum_poseidon1_direct",
+            &wgsl,
+            "main",
+            &[layout],
+        )?;
+        ACCUM_POSEIDON1_DIRECT_KERNEL.with(|cell| *cell.borrow_mut() = Some(kernel.clone()));
+        Ok(kernel)
+    }
+
     fn lookup_accum_misc_direct_kernel(&self, kind: AccumMiscDirectKind) -> Result<WebGpuKernel> {
         match kind {
             AccumMiscDirectKind::Misc0 => self.lookup_accum_misc0_direct_kernel(),
@@ -5789,9 +6101,11 @@ impl WebGpuCircuitHal {
             AccumMiscDirectKind::Mem0 => self.lookup_accum_mem0_direct_kernel(),
             AccumMiscDirectKind::Mem1 => self.lookup_accum_mem1_direct_kernel(),
             AccumMiscDirectKind::Control0 => self.lookup_accum_control0_direct_kernel(),
+            AccumMiscDirectKind::Poseidon1 => self.lookup_accum_poseidon1_direct_kernel(),
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn dispatch_accum_misc_direct_grouped(
         &self,
         misc0_rows: &[u32],
@@ -5800,6 +6114,7 @@ impl WebGpuCircuitHal {
         mem0_rows: &[u32],
         mem1_rows: &[u32],
         control0_rows: &[u32],
+        poseidon1_rows: &[u32],
         data: &MetaBuffer<WebGpuHal>,
         accum: &MetaBuffer<WebGpuHal>,
         mix: &MetaBuffer<WebGpuHal>,
@@ -5810,6 +6125,7 @@ impl WebGpuCircuitHal {
             && mem0_rows.is_empty()
             && mem1_rows.is_empty()
             && control0_rows.is_empty()
+            && poseidon1_rows.is_empty()
         {
             return Ok(true);
         }
@@ -5846,6 +6162,7 @@ impl WebGpuCircuitHal {
             (AccumMiscDirectKind::Mem0, mem0_rows),
             (AccumMiscDirectKind::Mem1, mem1_rows),
             (AccumMiscDirectKind::Control0, control0_rows),
+            (AccumMiscDirectKind::Poseidon1, poseidon1_rows),
         ] {
             if rows.is_empty() {
                 continue;
@@ -6686,12 +7003,28 @@ impl CircuitAccumulator<WebGpuHal> for WebGpuCircuitHal {
             } else {
                 Vec::new()
             };
+            let poseidon1_rows = if ACCUM_GPU_POSEIDON1_DIRECT_ENABLED.load(Ordering::SeqCst) {
+                preflight
+                    .cycles
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, cycle)| {
+                        (cycle.major == 10).then(|| {
+                            u32::try_from(idx)
+                                .context("POSEIDON1 direct accumulator cycle index exceeds u32")
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?
+            } else {
+                Vec::new()
+            };
             if !misc0_rows.is_empty()
                 || !misc1_rows.is_empty()
                 || !misc2_rows.is_empty()
                 || !mem0_rows.is_empty()
                 || !mem1_rows.is_empty()
                 || !control0_rows.is_empty()
+                || !poseidon1_rows.is_empty()
             {
                 let direct_major_mask = if misc1_rows.is_empty() { 0 } else { 1u16 << 1 }
                     | if misc2_rows.is_empty() { 0 } else { 1u16 << 2 }
@@ -6700,6 +7033,11 @@ impl CircuitAccumulator<WebGpuHal> for WebGpuCircuitHal {
                         0
                     } else {
                         1u16 << 7
+                    }
+                    | if poseidon1_rows.is_empty() {
+                        0
+                    } else {
+                        1u16 << 10
                     };
                 super::rust_steps::with_accum_eqz_elided(|| {
                     super::rust_steps::step_accum_without_selected_majors_or_postprocess(
@@ -6721,6 +7059,7 @@ impl CircuitAccumulator<WebGpuHal> for WebGpuCircuitHal {
                         &mem0_rows,
                         &mem1_rows,
                         &control0_rows,
+                        &poseidon1_rows,
                         data,
                         accum,
                         mix
@@ -7377,6 +7716,16 @@ pub fn enable_webgpu_witgen_accum_acceleration_for_hal(hal: Rc<WebGpuHal>) {
     set_accum_gpu_mem0_direct_enabled(true);
     set_accum_gpu_mem1_direct_enabled(true);
     set_accum_gpu_control0_direct_enabled(true);
+    set_accum_gpu_poseidon1_direct_enabled(true);
+    // M8b: compile the POSEIDON1 direct-accum pipeline at init. Lazily it
+    // lands on the FIRST segment's accum commit, where a serial
+    // single-segment proof (BusyLoop) has nothing to hide it under
+    // (+157 ms measured); pipelined multi-segment proofs hid it fully.
+    if let Err(err) = WebGpuCircuitHal::new(hal.clone()).lookup_accum_poseidon1_direct_kernel() {
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
+            "rv32im_accum_poseidon1_direct prewarm FAILED err={err:?}"
+        ));
+    }
     prewarm_witgen_kernel_for_hal(hal);
 }
 
