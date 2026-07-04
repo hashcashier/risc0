@@ -7029,6 +7029,7 @@ dependencies = [
  "bytemuck",
  "cfg-if",
  "clap 4.5.46",
+ "futures",
  "keccak",
  "liblzma",
  "paste",

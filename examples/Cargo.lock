@@ -4601,6 +4601,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "cfg-if",
+ "futures",
  "keccak",
  "liblzma",
  "paste",

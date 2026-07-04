@@ -31,8 +31,9 @@ use crate::{
     prove::{KeccakProver, KeccakProverImpl, Seal},
     zirgen::{
         circuit::{
-            Val, LAYOUT_GLOBAL, REGCOUNT_ACCUM, REGCOUNT_CODE, REGCOUNT_DATA, REGCOUNT_GLOBAL,
-            REGCOUNT_MIX, REGISTER_GROUP_ACCUM, REGISTER_GROUP_CODE, REGISTER_GROUP_DATA,
+            CircuitField, ExtVal, Val, LAYOUT_GLOBAL, REGCOUNT_ACCUM, REGCOUNT_CODE, REGCOUNT_DATA,
+            REGCOUNT_GLOBAL, REGCOUNT_MIX, REGISTER_GROUP_ACCUM, REGISTER_GROUP_CODE,
+            REGISTER_GROUP_DATA,
         },
         taps::TAPSET,
         CircuitImpl,
@@ -52,6 +53,72 @@ pub(crate) struct WebGpuCircuitHal;
 struct WebGpuKeccakProver {
     hal: Rc<WebGpuHal>,
     circuit_hal: Rc<WebGpuCircuitHal>,
+}
+
+impl WebGpuKeccakProver {
+    /// M9a: the keccak proof's phase-head CPU — preflight construction,
+    /// scatter, and the witness pass — on a pool worker instead of this
+    /// wasm thread. These blocks (~165 ms/proof) run while other proofs'
+    /// readback chains are in flight (the keccak/union phase interleaves
+    /// keccak proofs, union recursion proofs, and rv32im segment commits
+    /// all day), and per the M6d physics every inline millisecond starves
+    /// those mapAsync callbacks. All three pieces are pre-transcript
+    /// (phase-head), so per the M8a physics the offload is clean — no
+    /// mid-transcript foreground wait rides on the pool's injector queue.
+    /// The preflight is built AND consumed on the worker; buffers travel
+    /// as `Send` CPU-shadow handles (fresh buffers, shadows current by
+    /// construction).
+    async fn witgen_offloaded_async(
+        &self,
+        inputs: &[KeccakState],
+        cycles: usize,
+        global: &MetaBuffer<WebGpuHal>,
+        data: &MetaBuffer<WebGpuHal>,
+    ) -> Result<()> {
+        let _timer = WebGpuStageTimer::new(format!(
+            "keccak_witgen_phase inputs={} cycles={} offload=pool",
+            inputs.len(),
+            cycles
+        ));
+        let inputs = inputs.to_vec();
+        let data_shadow = data.buf.begin_cpu_shadow_offload_mut();
+        let (data_rows, data_cols, data_checked) = (data.rows, data.cols, data.checked_reads);
+        let global_shadow = global.buf.begin_cpu_shadow_offload_mut();
+        let (global_rows, global_cols, global_checked) =
+            (global.rows, global.cols, global.checked_reads);
+        let (tx, rx) = futures::channel::oneshot::channel();
+        rayon::spawn(move || {
+            type ShadowHal = risc0_zkp::hal::cpu::CpuHal<CircuitField>;
+            let run = || -> Result<()> {
+                let preflight = PreflightTrace::<ForwardPreflightOrder>::new(&inputs, cycles);
+                let data_mb = MetaBuffer::<ShadowHal> {
+                    buf: data_shadow,
+                    rows: data_rows,
+                    cols: data_cols,
+                    checked_reads: data_checked,
+                };
+                let global_mb = MetaBuffer::<ShadowHal> {
+                    buf: global_shadow,
+                    rows: global_rows,
+                    cols: global_cols,
+                    checked_reads: global_checked,
+                };
+                scatter_preflight_into(&data_mb, &preflight.scatter, &preflight.data)?;
+                super::rust_steps::generate_witness(
+                    StepMode::Parallel,
+                    &preflight,
+                    &global_mb,
+                    &data_mb,
+                )
+            };
+            let _ = tx.send(run());
+        });
+        rx.await
+            .map_err(|_| anyhow::anyhow!("offloaded keccak witgen worker dropped its result"))??;
+        data.buf.finish_cpu_shadow_offload_mut();
+        global.buf.finish_cpu_shadow_offload_mut();
+        Ok(())
+    }
 }
 
 impl WebGpuCircuitEvalCheck for WebGpuCircuitHal {
@@ -78,6 +145,36 @@ impl WebGpuCircuitEvalCheck for WebGpuCircuitHal {
     }
 }
 
+/// M9a: the scatter body, generic over the buffer HAL so the
+/// pool-offloaded witgen phase can run it against bare `CpuBuffer`
+/// shadow handles (`MetaBuffer<CpuHal>`), exactly like the generic
+/// `rust_steps::generate_witness`.
+fn scatter_preflight_into<H>(
+    into: &MetaBuffer<H>,
+    infos: &[risc0_circuit_keccak_sys::ScatterInfo],
+    data: &[u32],
+) -> Result<()>
+where
+    H: risc0_zkp::hal::Hal<Field = CircuitField, Elem = Val, ExtElem = ExtVal>,
+{
+    into.buf.view_mut(|into_slice| {
+        for info in infos {
+            let inner_count = 32 / info.bits;
+            let mask: u32 = (1 << info.bits) - 1;
+            for i in 0..info.count as u32 {
+                let from_idx = info.offset + (i / inner_count);
+                let word = data[from_idx as usize];
+                let j = i % inner_count;
+                let val = (word >> (j * info.bits)) & mask;
+                let col = info.col as u32 + i;
+                let into_idx = col as usize * into.rows + info.row as usize;
+                into_slice[into_idx] = val.into();
+            }
+        }
+    });
+    Ok(())
+}
+
 impl CircuitWitnessGenerator<WebGpuHal> for WebGpuCircuitHal {
     type PreferredPreflightOrder = ForwardPreflightOrder;
 
@@ -95,22 +192,7 @@ impl CircuitWitnessGenerator<WebGpuHal> for WebGpuCircuitHal {
             infos.len(),
             data.len()
         ));
-        into.buf.view_mut(|into_slice| {
-            for info in infos {
-                let inner_count = 32 / info.bits;
-                let mask: u32 = (1 << info.bits) - 1;
-                for i in 0..info.count as u32 {
-                    let from_idx = info.offset + (i / inner_count);
-                    let word = data[from_idx as usize];
-                    let j = i % inner_count;
-                    let val = (word >> (j * info.bits)) & mask;
-                    let col = info.col as u32 + i;
-                    let into_idx = col as usize * into.rows + info.row as usize;
-                    into_slice[into_idx] = val.into();
-                }
-            }
-        });
-        Ok(())
+        scatter_preflight_into(into, infos, data)
     }
 
     fn generate_witness<O: PreflightCycleOrder>(
@@ -190,7 +272,6 @@ impl KeccakProver for WebGpuKeccakProver {
             scope!("prove");
 
             let cycles: usize = 1 << po2;
-            let preflight = PreflightTrace::<ForwardPreflightOrder>::new(inputs, cycles);
 
             let mut global = vec![Val::INVALID; REGCOUNT_GLOBAL];
             global[LAYOUT_GLOBAL.total_cycles._super.offset] = Val::from_u64(1 << po2);
@@ -214,11 +295,11 @@ impl KeccakProver for WebGpuKeccakProver {
                 )
             );
 
-            self.circuit_hal
-                .scatter_preflight(&data, &preflight.scatter, &preflight.data)?;
-
-            self.circuit_hal
-                .generate_witness(StepMode::Parallel, &preflight, &global, &data)?;
+            // M9a: preflight + scatter + witness pass run on a pool worker
+            // so this thread keeps observing the other in-flight proofs'
+            // readback completions.
+            self.witgen_offloaded_async(inputs, cycles, &global, &data)
+                .await?;
 
             scope!("zeroize", {
                 self.hal.eltwise_zeroize_elem(&data.buf);
