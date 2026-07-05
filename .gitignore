@@ -19,6 +19,5 @@ compile_commands.json
 .vercel
 node_modules
 *.code-workspace
-/.recursive/config/recursive-router-discovered.json
 .worktrees/
-target-m5-atomics/
+target-*/
