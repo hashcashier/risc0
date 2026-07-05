@@ -12,21 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! SP4 (R8): tiled multi-buffer source representation for gather operations.
+//! Tiled multi-buffer source representation for gather operations.
 //!
 //! For recursion-sized data groups the logical 2D matrix (`cols × stride`
 //! elements, column-major) can exceed the WebGPU
 //! `maxStorageBufferBindingSize`. A single `WebGpuBuffer` can't bind for
 //! kernel reads in that case. `BufferPool` splits the matrix across N
 //! GPU buffers — each holding a contiguous slab of columns — and
-//! `dispatch_gather_sample_tiled` (added in SP4 iter 2) iterates over
+//! `dispatch_gather_sample_tiled` iterates over
 //! the tiles, binding one buffer at a time, to replace the locked CPU
 //! fallback that previously fired on these sizes.
 //!
 //! `TileLayout` carries the pure addressing math (chosen `tile_cols` for
 //! a given `stride` + `total_cols` + `max_binding_bytes`) and has no
 //! GPU dependency — it can be unit-tested without a WebGPU device. The
-//! actual `BufferPool` struct (added in SP4 iter 2) wraps a
+//! actual `BufferPool` struct wraps a
 //! `Vec<web_sys::GpuBuffer>` keyed by `TileLayout`.
 
 use std::mem;
@@ -147,7 +147,7 @@ impl TileLayout {
     }
 }
 
-/// SP4 (R8): tiled multi-buffer source representation. Each tile
+/// Tiled multi-buffer source representation. Each tile
 /// buffer holds `cols_in_tile(tile_idx) * layout.stride` elements
 /// (column-major, contiguous). Used by
 /// `WebGpuHal::dispatch_gather_sample_tiled` to gather a sample row
@@ -192,7 +192,7 @@ impl BufferPool {
         &self.buffers[tile_idx]
     }
 
-    /// SP5a (R3): build a `BufferPool` for `total_cols` columns of
+    /// Build a `BufferPool` for `total_cols` columns of
     /// `stride` elements at type `T`, sized per tile to fit
     /// `max_binding_bytes`, and populate it from a CPU-current
     /// `WebGpuBuffer<T>`. The source's CPU shadow is read directly
@@ -255,7 +255,7 @@ impl BufferPool {
     /// .. (col+1) * stride * elem_size]` for each column). Sliced
     /// into per-tile uploads. Used by the browser-prove regression
     /// test (`webgpu_hal_recursion_sized_gather_sample_uses_buffer_pool`)
-    /// and by production callers in SP5 that build the recursion data
+    /// and by production callers that build the recursion data
     /// group from a CPU-side staging buffer.
     ///
     /// `elem_size` must match the `T` used when calling `Self::new`.

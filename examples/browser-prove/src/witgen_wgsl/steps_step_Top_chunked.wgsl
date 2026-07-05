@@ -14279,7 +14279,7 @@ let x3: TopStruct = exec_Top(x2, global1);
 return;
 }
 
-// ---- exec_Top arm-split variants (SP7 iter 5d) ----
+// ---- exec_Top arm-split variants ----
 fn step_chunk_n4_c0(data0: u32, global1: u32) {
   let layout0: BoundLayout_TopLayout = BoundLayout_TopLayout(kLayout_Top, data0);
 // IsFirstCycle(zirgen/circuit/rv32im/v2/dsl/top.zir:15)

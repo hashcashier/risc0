@@ -152,14 +152,6 @@ pub use self::host::client::prove::webgpu::{webgpu_prover, WebGpuProver};
 #[cfg(feature = "client")]
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 pub use self::host::client::prove::webgpu_pool::{webgpu_prover_pool, WebGpuProverPool};
-#[cfg(not(target_os = "zkvm"))]
-#[cfg(feature = "client")]
-#[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
-pub use risc0_zkp::hal::webgpu::{
-    WebGpuDeviceCopyDiagnostics, WebGpuDiagnostics, WebGpuHal, WebGpuOpDiagnostics,
-    WebGpuReadbackDiagnostics, WebGpuUploadDiagnostics,
-};
-
 /// TODO
 #[cfg(not(target_os = "zkvm"))]
 #[cfg(feature = "client")]

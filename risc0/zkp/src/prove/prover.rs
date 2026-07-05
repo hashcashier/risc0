@@ -506,10 +506,10 @@ impl<'a, H: Hal> Prover<'a, H> {
     }
 }
 
-// M4b: cache of program-constant committed poly groups (the recursion code
+// Cache of program-constant committed poly groups (the recursion code
 // group), keyed by (HAL instance, control id, cycles, group size). The
 // group's coeffs/evaluated/merkle buffers are GPU-resident `Rc` views, and
-// under M4a lazy shadows a cached group pins ~zero wasm heap. Entries live
+// with lazy shadows a cached group pins ~zero wasm heap. Entries live
 // for the session; the program set is tiny (lift/join/union/identity).
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 thread_local! {
@@ -540,7 +540,7 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
         .await
     }
 
-    /// M4b: commit a program-constant witness group, reusing the fully built
+    /// Commit a program-constant witness group, reusing the fully built
     /// `PolyGroup` (coeffs + LDE + merkle tree) from a prior proof on this
     /// device when available. `cache_key` must uniquely identify the witness
     /// content — for the recursion code group that is the control ID, whose
@@ -616,7 +616,7 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
             self.taps.group_name(tap_group_index)
         );
 
-        // M2b attribution: without this drain, all GPU work queued before
+        // Attribution: without this drain, all GPU work queued before
         // the commit (e.g. accumulate witgen kernels) is absorbed into the
         // poly_group expand drain below and misattributed to the NTT.
         if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
@@ -631,7 +631,7 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
             let _gpu_scope = self.hal.gpu_authoritative_scope(make_coeffs_authoritative);
             make_coeffs_async(self.hal, witness, group_size).await?
         };
-        // M2b attribution: isolate the interpolate NTT inside make_coeffs
+        // Attribution: isolate the interpolate NTT inside make_coeffs
         // from the poly_group expand that follows it.
         if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
             let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for(
@@ -703,7 +703,7 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
             self.taps.group_name(tap_group_index)
         );
 
-        // M2b attribution: without this drain, all GPU work queued before
+        // Attribution: without this drain, all GPU work queued before
         // the commit (e.g. accumulate witgen kernels) is absorbed into the
         // poly_group expand drain below and misattributed to the NTT.
         if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
@@ -718,7 +718,7 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
             let _gpu_scope = self.hal.gpu_authoritative_scope(make_coeffs_authoritative);
             make_coeffs_in_place_async(self.hal, witness, group_size).await?
         };
-        // M2b attribution: isolate the interpolate NTT inside make_coeffs
+        // Attribution: isolate the interpolate NTT inside make_coeffs
         // from the poly_group expand that follows it.
         if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
             let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for(
@@ -802,7 +802,7 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
                 self.cycles,
             );
         } else if self.hal.staged_eval_check_enabled() {
-            // SP3 iter 7w (2026-05-13): when the STAGED eval_check path
+            // When the STAGED eval_check path
             // ran, force a queue drain BEFORE the subsequent NTT /
             // merkle / FRI stages submit their own work. The staged
             // rv32im kernel takes 20+ seconds of GPU execution and if
@@ -811,7 +811,7 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
             // trigger device-loss on subsequent stages. Splitting the
             // drain here keeps each subsequent operation's wait short.
             //
-            // SP4 close-out (2026-05-13): GATED on
+            // GATED on
             // `staged_eval_check_enabled` so the interpreter path —
             // which produces ~660 ms of GPU work that drains naturally
             // inside `check_group`'s mapAsync — doesn't pay an
@@ -824,7 +824,7 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
             self.hal.wait_idle().await?;
         }
 
-        // TEMP SP7go attribution: isolate eval_check from check-group drains.
+        // Drain-diagnostic attribution: isolate eval_check from check-group drains.
         if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
             let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for(
                 "finalize_async drain_after_eval_check",
@@ -861,7 +861,7 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
                 .batch_interpolate_ntt_async(&check_poly, ext_size)
                 .await?;
         }
-        // TEMP SP7go attribution: isolate check interpolate.
+        // Drain-diagnostic attribution: isolate check interpolate.
         if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
             let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for(
                 "finalize_async drain_after_check_interpolate",
@@ -1074,7 +1074,7 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
                 )
                 .await?;
         });
-        // TEMP SP7go attribution: isolate mix_poly_coeffs.
+        // Drain-diagnostic attribution: isolate mix_poly_coeffs.
         if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
             let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for(
                 "finalize_async drain_after_mix_poly_coeffs",
@@ -1104,7 +1104,7 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
                     )
                     .await?;
             });
-            // TEMP SP7go attribution: isolate combos_prepare.
+            // Drain-diagnostic attribution: isolate combos_prepare.
             if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
                 let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for(
                     "finalize_async drain_after_combos_prepare",
@@ -1133,7 +1133,7 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
                     .combos_divide_async(&combos, chunks, self.cycles)
                     .await?;
             });
-            // TEMP SP7go attribution: isolate combos_divide.
+            // Drain-diagnostic attribution: isolate combos_divide.
             if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
                 let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for(
                     "finalize_async drain_after_combos_divide",
@@ -1153,7 +1153,7 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
                 .await?;
             final_poly_coeffs
         });
-        // TEMP SP7go attribution: isolate combos sum.
+        // Drain-diagnostic attribution: isolate combos sum.
         if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
             let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for(
                 "finalize_async drain_after_combos_sum",
@@ -1171,7 +1171,7 @@ impl<'a> Prover<'a, crate::hal::webgpu::WebGpuHal> {
                 .batch_bit_reverse_async(&final_poly_coeffs, ext_size)
                 .await?;
         });
-        // TEMP SP7go attribution: isolate final bit reverse; the queue is
+        // Drain-diagnostic attribution: isolate final bit reverse; the queue is
         // empty entering fri_prove so its round-0 expand drain is isolated.
         if crate::hal::webgpu::poly_group_drain_diagnostic_enabled() {
             let _timer = crate::hal::webgpu::WebGpuStageTimer::new_active_for(

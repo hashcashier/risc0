@@ -56,7 +56,7 @@ risc0-circuit-recursion = { path = "../../risc0/circuit/recursion", features = [
   "test",
   "webgpu",
 ] }
-# iter-6d-a/b: direct access to the vendored exec_TopChunk0 WGSL string
+# Direct access to the vendored exec_TopChunk0 WGSL string
 # and @compute wrapper for Tint-compile smoke tests. Pulled in via
 # risc0-zkvm transitively but reachable only behind the rv32im `prove`
 # feature, so name the dep explicitly.
@@ -88,7 +88,7 @@ wasm-methods = { path = "../wasm/methods" }
 wasm-bindgen-test = "0.3"
 # web-sys with no explicit features: the WebGPU types (GpuBuffer,
 # GpuBindGroup, ...) are pulled in via feature unification with
-# risc0-zkp's web-sys dependency. Used by the SP7 codegen-scale test.
+# risc0-zkp's web-sys dependency. Used by the codegen-scale test.
 web-sys = "0.3"
 wat = "1.0"
 wordle-core = { path = "../wordle/core" }

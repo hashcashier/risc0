@@ -312,7 +312,7 @@ async fn read_webgpu_merkle_query(
     Ok((samples.to_vec(), siblings.to_vec()))
 }
 
-/// M4b: WebGPU merkle provers are cheaply cloneable — buffers are `Rc` views
+/// WebGPU merkle provers are cheaply cloneable — buffers are `Rc` views
 /// onto shared GPU storage — which lets program-constant trees (the recursion
 /// code group) be cached and reused across proofs on the same device.
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
@@ -368,9 +368,8 @@ impl MerkleTreeProver<crate::hal::webgpu::WebGpuHal> {
                 ),
                 hal,
             );
-            // SP-submission iter 2 (2026-05-15): batch the merkle
-            // tree-build hash_fold chain into one submit via
-            // hash_fold_chain_async. Each layer writes to a distinct
+            // Batch the merkle tree-build hash_fold chain into one submit
+            // via hash_fold_chain_async. Each layer writes to a distinct
             // slice of `nodes`; within a compute pass dispatches
             // execute serially so the layer-N read of layer-(N+1)'s
             // output is ordered correctly without a barrier.

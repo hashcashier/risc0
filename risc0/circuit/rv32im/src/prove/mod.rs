@@ -215,7 +215,7 @@ pub fn segment_prover_with_hal(hal: Rc<WebGpuHal>) -> Result<Box<dyn SegmentProv
     self::hal::webgpu::segment_prover(hal)
 }
 
-/// M6d: split segment-prove entry points so the zkvm prover can pipeline
+/// Split segment-prove entry points so the zkvm prover can pipeline
 /// segment N+1's witgen phase under segment N's commit phase.
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 pub use hal::webgpu::{webgpu_segment_commit_phase, webgpu_segment_witgen_phase, WebGpuSegmentJob};

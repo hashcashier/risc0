@@ -131,13 +131,12 @@ where
         })
     }
 
-    /// SP7 iter 6d-g step 6.2.8 (2026-05-16): pre-allocate global/code/data
+    /// Pre-allocate global/code/data
     /// buffers + scatter injector data. Caller (the async prove_core_async
     /// path) can then invoke a webgpu-specific async pre-dispatch hook +
-    /// `sync_gpu_to_cpu` BEFORE calling `populate_from_parts` which runs
-    /// the sync `generate_witness`. Splitting these phases is the
-    /// architectural fix for the CPU/GPU shadow desync that blocked
-    /// iter-6d-g step 6.2.7.
+    /// `sync_gpu_to_cpu` BEFORE the CPU witness pass runs. Splitting
+    /// allocation from the witness pass prevents the CPU/GPU shadow
+    /// desync that an overlapped pre-dispatch would otherwise cause.
     #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
     #[allow(clippy::type_complexity)]
     pub fn allocate_buffers(
@@ -163,7 +162,7 @@ where
         (global, code, data)
     }
 
-    /// M6d: post-witgen assembly — zeroize + accum allocation + struct
+    /// Post-witgen assembly — zeroize + accum allocation + struct
     /// assembly — for async callers that ran the witness pass out of
     /// line (pool-offloaded witgen).
     #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
@@ -188,7 +187,7 @@ where
         }
     }
 
-    /// SP7 iter 6d-g step 6.2.8: accessors so async callers can pull
+    /// Accessors so async callers can pull
     /// `PreflightResults` fields without consuming the struct.
     #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
     pub fn preflight_components(

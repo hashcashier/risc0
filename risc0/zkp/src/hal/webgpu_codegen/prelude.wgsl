@@ -1,4 +1,4 @@
-// SP3 staged eval_check WGSL prelude.
+// Staged eval_check WGSL prelude.
 //
 // Layout mirrors `webgpu.rs:EVAL_CHECK_BASE_INTERPRETER_WGSL`'s bindings,
 // `Params` UBO, and field-arithmetic helpers — minus the `instrs` storage
@@ -10,13 +10,10 @@
 // `read_tap_scalar`/`read_tap_ext`, `read_global_scalar`/`read_global_ext`,
 // `load_mix_pow`, and `write_check` — all defined here.
 //
-// SP3 iter 3 (this file) ships the static prelude only. SP3 iter 4 wires
-// the dispatch path: a `dispatch_eval_check_poly_ext_staged` helper in
-// `webgpu.rs` concatenates this prelude with the body, creates a pipeline
+// The dispatch path (`dispatch_eval_check_poly_ext_staged` in `webgpu.rs`)
+// concatenates this prelude with the generated body, creates a pipeline
 // via the existing `create_compute_kernel`, binds the same buffers as the
-// interpreter (sans `instrs`), and dispatches. Until iter 4 lands, this
-// prelude is reachable only from unit tests in `webgpu_codegen::tests`
-// that validate its shape.
+// interpreter (sans `instrs`), and dispatches.
 
 const P: u32 = 2013265921u;
 const M: u32 = 2281701377u;
@@ -58,7 +55,7 @@ struct Params {
 @group(0) @binding(5) var<storage, read> global1: ElemBuffer;
 // binding 6 is intentionally skipped — it's `instrs` for the runtime
 // interpreter, unused by the staged kernel.
-// SP3 iter 7x: `mix_pows` is a uniform buffer (CUDA `__constant__`
+// `mix_pows` is a uniform buffer (CUDA `__constant__`
 // analog). Fixed-size 16384 vec4 = 256 KiB matches the bumped
 // `maxUniformBufferBindingSize` limit in the device descriptor. Each
 // `eval_check` call writes only the prefix the DEF actually uses;
@@ -225,10 +222,10 @@ fn read_global_ext(arg: u32, offset: u32) -> vec4<u32> {
 }
 
 fn load_mix_pow(mix_idx: u32) -> vec4<u32> {
-    // SP3 iter 7x: indexed UBO read. `mix_idx` is the logical mix
+    // Indexed UBO read. `mix_idx` is the logical mix
     // power index; with `mix_pows_base` (storage-buffer-era u32 offset)
     // mapped to vec4-aligned space, `mix_pows_base / 4u` would be the
-    // vec4 offset. Pre-iter-7x callers (host side) pre-bake
+    // vec4 offset. Host-side callers pre-bake
     // `mix_pows_base = 0` for the staged path, so this just indexes
     // by `mix_idx`. Keep the divide-by-4 here for forward compatibility
     // if a future variant uses a non-zero base.
@@ -256,7 +253,7 @@ fn write_check(cycle: u32, val: vec4<u32>) {
     check.data[params.check_base + 3u * params.domain + cycle] = result.w;
 }
 
-// ----- Multi-stage scratch I/O (SP3 iter 7) -----------------------------
+// ----- Multi-stage scratch I/O -------------------------------------------
 //
 // When a DEF is too large for a single-kernel emission to fit in the
 // per-dispatch budget (e.g., the rv32im production DEF at ~20k ops), the
@@ -271,7 +268,7 @@ fn write_check(cycle: u32, val: vec4<u32>) {
 // (10/11/12) sized to `(stride * domain)` u32s.
 //
 // These bindings are present on *all* staged-eval_check pipelines, but
-// the single-kernel stages (iter 6) never reference them, so the wgpu
+// the single-kernel stages never reference them, so the wgpu
 // validator's "binding declared but unused" rule does not fire. When the
 // dispatch wiring binds these buffers, single-kernel pipelines pass an
 // empty stride and a small dummy storage buffer.
@@ -280,12 +277,12 @@ struct StagedScratchParams {
     fp_stride: u32,    // u32s per tile-local cycle for fp_scratch
     mix_stride: u32,   // u32s per tile-local cycle for each of mix_tot_scratch / mix_mul_scratch
     num_stages: u32,   // 1 for single-kernel emission, N for multi-stage
-    // SP3 iter 7g: cycle stride per tile (CUDA-shape dispatch). Each
+    // Cycle stride per tile (CUDA-shape dispatch). Each
     // staged eval_check call dispatches `dispatch_workgroups(tile_size,
     // num_tiles, 1)`. Threads compute `cycle = gid.y * tile_size +
     // gid.x` so all tiles run in one dispatch per stage — no per-tile
-    // setBindGroup. Iter 7e/7f used `tile_base` advanced via dynamic UBO
-    // offsets; iter 7g collapses that loop into `gid.y`.
+    // setBindGroup. An earlier revision advanced `tile_base` via dynamic
+    // UBO offsets; that loop is now collapsed into `gid.y`.
     tile_size: u32,
 };
 

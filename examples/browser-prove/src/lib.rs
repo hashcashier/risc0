@@ -715,7 +715,7 @@ mod tests {
             Ok(prove_info) => prove_info,
             Err(err) => {
                 log_webgpu_diagnostics_expecting(prover, name, expected_cpu_fallbacks);
-                // SP-CR diagnostic 7 2026-05-12: dump the full anyhow error
+                // Dump the full anyhow error
                 // chain so the inner VerificationError variant from
                 // verify_integrity is visible. Default `{err}` only shows the
                 // topmost context ("verify lift") and hides the actual
@@ -2465,12 +2465,12 @@ fn main() {
         }
     }
 
-    /// SP4 (R8) regression: recursion-sized `gather_sample` operates
+    /// Regression: recursion-sized `gather_sample` operates
     /// over a `BufferPool` (multi-tile GPU source) without any CPU
     /// fallback. Replaces the obsolete
     /// `webgpu_hal_recursion_sized_gather_sample_falls_back_to_cpu`
     /// test, whose `dst.cpu_is_current()` assertion stopped holding
-    /// after iter 7c bumped `maxStorageBufferBindingSize` from the
+    /// after the HAL bumped `maxStorageBufferBindingSize` from the
     /// default 128 MiB to 1 GiB (the 512 MiB source now fits one
     /// binding and the original CPU-fallback code path no longer
     /// fires).
@@ -2491,7 +2491,7 @@ fn main() {
         assert!(source_bytes > 120 * 1024 * 1024);
 
         // Force a multi-tile pool by capping the per-tile binding at
-        // 128 MiB (we know iter 7c bumped the real device limit, so we
+        // 128 MiB (the HAL bumps the real device limit, so we
         // pass the smaller cap explicitly here so the pool splits into
         // four 32-col tiles). Production callers will use the actual
         // device's `max_storage_binding_bytes()`.
@@ -2546,7 +2546,7 @@ fn main() {
         );
     }
 
-    /// SP5a (R3): `BufferPool::from_webgpu_buffer` smoke test. Builds
+    /// `BufferPool::from_webgpu_buffer` smoke test. Builds
     /// a `WebGpuBuffer` on CPU, converts it to a `BufferPool` keyed
     /// by `(stride, total_cols, max_binding_bytes)`, and verifies a
     /// gather over the pool matches the expected sample. Exercises
@@ -2609,10 +2609,10 @@ fn main() {
         assert_eq!(dst.to_vec(), expected);
     }
 
-    /// SP6d iter 1 — construct a 2-slot WebGPU prover pool. Validates
+    /// Construct a 2-slot WebGPU prover pool. Validates
     /// that the browser will hand out two independent `web_sys::GpuDevice`
     /// instances and we can build two HALs from them. Each HAL has its
-    /// own submission queue; iter 2+ will route concurrent prove jobs
+    /// own submission queue; the pool routes concurrent prove jobs
     /// across slots.
     #[wasm_bindgen_test(async)]
     async fn webgpu_pool_two_slot_construct_smoke() {
@@ -2636,14 +2636,14 @@ fn main() {
         assert_eq!(idx_c, 0);
     }
 
-    /// SP6d iter 2 — two independent proves run concurrently on a 2-slot
+    /// Two independent proves run concurrently on a 2-slot
     /// pool. Each slot holds its own `web_sys::GpuDevice` so their queues
     /// are independent at the driver level. We measure that 2x concurrent
     /// wall is LESS than 2x serial wall, proving the GPU runs both
     /// streams in parallel.
     ///
-    /// Per evidence/perf/sp6c-overlap/2026-05-13-cuda-vs-webgpu-utilization
-    /// the 5090 sits at 12.6% mean util on a single-device WebGPU prove;
+    /// Measured: an RTX 5090 sits at 12.6% mean utilization on a
+    /// single-device WebGPU prove;
     /// two concurrent proves on independent devices should bring total
     /// utilization toward 25% and total wall toward 1x single-prove +
     /// driver overhead.
@@ -2704,8 +2704,8 @@ fn main() {
         );
     }
 
-    /// SP6d iter 3 — concurrent SUCCINCT proves on a 2-slot pool. Unlike
-    /// the composite-only iter-2 smoke, succinct adds lift+finalize
+    /// Concurrent SUCCINCT proves on a 2-slot pool. Unlike
+    /// the composite-only pool smoke, succinct adds lift+finalize
     /// (~2.2 s per slot at 34% GPU-idle). The idle window on each slot
     /// should fill with the other slot's GPU work, yielding a wall well
     /// under 2x single-prover succinct (3231 ms).
@@ -2770,7 +2770,7 @@ fn main() {
         );
     }
 
-    /// SP6d iter 5 — `WebGpuProverPool::lift_and_join_async` distributes a
+    /// `WebGpuProverPool::lift_and_join_async` distributes a
     /// composite receipt's per-segment lifts across pool slots and joins
     /// in a balanced tree. On a single-segment fixture (poseidon2_basic)
     /// there's only one lift, so this measures that the pool path
@@ -2829,11 +2829,11 @@ fn main() {
         );
     }
 
-    /// SP6d iter 7 — multi-segment lift+join validation via pool. The
-    /// earlier iter-5 attempt OOM'd wasm32 because `try_join_all` of N
-    /// lifts allocated all peak buffers simultaneously. Iter 6 fixed
-    /// the keccak path with bounded chunks; iter 7 applies the same to
-    /// `lift_and_join_async`.
+    /// Multi-segment lift+join validation via pool. An
+    /// earlier attempt OOM'd wasm32 because `try_join_all` of N
+    /// lifts allocated all peak buffers simultaneously; bounded chunks
+    /// fixed the keccak path first and `lift_and_join_async` uses the
+    /// same approach.
     ///
     /// BusyLoop{40_000} at segment_limit_po2(15) ≈ 32K cycles per
     /// segment ⇒ 2 segments. With 2-slot pool: both lifts run in one
@@ -2891,7 +2891,7 @@ fn main() {
         ));
     }
 
-    /// SP6d iter 6 — distribute keccak proof requests across pool slots.
+    /// Distribute keccak proof requests across pool slots.
     /// Executes a KeccakUnion(2) fixture to produce 2 pending keccak
     /// proof requests via the executor (no prove), then runs them via
     /// `WebGpuProverPool::prove_keccak_requests_async` on a 2-slot pool.
@@ -2951,7 +2951,7 @@ fn main() {
         ));
     }
 
-    /// SP6d iter 8 — keccak distribution WALL-TIME comparison.
+    /// Keccak distribution WALL-TIME comparison.
     ///
     /// GPU utilization is a proxy; the goal is minimal wall time. This
     /// test settles whether distributing keccak proofs across pool
@@ -3032,10 +3032,10 @@ fn main() {
         ));
     }
 
-    /// SP6d iter 9 — dependency-graph scheduler WALL-TIME comparison on a
+    /// Dependency-graph scheduler WALL-TIME comparison on a
     /// scaled-up mixed segment+keccak workload.
     ///
-    /// This is the benchmark that tests the one hypothesis the SP6d
+    /// This is the benchmark that tests the one hypothesis the
     /// homogeneous A/B tests could not: a *heterogeneous* job mix.
     /// `KeccakUnion(3)` produces ~10 rv32im segments AND ~25 pending
     /// keccak proofs + a union tree + a resolve. Segment proves are
@@ -3114,7 +3114,7 @@ fn main() {
         ));
     }
 
-    /// SP6d iter 10 — the pool's public async proving entrypoint should
+    /// The pool's public async proving entrypoint should
     /// use the dependency-graph scheduler by default. This test verifies
     /// routing through the scheduler's early dev-mode rejection path so it
     /// does not spend minutes on a full succinct proof.
@@ -3145,7 +3145,7 @@ fn main() {
         );
     }
 
-    /// SP6d iter 10 — pooled browser users should get the same async
+    /// Pooled browser users should get the same async
     /// convenience shape as `WebGpuProver`, while still routing through
     /// the scheduled pool path.
     #[wasm_bindgen_test(async)]
@@ -3180,11 +3180,11 @@ fn main() {
         );
     }
 
-    /// SP7 iter 1 — synthetic witgen-codegen scale test.
+    /// Synthetic witgen-codegen scale test.
     ///
-    /// SP7's user-directed approach is "codegen WGSL anyway", betting
-    /// SP3's ~30x staged-eval_check ceiling does not generalize to
-    /// witgen. SP3's ceiling is an *execution-model* ceiling (the 1.6 MB
+    /// The witgen-codegen approach bets that the ~30x staged-eval_check
+    /// slowdown does not generalize to
+    /// witgen. That slowdown is an *execution-model* ceiling (the 1.6 MB
     /// staged shader ran ~30x slow even with the compile cached), so the
     /// kill-criterion only triggers at scale. This test emits a
     /// witgen-*shaped* WGSL kernel — many small `fn`s in a call DAG,
@@ -3195,14 +3195,14 @@ fn main() {
     ///     through a runtime-false mux (so Chrome must compile it but it
     ///     never executes).
     /// Per-cycle execution time is then compared. If LARGE >> SMALL,
-    /// kernel scale itself slows the hot path → SP3's ceiling has
-    /// generalized to witgen → kill SP7-codegen. If LARGE ≈ SMALL,
+    /// kernel scale itself slows the hot path → the eval_check ceiling
+    /// has generalized to witgen → codegen is dead. If LARGE ≈ SMALL,
     /// codegen scales and the full transpiler is justified.
-    /// BabyBear field modulus, shared by the SP7 synthetic-codegen
+    /// BabyBear field modulus, shared by the synthetic-codegen
     /// generator and its test (the WGSL prelude defines its own copy).
-    const SP7_P: u32 = 2013265921;
+    const BABY_BEAR_P: u32 = 2013265921;
 
-    fn sp7_field_prelude() -> String {
+    fn wgsl_field_prelude() -> String {
         // BabyBear scalar arithmetic, copied from
         // `risc0/zkp/src/hal/webgpu_codegen/prelude.wgsl` so the
         // synthetic kernel does real field work, not a toy.
@@ -3251,9 +3251,9 @@ fn buf_load(col: u32, cycle: u32, back: u32) -> u32 {
     /// `mul(a, a)` squarings, so it is not an affine map and cannot
     /// collapse to O(1) regardless; the store makes that guaranteed.
     /// Each caller must give every function a disjoint `store_col`.
-    /// `None` (iter-1 callers) emits no store — fine there, since iter-1
-    /// only measures kernel SIZE effects, not per-cycle throughput.
-    fn sp7_emit_fn(name: &str, seed: u32, ops: u32, store_col: Option<u32>, tail: &str) -> String {
+    /// `None` (size-probe callers) emits no store — fine there, since
+    /// they only measure kernel SIZE effects, not per-cycle throughput.
+    fn emit_wgsl_fn(name: &str, seed: u32, ops: u32, store_col: Option<u32>, tail: &str) -> String {
         let mut s = format!("fn {name}(cycle: u32, acc: u32) -> u32 {{\n  var a = acc;\n");
         let mut rng = seed | 1;
         let next = |rng: &mut u32| {
@@ -3283,7 +3283,7 @@ fn buf_load(col: u32, cycle: u32, back: u32) -> u32 {
                 1 => "l0".to_string(),
                 2 => "l1".to_string(),
                 3 => "l2".to_string(),
-                _ => format!("{}u", next(&mut rng) % SP7_P),
+                _ => format!("{}u", next(&mut rng) % BABY_BEAR_P),
             };
             s.push_str(&format!("  a = {op}({lhs}, {rhs});\n"));
         }
@@ -3303,19 +3303,19 @@ fn buf_load(col: u32, cycle: u32, back: u32) -> u32 {
     /// `cold_count` functions reachable only through a runtime-false
     /// guard. Functions are emitted leaves-first (WGSL has no forward
     /// references). Returns the full WGSL source.
-    /// `cold_reachable`: when true (iter-1 behavior) the cold subtree is
+    /// `cold_reachable`: when true the cold subtree is
     /// reached via a runtime-false guard, so the device must compile AND keep
     /// it. When false the cold functions are emitted but never referenced from
-    /// `main` — a truly-dead subtree. The iter-5a cliff probe compares the two:
+    /// `main` — a truly-dead subtree. The cliff probe compares the two:
     /// if a huge unreachable cold set still dispatches, the device cliff is
     /// reachable-code-based (Tint DCEs per pipeline); if it dies, whole-module.
-    fn sp7_build_witgen_shaped_wgsl(
+    fn build_witgen_shaped_wgsl(
         hot_depth: u32,
         ops_per_fn: u32,
         cold_count: u32,
         cold_reachable: bool,
     ) -> String {
-        let mut out = sp7_field_prelude();
+        let mut out = wgsl_field_prelude();
         // Cold subtree: binary tree, node i has children 2i+1, 2i+2.
         // Emit highest index first so children precede parents.
         if cold_count > 0 {
@@ -3329,7 +3329,7 @@ fn buf_load(col: u32, cycle: u32, back: u32) -> u32 {
                 if c2 < cold_count {
                     tail.push_str(&format!("  a = cold_{c2}(cycle, a);\n"));
                 }
-                out.push_str(&sp7_emit_fn(
+                out.push_str(&emit_wgsl_fn(
                     &format!("cold_{idx}"),
                     0x9e3779b9u32.wrapping_mul(idx + 1),
                     ops_per_fn,
@@ -3346,7 +3346,7 @@ fn buf_load(col: u32, cycle: u32, back: u32) -> u32 {
             } else {
                 String::new()
             };
-            out.push_str(&sp7_emit_fn(
+            out.push_str(&emit_wgsl_fn(
                 &format!("hot_{idx}"),
                 0x85ebca6bu32.wrapping_mul(idx + 7),
                 ops_per_fn,
@@ -3374,21 +3374,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         out
     }
 
-    /// SP7 iter 2 — build a STAGED witgen-shaped kernel set. The same
+    /// Build a STAGED witgen-shaped kernel set. The same
     /// `hot_depth` linear hot-path chain as the single-kernel generator,
     /// but split across `n_stages` separate `@compute` kernels. Stage `s`
     /// runs hot functions `[s*fns_per_stage, (s+1)*fns_per_stage)`,
     /// reading the running `acc` from a `scratch` storage buffer (binding
     /// 2) and writing it back — except stage 0 seeds `acc` from `data`
     /// and the last stage writes the result to `data`. The hot functions
-    /// keep the SAME LCG seeds as `sp7_build_witgen_shaped_wgsl`, so a
+    /// keep the SAME LCG seeds as `build_witgen_shaped_wgsl`, so a
     /// staged set does byte-identical compute work to the single kernel —
     /// the only difference is the dispatch count and the scratch handoff.
     ///
     /// `n_stages == 1` reproduces the single-kernel hot path exactly,
     /// giving the baseline for the staging-overhead A/B. Returns one WGSL
     /// source per stage.
-    fn sp7_build_staged_hot_wgsl(hot_depth: u32, ops_per_fn: u32, n_stages: u32) -> Vec<String> {
+    fn build_staged_hot_wgsl(hot_depth: u32, ops_per_fn: u32, n_stages: u32) -> Vec<String> {
         assert!(
             n_stages >= 1 && hot_depth % n_stages == 0,
             "hot_depth ({hot_depth}) must be divisible by n_stages ({n_stages})"
@@ -3396,7 +3396,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let fns_per_stage = hot_depth / n_stages;
         let mut stages = Vec::with_capacity(n_stages as usize);
         for s in 0..n_stages {
-            let mut out = sp7_field_prelude();
+            let mut out = wgsl_field_prelude();
             out.push_str("@group(0) @binding(2) var<storage, read_write> scratch: array<u32>;\n");
             let lo = s * fns_per_stage;
             let hi = (s + 1) * fns_per_stage; // exclusive
@@ -3415,7 +3415,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // non-elidable side effect. This is identical whether
                 // function `idx` is in a 1-stage or an 8-stage kernel,
                 // so the staged-vs-single A/B does byte-identical work.
-                out.push_str(&sp7_emit_fn(
+                out.push_str(&emit_wgsl_fn(
                     &format!("hot_{idx}"),
                     0x85ebca6bu32.wrapping_mul(idx + 7),
                     ops_per_fn,
@@ -3444,7 +3444,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     #[wasm_bindgen_test(async)]
-    async fn sp7_witgen_codegen_scale_smoke() {
+    async fn witgen_codegen_scale_smoke() {
         use risc0_zkp::core::hash::poseidon2::Poseidon2HashSuite;
         use risc0_zkp::hal::webgpu::{WebGpuBindingLayout, WebGpuBufferBinding, WebGpuHal};
 
@@ -3469,7 +3469,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // test, so the device-loss point is recorded in evidence only.
         const COLD_SWEEP: [u32; 4] = [0, 128, 384, 768];
         // Each measured window targets >= ~600 ms wall so `Date::now()`'s
-        // ~1 ms resolution contributes < 0.2% error — the iter-1 first
+        // ~1 ms resolution contributes < 0.2% error — the first
         // attempt used 2-19 ms windows and produced contradictory
         // results (9.5x one run, 0.67x the next on the SAME kernel).
         const TARGET_WINDOW_MS: f64 = 600.0;
@@ -3485,7 +3485,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let mut data_init = vec![0u32; data_elems as usize];
         for v in data_init.iter_mut() {
             seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
-            *v = (seed % (SP7_P - 1)) + 1;
+            *v = (seed % (BABY_BEAR_P - 1)) + 1;
         }
         let data_init_bytes: &[u8] = bytemuck::cast_slice(&data_init);
 
@@ -3495,7 +3495,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         let layout = hal
             .create_bind_group_layout(
-                "sp7_scale_layout",
+                "codegen_scale_layout",
                 &[
                     WebGpuBindingLayout::storage(0, 0),
                     WebGpuBindingLayout::uniform(1, params_bytes.len() as u64),
@@ -3527,7 +3527,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             hal.dispatch_compute_1d(kernel, bind_group, workgroups);
             if let Err(e) = hal.read_buffer(data_buf, 4).await {
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "sp7_scale {tag} phase=first_dispatch_FAILED err={e:?}"
+                    "codegen_scale {tag} phase=first_dispatch_FAILED err={e:?}"
                 ));
                 return None;
             }
@@ -3542,7 +3542,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
                 if let Err(e) = hal.read_buffer(data_buf, 4).await {
                     risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "sp7_scale {tag} phase=trial{trial}_FAILED k={k} err={e:?}"
+                        "codegen_scale {tag} phase=trial{trial}_FAILED k={k} err={e:?}"
                     ));
                     return None;
                 }
@@ -3558,17 +3558,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // scale. After the sweep, cold=0 is RE-MEASURED: if the recheck
         // diverges from the initial cold=0, the device degraded over
         // the session and the ratios are not trustworthy (this is
-        // exactly the contamination the iter-1 first attempt hit).
+        // exactly the contamination the first attempt hit).
         let mut baseline_ns: Option<f64> = None;
         let mut worst_ratio: f64 = 1.0;
         let mut completed = 0u32;
 
         for &cold in COLD_SWEEP.iter() {
-            let wgsl = sp7_build_witgen_shaped_wgsl(HOT_DEPTH, OPS_PER_FN, cold, true);
+            let wgsl = build_witgen_shaped_wgsl(HOT_DEPTH, OPS_PER_FN, cold, true);
             let wgsl_bytes = wgsl.len();
             let t_compile = js_sys::Date::now();
             let kernel = match hal.create_compute_kernel(
-                "sp7_scale_kernel",
+                "codegen_scale_kernel",
                 &wgsl,
                 "main",
                 &[layout.clone()],
@@ -3576,27 +3576,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 Ok(k) => k,
                 Err(e) => {
                     risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "sp7_scale step cold={cold} wgsl_bytes={wgsl_bytes} phase=compile_FAILED err={e:?}"
+                        "codegen_scale step cold={cold} wgsl_bytes={wgsl_bytes} phase=compile_FAILED err={e:?}"
                     ));
                     break;
                 }
             };
             let compile_ms = js_sys::Date::now() - t_compile;
             risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                "sp7_scale step cold={cold} wgsl_bytes={wgsl_bytes} compile_ms={compile_ms:.0} phase=compiled"
+                "codegen_scale step cold={cold} wgsl_bytes={wgsl_bytes} compile_ms={compile_ms:.0} phase=compiled"
             ));
 
             let data_buf = hal
-                .create_storage_buffer("sp7_data", data_bytes)
+                .create_storage_buffer("codegen_data", data_bytes)
                 .expect("data buf");
             hal.write_buffer(&data_buf, 0, data_init_bytes)
                 .expect("data upload");
             let params_buf = hal
-                .create_uniform_buffer("sp7_params", params_bytes)
+                .create_uniform_buffer("codegen_params", params_bytes)
                 .expect("params buf");
             let bind_group = hal
                 .create_bind_group(
-                    "sp7_scale_bg",
+                    "codegen_scale_bg",
                     &layout,
                     &[
                         WebGpuBufferBinding::new(0, &data_buf),
@@ -3620,7 +3620,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             .await
             else {
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "sp7_scale step cold={cold} wgsl_bytes={wgsl_bytes} phase=measure_FAILED"
+                    "codegen_scale step cold={cold} wgsl_bytes={wgsl_bytes} phase=measure_FAILED"
                 ));
                 break;
             };
@@ -3636,7 +3636,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             worst_ratio = worst_ratio.max(ratio);
             completed += 1;
             risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                "sp7_scale step cold={cold} wgsl_bytes={wgsl_bytes} compile_ms={compile_ms:.0} median_ns_per_cycle={ns_per_cycle:.2} ratio_vs_baseline={ratio:.3} phase=measured"
+                "codegen_scale step cold={cold} wgsl_bytes={wgsl_bytes} compile_ms={compile_ms:.0} median_ns_per_cycle={ns_per_cycle:.2} ratio_vs_baseline={ratio:.3} phase=measured"
             ));
         }
 
@@ -3648,21 +3648,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // 1.0 measurement.
         let mut recheck_ratio: f64 = -1.0;
         if completed >= 1 {
-            let wgsl = sp7_build_witgen_shaped_wgsl(HOT_DEPTH, OPS_PER_FN, 0, true);
+            let wgsl = build_witgen_shaped_wgsl(HOT_DEPTH, OPS_PER_FN, 0, true);
             if let Ok(kernel) =
-                hal.create_compute_kernel("sp7_scale_recheck", &wgsl, "main", &[layout.clone()])
+                hal.create_compute_kernel("codegen_scale_recheck", &wgsl, "main", &[layout.clone()])
             {
                 let data_buf = hal
-                    .create_storage_buffer("sp7_data_rc", data_bytes)
+                    .create_storage_buffer("codegen_data_rc", data_bytes)
                     .expect("data buf");
                 hal.write_buffer(&data_buf, 0, data_init_bytes)
                     .expect("data upload");
                 let params_buf = hal
-                    .create_uniform_buffer("sp7_params_rc", params_bytes)
+                    .create_uniform_buffer("codegen_params_rc", params_bytes)
                     .expect("params buf");
                 let bind_group = hal
                     .create_bind_group(
-                        "sp7_scale_bg_rc",
+                        "codegen_scale_bg_rc",
                         &layout,
                         &[
                             WebGpuBufferBinding::new(0, &data_buf),
@@ -3689,7 +3689,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                         }
                     }
                     risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "sp7_scale recheck cold=0 median_ns_per_cycle={rc_ns:.2} recheck_ratio={recheck_ratio:.3}"
+                        "codegen_scale recheck cold=0 median_ns_per_cycle={rc_ns:.2} recheck_ratio={recheck_ratio:.3}"
                     ));
                 }
             }
@@ -3716,7 +3716,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             "codegen_scales"
         };
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "sp7_witgen_codegen_scale completed_steps={completed}/{} worst_ratio={worst_ratio:.3} recheck_ratio={recheck_ratio:.3} verdict={verdict} n_cycles={N_CYCLES} hot_depth={HOT_DEPTH} ops_per_fn={OPS_PER_FN} trials={TRIALS}",
+            "codegen_witgen_codegen_scale completed_steps={completed}/{} worst_ratio={worst_ratio:.3} recheck_ratio={recheck_ratio:.3} verdict={verdict} n_cycles={N_CYCLES} hot_depth={HOT_DEPTH} ops_per_fn={OPS_PER_FN} trials={TRIALS}",
             COLD_SWEEP.len()
         ));
 
@@ -3726,17 +3726,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // if even the pure hot path fails, the harness is broken.
         assert!(
             completed >= 1,
-            "SP7 iter 1: even the cold=0 baseline kernel failed to compile + run"
+            "even the cold=0 baseline kernel failed to compile + run"
         );
     }
 
-    /// SP7 iter 2 — chunked-codegen spike.
+    /// Chunked-codegen spike.
     ///
-    /// iter 1 found single-kernel codegen'd WGSL executes at full speed
-    /// up to ~247 KB but the device dies at ~478 KB — a capacity cliff,
-    /// not a slowdown ceiling. Real witgen WGSL is multi-MB, so a single
-    /// kernel is out; the surviving path is CHUNKED codegen (many
-    /// sub-250 KB kernels, staged). iter 2 tests whether the staging
+    /// The scale test found single-kernel codegen'd WGSL executes at
+    /// full speed up to ~247 KB but the device dies at ~478 KB — a
+    /// capacity cliff, not a slowdown ceiling. Real witgen WGSL is
+    /// multi-MB, so a single kernel is out; the surviving path is CHUNKED
+    /// codegen (many sub-250 KB kernels, staged). This tests whether the staging
     /// itself is cheap: it runs the SAME hot-path work as one kernel
     /// vs. split across N staged kernels that hand the running `acc`
     /// through a `scratch` storage buffer.
@@ -3750,7 +3750,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     /// ratio stays near 1×, chunked codegen is viable and the full
     /// chunked transpiler (TO-BE iters 3+) is justified.
     #[wasm_bindgen_test(async)]
-    async fn sp7_chunked_codegen_spike_smoke() {
+    async fn chunked_codegen_spike_smoke() {
         use risc0_zkp::core::hash::poseidon2::Poseidon2HashSuite;
         use risc0_zkp::hal::webgpu::{WebGpuBindingLayout, WebGpuBufferBinding, WebGpuHal};
 
@@ -3767,12 +3767,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // is large enough that the single kernel does heavy per-cycle
         // work (~6 k ops) so one dispatch is multiple ms — measurable
         // with `Date::now()`. The single kernel lands ~160 KB WGSL,
-        // safely under iter-1's ~247 KB safe zone.
+        // safely under the measured ~247 KB safe zone.
         const HOT_DEPTH: u32 = 24;
         const OPS_PER_FN: u32 = 256;
         const STAGE_SWEEP: [u32; 4] = [1, 2, 4, 8];
-        // FIXED iteration count — no calibration. iter-1's first attempt
-        // and iter-2's first attempt both produced quantized noise
+        // FIXED iteration count — no calibration. Earlier calibrated
+        // attempts produced quantized noise
         // because a single warm-up dispatch is too fast to time, so the
         // calibrated K was wrong. A fixed K large enough that even the
         // fastest case (n_stages=1) runs >~1 s makes every window
@@ -3788,7 +3788,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let mut data_init = vec![0u32; data_elems as usize];
         for v in data_init.iter_mut() {
             seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
-            *v = (seed % (SP7_P - 1)) + 1;
+            *v = (seed % (BABY_BEAR_P - 1)) + 1;
         }
         let data_init_bytes: &[u8] = bytemuck::cast_slice(&data_init);
 
@@ -3800,7 +3800,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // uniform layout across the sweep.
         let layout = hal
             .create_bind_group_layout(
-                "sp7_chunk_layout",
+                "codegen_chunk_layout",
                 &[
                     WebGpuBindingLayout::storage(0, 0),
                     WebGpuBindingLayout::uniform(1, params_bytes.len() as u64),
@@ -3821,17 +3821,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         for &n_stages in STAGE_SWEEP.iter() {
             // Compile every stage kernel.
-            let sources = sp7_build_staged_hot_wgsl(HOT_DEPTH, OPS_PER_FN, n_stages);
+            let sources = build_staged_hot_wgsl(HOT_DEPTH, OPS_PER_FN, n_stages);
             let mut kernels = Vec::with_capacity(sources.len());
             let mut total_bytes = 0usize;
             let mut compile_ok = true;
             for (si, src) in sources.iter().enumerate() {
                 total_bytes += src.len();
-                match hal.create_compute_kernel("sp7_chunk_stage", src, "main", &[layout.clone()]) {
+                match hal.create_compute_kernel("codegen_chunk_stage", src, "main", &[layout.clone()]) {
                     Ok(k) => kernels.push(k),
                     Err(e) => {
                         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                            "sp7_chunk step n_stages={n_stages} stage={si} phase=compile_FAILED err={e:?}"
+                            "codegen_chunk step n_stages={n_stages} stage={si} phase=compile_FAILED err={e:?}"
                         ));
                         compile_ok = false;
                         break;
@@ -3844,19 +3844,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Fresh buffers + bind group.
             let data_buf = hal
-                .create_storage_buffer("sp7_chunk_data", data_bytes)
+                .create_storage_buffer("codegen_chunk_data", data_bytes)
                 .expect("data buf");
             hal.write_buffer(&data_buf, 0, data_init_bytes)
                 .expect("data upload");
             let params_buf = hal
-                .create_uniform_buffer("sp7_chunk_params", params_bytes)
+                .create_uniform_buffer("codegen_chunk_params", params_bytes)
                 .expect("params buf");
             let scratch_buf = hal
-                .create_storage_buffer("sp7_chunk_scratch", scratch_bytes)
+                .create_storage_buffer("codegen_chunk_scratch", scratch_bytes)
                 .expect("scratch buf");
             let bind_group = hal
                 .create_bind_group(
-                    "sp7_chunk_bg",
+                    "codegen_chunk_bg",
                     &layout,
                     &[
                         WebGpuBufferBinding::new(0, &data_buf),
@@ -3879,7 +3879,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             dispatch_iter(&kernels);
             if let Err(e) = hal.read_buffer(&data_buf, 4).await {
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "sp7_chunk step n_stages={n_stages} phase=warmup_FAILED err={e:?}"
+                    "codegen_chunk step n_stages={n_stages} phase=warmup_FAILED err={e:?}"
                 ));
                 break;
             }
@@ -3893,7 +3893,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
                 if let Err(e) = hal.read_buffer(&data_buf, 4).await {
                     risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "sp7_chunk step n_stages={n_stages} phase=trial{trial}_FAILED err={e:?}"
+                        "codegen_chunk step n_stages={n_stages} phase=trial{trial}_FAILED err={e:?}"
                     ));
                     measure_ok = false;
                     break;
@@ -3919,7 +3919,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             completed += 1;
             points.push((n_stages, ns_per_cycle));
             risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                "sp7_chunk step n_stages={n_stages} stage_kernels={} total_wgsl_bytes={total_bytes} median_ns_per_cycle={ns_per_cycle:.2} ratio_vs_single={ratio:.3} phase=measured",
+                "codegen_chunk step n_stages={n_stages} stage_kernels={} total_wgsl_bytes={total_bytes} median_ns_per_cycle={ns_per_cycle:.2} ratio_vs_single={ratio:.3} phase=measured",
                 kernels.len()
             ));
         }
@@ -3947,14 +3947,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             f64::NAN
         };
 
-        // Verdict — logged, not asserted. The SP3 staged-eval_check
+        // Verdict — logged, not asserted. The staged-eval_check
         // failure was a ~30× catastrophe. The kill-criterion here is
         // whether staging is a *catastrophe of that class*, judged by
         // the worst ratio: < ~8× (synthetic, GPU-crushed baseline) means
         // no catastrophe — staging overhead is bounded and, in absolute
         // terms (`per_boundary_ns`), small. The definitive ratio-vs-real-
-        // work needs the actual chunked transpiler on real witgen
-        // (TO-BE iter 3+); this spike only rules OUT a staging
+        // work needs the actual chunked transpiler on real witgen;
+        // this spike only rules OUT a staging
         // catastrophe, it cannot rule it IN as a win.
         let verdict = if completed < STAGE_SWEEP.len() as u32 {
             "INCOMPLETE"
@@ -3964,21 +3964,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             "no_staging_catastrophe"
         };
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "sp7_chunked_codegen_spike completed_steps={completed}/{} worst_ratio={worst_ratio:.3} per_boundary_ns={per_boundary_ns:.4} verdict={verdict} hot_depth={HOT_DEPTH} ops_per_fn={OPS_PER_FN} trials={TRIALS}",
+            "codegen_chunked_codegen_spike completed_steps={completed}/{} worst_ratio={worst_ratio:.3} per_boundary_ns={per_boundary_ns:.4} verdict={verdict} hot_depth={HOT_DEPTH} ops_per_fn={OPS_PER_FN} trials={TRIALS}",
             STAGE_SWEEP.len()
         ));
 
         assert!(
             completed >= 1,
-            "SP7 iter 2: even the n_stages=1 baseline failed to compile + run"
+            "even the n_stages=1 baseline failed to compile + run"
         );
     }
 
-    /// SP7 iter 5a — device capacity cliff: reachable-code vs whole-module.
+    /// Device capacity cliff: reachable-code vs whole-module.
     ///
-    /// iter 1 found a single WGSL pipeline dies on its first dispatch at
+    /// The scale test found a single WGSL pipeline dies on its first dispatch at
     /// ~478 KB of *reachable* code. The full rv32im witgen module is ~4.7 MB
-    /// (~10x over), so iter 5 must chunk it — but HOW depends on a fact iter 1
+    /// (~10x over), so chunking is required — but HOW depends on a fact
     /// left open: does the device cliff count *reachable* (per-pipeline,
     /// post-DCE) code, or the *whole module*?
     ///
@@ -3986,13 +3986,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     /// huge cold subtree that is *truly unreachable* (emitted but never
     /// referenced from `main`, cold_reachable=false). If a huge unreachable
     /// cold set still dispatches, the device DCEs per pipeline ->
-    /// REACHABLE_CODE_CLIFF (iter 5 = split step_Top by reachability, no
+    /// REACHABLE_CODE_CLIFF (split step_Top by reachability, no
     /// per-chunk type/layout pruning). If it dies -> WHOLE_MODULE_CLIFF (each
     /// chunk must be a minimal self-contained module). A reachable cold=768
-    /// control runs LAST — iter 1 found that size dies on first dispatch, and
+    /// control runs LAST — that size dies on first dispatch, and
     /// a ceiling hit kills the device for anything after it.
     #[wasm_bindgen_test(async)]
-    async fn sp7_cliff_reachability_smoke() {
+    async fn wgsl_module_cliff_reachability_smoke() {
         console_error_panic_hook::set_once();
 
         // Each probe gets a FRESH WebGpuHal/device. The prior version reused
@@ -4010,7 +4010,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             const HOT_DEPTH: u32 = 24;
             const OPS_PER_FN: u32 = 16;
 
-            let wgsl = sp7_build_witgen_shaped_wgsl(HOT_DEPTH, OPS_PER_FN, cold, cold_reachable);
+            let wgsl = build_witgen_shaped_wgsl(HOT_DEPTH, OPS_PER_FN, cold, cold_reachable);
             let wgsl_bytes = wgsl.len();
             let data_bytes = (N_ROWS * N_COLS) as u64 * 4;
             let params = [N_ROWS, N_CYCLES, N_COLS, 200u32, 255u32, 0u32, 0u32, 0u32];
@@ -4018,7 +4018,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let workgroups = N_CYCLES / 64;
             let log = |phase: &str| {
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "sp7_cliff {tag} cold={cold} reachable={cold_reachable} \
+                    "codegen_cliff {tag} cold={cold} reachable={cold_reachable} \
                      wgsl_bytes={wgsl_bytes} dispatches={n_dispatches} phase={phase}"
                 ));
             };
@@ -4032,7 +4032,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             };
             let layout = hal
                 .create_bind_group_layout(
-                    "sp7_cliff_layout",
+                    "codegen_cliff_layout",
                     &[
                         WebGpuBindingLayout::storage(0, 0),
                         WebGpuBindingLayout::uniform(1, params_bytes.len() as u64),
@@ -4040,7 +4040,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 )
                 .expect("layout");
             let kernel = match hal.create_compute_kernel(
-                "sp7_cliff_kernel",
+                "codegen_cliff_kernel",
                 &wgsl,
                 "main",
                 &[layout.clone()],
@@ -4052,14 +4052,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             };
             let data_buf = hal
-                .create_storage_buffer("sp7_cliff_data", data_bytes)
+                .create_storage_buffer("codegen_cliff_data", data_bytes)
                 .expect("data buf");
             let params_buf = hal
-                .create_uniform_buffer("sp7_cliff_params", params_bytes)
+                .create_uniform_buffer("codegen_cliff_params", params_bytes)
                 .expect("params buf");
             let bind_group = hal
                 .create_bind_group(
-                    "sp7_cliff_bg",
+                    "codegen_cliff_bg",
                     &layout,
                     &[
                         WebGpuBufferBinding::new(0, &data_buf),
@@ -4097,8 +4097,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // 2. THE DECISIVE PROBE: a ~3.73 MB module whose huge cold subtree is
         //    UNREACHABLE from `main`. If it dispatches, the device/Tint DCEs
-        //    unreachable code per pipeline => reachable-code cliff (iter 5
-        //    splits step_Top by reachability, no per-chunk type/layout
+        //    unreachable code per pipeline => reachable-code cliff (split
+        //    step_Top by reachability, no per-chunk type/layout
         //    pruning). If it dies, the cliff counts the whole module => each
         //    chunk must be emitted as a minimal self-contained module.
         let unreachable_big_ok = probe("unreachable_cold6144", 6144, false, 1).await;
@@ -4116,28 +4116,28 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let many_dispatch_ok = probe("many_dispatch", 768, true, 1000).await;
 
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "sp7_cliff verdict cliff_type={cliff_type} cliff_range=1.87MB_OK..2.80MB_FAIL \
+            "codegen_cliff verdict cliff_type={cliff_type} cliff_range=1.87MB_OK..2.80MB_FAIL \
              unreachable_3.73MB_ok={unreachable_big_ok} reachable_3.73MB_fail={reachable_big_fail} \
              sub_cliff_1.87MB_ok={anchor_lo_ok} many_dispatch_1000_ok={many_dispatch_ok}"
         ));
         assert!(
             anchor_lo_ok,
-            "sp7_cliff: anchor_lo (cold=3072, ~1.87 MB) failed to dispatch -- \
+            "codegen_cliff: anchor_lo (cold=3072, ~1.87 MB) failed to dispatch -- \
              device is unhealthy or the VK_ICD_FILENAMES override is missing"
         );
     }
 
-    /// SP7 iter 5c — shared device probe: fresh `WebGpuHal`, compile `module`,
+    /// Shared device probe: fresh `WebGpuHal`, compile `module`,
     /// build a pipeline for `entry`, dispatch over 256 rows, read back.
     /// Returns true iff dispatch+readback succeeded — i.e. the entry's
     /// reachable closure AND the whole module both clear the device's Tint
-    /// capacity ceilings (iter-5b: whole-module ceiling in (3.73, 4.69] MB;
+    /// capacity ceilings (measured: whole-module ceiling in (3.73, 4.69] MB;
     /// reachable closure ~1.9-2.8 MB). Logs
     /// `{tag} {entry} module_bytes=N phase=...` where phase is one of
     /// hal_FAILED / compile_FAILED / dispatch_FAILED / OK. MUST run with
     /// VK_ICD_FILENAMES=.../nvidia_icd.json or Chrome's Dawn may pick a broken
-    /// Mesa Vulkan device (see iter-5a).
-    async fn sp7_probe(tag: &str, module: &str, entry: &'static str) -> bool {
+    /// Mesa Vulkan device.
+    async fn compile_probe(tag: &str, module: &str, entry: &'static str) -> bool {
         use risc0_zkp::core::hash::poseidon2::Poseidon2HashSuite;
         use risc0_zkp::hal::webgpu::{WebGpuBindingLayout, WebGpuBufferBinding, WebGpuHal};
 
@@ -4168,7 +4168,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         };
         let layout = hal
             .create_bind_group_layout(
-                "sp7_probe_layout",
+                "compile_probe_layout",
                 &[
                     WebGpuBindingLayout::storage(0, 0),
                     WebGpuBindingLayout::storage(1, 0),
@@ -4179,7 +4179,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             )
             .expect("layout");
         let kernel =
-            match hal.create_compute_kernel("sp7_probe_kernel", module, entry, &[layout.clone()]) {
+            match hal.create_compute_kernel("compile_probe_kernel", module, entry, &[layout.clone()]) {
                 Ok(k) => k,
                 Err(e) => {
                     log(&format!("compile_FAILED err={e:?}"));
@@ -4187,23 +4187,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             };
         let data_buf = hal
-            .create_storage_buffer("sp7_probe_data", STORAGE_BYTES)
+            .create_storage_buffer("compile_probe_data", STORAGE_BYTES)
             .expect("data buf");
         let global_buf = hal
-            .create_storage_buffer("sp7_probe_global", STORAGE_BYTES)
+            .create_storage_buffer("compile_probe_global", STORAGE_BYTES)
             .expect("global buf");
         let accum_buf = hal
-            .create_storage_buffer("sp7_probe_accum", STORAGE_BYTES)
+            .create_storage_buffer("compile_probe_accum", STORAGE_BYTES)
             .expect("accum buf");
         let mix_buf = hal
-            .create_storage_buffer("sp7_probe_mix", STORAGE_BYTES)
+            .create_storage_buffer("compile_probe_mix", STORAGE_BYTES)
             .expect("mix buf");
         let params_buf = hal
-            .create_uniform_buffer("sp7_probe_params", params_bytes)
+            .create_uniform_buffer("compile_probe_params", params_bytes)
             .expect("params buf");
         let bind_group = hal
             .create_bind_group(
-                "sp7_probe_bg",
+                "compile_probe_bg",
                 &layout,
                 &[
                     WebGpuBufferBinding::new(0, &data_buf),
@@ -6054,9 +6054,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    const SP7_EXT_INV_PLACEHOLDER: &str = "fn ext_inv(x: ExtVal) -> ExtVal {\n  return x;\n}";
+    const EXT_INV_PLACEHOLDER: &str = "fn ext_inv(x: ExtVal) -> ExtVal {\n  return x;\n}";
 
-    const SP7_EXT_INV_FORMULA_FN: &str = r#"fn ext_inv(x: ExtVal) -> ExtVal {
+    const EXT_INV_FORMULA_FN: &str = r#"fn ext_inv(x: ExtVal) -> ExtVal {
   let beta = sub(0u, NBETA);
   var b0 = add(mul(x.x, x.x), mul(beta, sub(mul(x.y, add(x.w, x.w)), mul(x.z, x.z))));
   var b2 = add(sub(mul(x.x, add(x.z, x.z)), mul(x.y, x.y)), mul(beta, mul(x.w, x.w)));
@@ -6073,9 +6073,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-    const SP7_EXT_INV_FORMULA_PROBE: &str = r#"
+    const EXT_INV_FORMULA_PROBE: &str = r#"
 @compute @workgroup_size(1)
-fn sp7_ext_inv_formula_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn ext_inv_formula_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (gid.x != 0u) {
     return;
   }
@@ -6093,16 +6093,16 @@ fn sp7_ext_inv_formula_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-    fn sp7_witgen_prelude_with_ext_inv_formula() -> String {
-        let prelude = include_str!("sp7_wgsl/witgen_prelude.wgsl");
+    fn witgen_prelude_with_ext_inv_formula() -> String {
+        let prelude = include_str!("witgen_wgsl/witgen_prelude.wgsl");
         assert!(
-            prelude.contains(SP7_EXT_INV_PLACEHOLDER),
-            "SP7 ext_inv placeholder changed; revisit formula replacement"
+            prelude.contains(EXT_INV_PLACEHOLDER),
+            "ext_inv placeholder changed; revisit formula replacement"
         );
-        prelude.replace(SP7_EXT_INV_PLACEHOLDER, SP7_EXT_INV_FORMULA_FN)
+        prelude.replace(EXT_INV_PLACEHOLDER, EXT_INV_FORMULA_FN)
     }
 
-    async fn sp7_read_ext_inv_formula_probe(x: BabyBearExtElem) -> Vec<u32> {
+    async fn read_ext_inv_formula_probe(x: BabyBearExtElem) -> Vec<u32> {
         let x_words = x.to_u32_words();
         let constants = format!(
             "const TEST_EXT_INV_X0: u32 = {}u;\n\
@@ -6113,18 +6113,18 @@ fn sp7_ext_inv_formula_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         );
         let module = format!(
             "{}\n{}\n{}",
-            sp7_witgen_prelude_with_ext_inv_formula(),
+            witgen_prelude_with_ext_inv_formula(),
             constants,
-            SP7_EXT_INV_FORMULA_PROBE
+            EXT_INV_FORMULA_PROBE
         );
         let params: [u32; 8] = [1, 1, 1, 1, 0, 0, 0, 0];
         let params_bytes: &[u8] = bytemuck::cast_slice(&params);
         let hal = WebGpuHal::new(Poseidon2HashSuite::new_suite())
             .await
-            .expect("sp7_ext_inv_formula hal");
+            .expect("codegen_ext_inv_formula hal");
         let layout = hal
             .create_bind_group_layout(
-                "sp7_ext_inv_formula_layout",
+                "codegen_ext_inv_formula_layout",
                 &[
                     WebGpuBindingLayout::storage(0, 0),
                     WebGpuBindingLayout::storage(1, 0),
@@ -6133,33 +6133,33 @@ fn sp7_ext_inv_formula_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     WebGpuBindingLayout::uniform(4, params_bytes.len() as u64),
                 ],
             )
-            .expect("sp7_ext_inv_formula layout");
+            .expect("codegen_ext_inv_formula layout");
         let kernel = hal
             .create_compute_kernel(
-                "sp7_ext_inv_formula_kernel",
+                "codegen_ext_inv_formula_kernel",
                 &module,
-                "sp7_ext_inv_formula_main",
+                "ext_inv_formula_main",
                 &[layout.clone()],
             )
-            .expect("sp7_ext_inv_formula kernel");
+            .expect("codegen_ext_inv_formula kernel");
         let data_buf = hal
-            .create_storage_buffer("sp7_ext_inv_formula_data", 32)
-            .expect("sp7_ext_inv_formula data");
+            .create_storage_buffer("codegen_ext_inv_formula_data", 32)
+            .expect("codegen_ext_inv_formula data");
         let global_buf = hal
-            .create_storage_buffer("sp7_ext_inv_formula_global", 4)
-            .expect("sp7_ext_inv_formula global");
+            .create_storage_buffer("codegen_ext_inv_formula_global", 4)
+            .expect("codegen_ext_inv_formula global");
         let accum_buf = hal
-            .create_storage_buffer("sp7_ext_inv_formula_accum", 4)
-            .expect("sp7_ext_inv_formula accum");
+            .create_storage_buffer("codegen_ext_inv_formula_accum", 4)
+            .expect("codegen_ext_inv_formula accum");
         let mix_buf = hal
-            .create_storage_buffer("sp7_ext_inv_formula_mix", 4)
-            .expect("sp7_ext_inv_formula mix");
+            .create_storage_buffer("codegen_ext_inv_formula_mix", 4)
+            .expect("codegen_ext_inv_formula mix");
         let params_buf = hal
-            .create_uniform_buffer("sp7_ext_inv_formula_params", params_bytes)
-            .expect("sp7_ext_inv_formula params");
+            .create_uniform_buffer("codegen_ext_inv_formula_params", params_bytes)
+            .expect("codegen_ext_inv_formula params");
         let bind_group = hal
             .create_bind_group(
-                "sp7_ext_inv_formula_bg",
+                "codegen_ext_inv_formula_bg",
                 &layout,
                 &[
                     WebGpuBufferBinding::new(0, &data_buf),
@@ -6169,25 +6169,25 @@ fn sp7_ext_inv_formula_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     WebGpuBufferBinding::new(4, &params_buf),
                 ],
             )
-            .expect("sp7_ext_inv_formula bind group");
+            .expect("codegen_ext_inv_formula bind group");
         hal.dispatch_compute_1d(&kernel, &bind_group, 1);
         let gpu_bytes = hal
             .read_buffer(&data_buf, 32)
             .await
-            .expect("sp7_ext_inv_formula readback");
+            .expect("codegen_ext_inv_formula readback");
         bytemuck::checked::try_cast_slice::<u8, u32>(gpu_bytes.as_slice())
-            .expect("sp7_ext_inv_formula readback cast")
+            .expect("codegen_ext_inv_formula readback cast")
             .to_vec()
     }
 
     #[wasm_bindgen_test(async)]
-    async fn sp7_ext_inv_formula_matches_baby_bear_on_chrome() {
+    async fn ext_inv_formula_matches_baby_bear_on_chrome() {
         console_error_panic_hook::set_once();
 
         let x = ext_elem(0x307);
         let expected_inv = x.inv().to_u32_words();
         let expected_product = BabyBearExtElem::ONE.to_u32_words();
-        let gpu_words = sp7_read_ext_inv_formula_probe(x).await;
+        let gpu_words = read_ext_inv_formula_probe(x).await;
         assert_eq!(
             &gpu_words[0..4],
             expected_inv.as_slice(),
@@ -6200,33 +6200,33 @@ fn sp7_ext_inv_formula_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         );
     }
 
-    /// SP7 iter 5c — `@compute` entries for the pruned-module probes.
+    /// `@compute` entries for the pruned-module probes.
     /// `witgen_nop` touches all 5 bindings (so Tint keeps the bind-group
     /// layout) and stores to data_buf, but reaches ZERO step fns — it is a
     /// per-module whole-module-ceiling control. `witgen_top` /
     /// `witgen_top_accum` call the real generated step entry.
-    const SP7_NOP_ENTRY: &str = "
+    const WITGEN_NOP_ENTRY: &str = "
 @compute @workgroup_size(64)
 fn witgen_nop(@builtin(global_invocation_id) gid: vec3<u32>) {
   cycle = gid.x;
   data_buf[gid.x] = gid.x + global_buf[0] + accum_buf[0] + mix_buf[0] + params.data_rows;
 }
 ";
-    const SP7_TOP_ENTRY: &str = "
+    const WITGEN_TOP_ENTRY: &str = "
 @compute @workgroup_size(64)
 fn witgen_top(@builtin(global_invocation_id) gid: vec3<u32>) {
   cycle = gid.x;
   step_Top(buf_data, buf_global);
 }
 ";
-    const SP7_ACCUM_ENTRY: &str = "
+    const WITGEN_ACCUM_ENTRY: &str = "
 @compute @workgroup_size(64)
 fn witgen_top_accum(@builtin(global_invocation_id) gid: vec3<u32>) {
   cycle = gid.x;
   step_TopAccum(buf_accum, buf_data, buf_global, buf_mix);
 }
 ";
-    const SP7_TOPACCUM_ARM5_GUARDED_ENTRY: &str = "
+    const TOPACCUM_ARM5_GUARDED_ENTRY: &str = "
 @compute @workgroup_size(64)
 fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   cycle = gid.x;
@@ -6237,9 +6237,9 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ";
 
-    /// SP7 iter 5c — does step_Top dispatch as a PRUNED per-entry module?
+    /// Does step_Top dispatch as a PRUNED per-entry module?
     ///
-    /// iter 5b proved a whole-module ceiling in (3.73, 4.69] MB: the 4.69 MB
+    /// Measurement pinned a whole-module ceiling in (3.73, 4.69] MB: the 4.69 MB
     /// module loses the device even for a trivial entry. The corrected
     /// chunking strategy is per-entry pruned modules — prelude + ALL types +
     /// ALL layout + ONLY this entry's reachable fn closure (closure computed
@@ -6251,30 +6251,30 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     /// wasm-bindgen-test-runner invocation (fresh Chrome — avoids device-loss
     /// contamination) with VK_ICD_FILENAMES set.
     #[wasm_bindgen_test(async)]
-    async fn sp7_pruned_top_probe() {
+    async fn pruned_top_probe() {
         console_error_panic_hook::set_once();
-        const PRELUDE: &str = include_str!("sp7_wgsl/witgen_prelude.wgsl");
-        const TYPES: &str = include_str!("sp7_wgsl/types.wgsl.inc");
-        const LAYOUT: &str = include_str!("sp7_wgsl/layout.wgsl.inc");
-        const STEPS_TOP: &str = include_str!("sp7_wgsl/steps_step_Top.pruned.wgsl");
+        const PRELUDE: &str = include_str!("witgen_wgsl/witgen_prelude.wgsl");
+        const TYPES: &str = include_str!("witgen_wgsl/types.wgsl.inc");
+        const LAYOUT: &str = include_str!("witgen_wgsl/layout.wgsl.inc");
+        const STEPS_TOP: &str = include_str!("witgen_wgsl/steps_step_Top.pruned.wgsl");
 
         let module =
-            format!("{PRELUDE}\n{TYPES}\n{LAYOUT}\n{STEPS_TOP}\n{SP7_NOP_ENTRY}\n{SP7_TOP_ENTRY}");
+            format!("{PRELUDE}\n{TYPES}\n{LAYOUT}\n{STEPS_TOP}\n{WITGEN_NOP_ENTRY}\n{WITGEN_TOP_ENTRY}");
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "sp7_top pruned module assembled: {} bytes",
+            "codegen_top pruned module assembled: {} bytes",
             module.len()
         ));
         // nop control first: confirms the ~1.99 MB module clears the
         // whole-module ceiling. Short-circuit — if a probe loses the device,
-        // the next sp7_probe just hangs on requestAdapter() (runner SIGKILL).
-        let nop_ok = sp7_probe("sp7_top", &module, "witgen_nop").await;
+        // the next compile_probe just hangs on requestAdapter() (runner SIGKILL).
+        let nop_ok = compile_probe("codegen_top", &module, "witgen_nop").await;
         let top_ok = if nop_ok {
-            sp7_probe("sp7_top", &module, "witgen_top").await
+            compile_probe("codegen_top", &module, "witgen_top").await
         } else {
             false
         };
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "sp7_top verdict: nop_ok={nop_ok} witgen_top_ok={top_ok} -- {}",
+            "codegen_top verdict: nop_ok={nop_ok} witgen_top_ok={top_ok} -- {}",
             if top_ok {
                 "step_Top dispatches as a pruned module; per-entry-pruned design CONFIRMED, \
                  no body-split needed for step_Top"
@@ -6288,7 +6288,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         ));
     }
 
-    /// SP7 iter 5c — does step_TopAccum dispatch as a PRUNED per-entry module?
+    /// Does step_TopAccum dispatch as a PRUNED per-entry module?
     ///
     /// step_TopAccum's reachable closure is ~2.68 MB of fns -> a ~3.27 MB
     /// module: UNDER the whole-module ceiling (3.73 MB) but OVER the safe
@@ -6300,28 +6300,28 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     /// wasm-bindgen-test-runner invocation (fresh Chrome) with VK_ICD_FILENAMES
     /// set.
     #[wasm_bindgen_test(async)]
-    async fn sp7_pruned_accum_probe() {
+    async fn pruned_accum_probe() {
         console_error_panic_hook::set_once();
-        const PRELUDE: &str = include_str!("sp7_wgsl/witgen_prelude.wgsl");
-        const TYPES: &str = include_str!("sp7_wgsl/types.wgsl.inc");
-        const LAYOUT: &str = include_str!("sp7_wgsl/layout.wgsl.inc");
-        const STEPS_ACCUM: &str = include_str!("sp7_wgsl/steps_step_TopAccum.pruned.wgsl");
+        const PRELUDE: &str = include_str!("witgen_wgsl/witgen_prelude.wgsl");
+        const TYPES: &str = include_str!("witgen_wgsl/types.wgsl.inc");
+        const LAYOUT: &str = include_str!("witgen_wgsl/layout.wgsl.inc");
+        const STEPS_ACCUM: &str = include_str!("witgen_wgsl/steps_step_TopAccum.pruned.wgsl");
 
         let module = format!(
-            "{PRELUDE}\n{TYPES}\n{LAYOUT}\n{STEPS_ACCUM}\n{SP7_NOP_ENTRY}\n{SP7_ACCUM_ENTRY}"
+            "{PRELUDE}\n{TYPES}\n{LAYOUT}\n{STEPS_ACCUM}\n{WITGEN_NOP_ENTRY}\n{WITGEN_ACCUM_ENTRY}"
         );
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "sp7_accum pruned module assembled: {} bytes",
+            "codegen_accum pruned module assembled: {} bytes",
             module.len()
         ));
-        let nop_ok = sp7_probe("sp7_accum", &module, "witgen_nop").await;
+        let nop_ok = compile_probe("codegen_accum", &module, "witgen_nop").await;
         let accum_ok = if nop_ok {
-            sp7_probe("sp7_accum", &module, "witgen_top_accum").await
+            compile_probe("codegen_accum", &module, "witgen_top_accum").await
         } else {
             false
         };
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "sp7_accum verdict: nop_ok={nop_ok} witgen_top_accum_ok={accum_ok} -- {}",
+            "codegen_accum verdict: nop_ok={nop_ok} witgen_top_accum_ok={accum_ok} -- {}",
             if accum_ok {
                 "step_TopAccum dispatches as a pruned module; no body-split needed \
                  (the reachable ceiling is >= 2.68 MB)"
@@ -6335,33 +6335,33 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         ));
     }
 
-    /// SP7 TopAccum per-arm split capacity probe. The guarded call keeps
+    /// TopAccum per-arm split capacity probe. The guarded call keeps
     /// the arm5 body reachable to Tint without executing it over dummy data.
     #[wasm_bindgen_test(async)]
-    async fn sp7_topaccum_arm5_split_probe_dispatches() {
+    async fn topaccum_arm5_split_probe_dispatches() {
         console_error_panic_hook::set_once();
-        const PRELUDE: &str = include_str!("sp7_wgsl/witgen_prelude.wgsl");
-        const TYPES: &str = include_str!("sp7_wgsl/types.wgsl.inc");
-        const LAYOUT: &str = include_str!("sp7_wgsl/layout.wgsl.inc");
+        const PRELUDE: &str = include_str!("witgen_wgsl/witgen_prelude.wgsl");
+        const TYPES: &str = include_str!("witgen_wgsl/types.wgsl.inc");
+        const LAYOUT: &str = include_str!("witgen_wgsl/layout.wgsl.inc");
         const ARM5: &str =
-            include_str!("../../../risc0/circuit/rv32im/src/zirgen/topaccum_arm5_probe.wgsl");
+            include_str!("../../../risc0/circuit/rv32im/src/zirgen/topaccum_arm5.wgsl");
 
         let arm5 =
-            format!("{PRELUDE}\n{TYPES}\n{LAYOUT}\n{ARM5}\n{SP7_TOPACCUM_ARM5_GUARDED_ENTRY}");
+            format!("{PRELUDE}\n{TYPES}\n{LAYOUT}\n{ARM5}\n{TOPACCUM_ARM5_GUARDED_ENTRY}");
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "sp7_topaccum_arm5 split module assembled: {} bytes",
+            "codegen_topaccum_arm5 split module assembled: {} bytes",
             arm5.len()
         ));
         assert!(
-            sp7_probe("sp7_topaccum_arm5", &arm5, "topaccum_arm5_guarded_main").await,
+            compile_probe("codegen_topaccum_arm5", &arm5, "topaccum_arm5_guarded_main").await,
             "small TopAccum arm5 split module should compile and dispatch when its body is reachable but not executed"
         );
     }
 
-    /// SP7 iter 6d-c/d -- end-to-end check: the probe-mode GPU witgen
-    /// path runs alongside rust_steps on xgboost, with the iter-6d-d
+    /// End-to-end check: the probe-mode GPU witgen
+    /// path runs alongside rust_steps on xgboost, with the
     /// async Tint prewarm overlapping guest execution. Measures the
-    /// `iter6d_d_witgen_prewarm_async` and `iter6d_c_witgen_probe`
+    /// `witgen_prewarm_async` and `witgen_probe`
     /// stage timers so future sessions can reason about when the
     /// kernel becomes ready vs. when each segment dispatches.
     ///
@@ -6370,13 +6370,13 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     /// N..=11. If the kernel isn't ready by segment N, the probe logs
     /// `SKIP kernel_not_ready` for that segment.
     #[wasm_bindgen_test(async)]
-    async fn iter6d_c_probe_xgboost() {
+    async fn witgen_gpu_probe_xgboost() {
         use forust_ml::GradientBooster;
         use risc0_circuit_rv32im::prove::set_witgen_gpu_probe_enabled;
         use xgboost_methods::{XGBOOST_ELF, XGBOOST_ID};
 
         console_error_panic_hook::set_once();
-        risc0_zkp::hal::webgpu::log_webgpu_metric("iter6d_c probe=on fixture=xgboost");
+        risc0_zkp::hal::webgpu::log_webgpu_metric("witgen_gpu probe=on fixture=xgboost");
         set_witgen_gpu_probe_enabled(true);
 
         let prover = init_prover().await;
@@ -6397,13 +6397,13 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         set_witgen_gpu_probe_enabled(false);
     }
 
-    /// SP7 iter 6d-g step 6.2.3 -- authoritative replacement validation.
+    /// Authoritative replacement validation.
     /// Enables the probe and replace flags so WebGPU writes the MISC0
     /// witness slice and rust_steps skips that CPU step_Top slice while
     /// replaying the lookup-table side effects required by later Control0
     /// rows. Both representative receipts must verify.
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_replace_busy_loop_e2e_verify() {
+    async fn witgen_replace_busy_loop_e2e_verify() {
         use risc0_circuit_rv32im::prove::{
             accum_gpu_mem0_direct_rows, accum_gpu_mem1_direct_rows, accum_gpu_misc0_direct_rows,
             accum_gpu_misc1_direct_rows, accum_gpu_misc2_direct_rows,
@@ -6681,7 +6681,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_preflight_meta_reuse_busy_loop_e2e_verify() {
+    async fn preflight_meta_reuse_busy_loop_e2e_verify() {
         use risc0_circuit_rv32im::prove::{
             set_accum_gpu_mem0_direct_enabled, set_accum_gpu_mem1_direct_enabled,
             set_accum_gpu_misc0_direct_enabled, set_accum_gpu_misc1_direct_enabled,
@@ -6734,14 +6734,14 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             "multi_test/busy_loop_po2_18_preflight_meta_reuse",
             &diag_before,
             &diag_after,
-            "iter6d_g_arm_preflight",
+            "arm_preflight",
             5_000_000,
         );
         assert_upload_source_delta_absent(
             "multi_test/busy_loop_po2_18_preflight_meta_reuse",
             &diag_before,
             &diag_after,
-            "iter6d_g_shadow_meta",
+            "shadow_meta",
         );
 
         set_witgen_gpu_replace_nonblocking_pending_enabled(true);
@@ -6755,11 +6755,11 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         set_witgen_gpu_probe_enabled(false);
     }
 
-    /// SP7do follow-up: MEM0 replacement is only viable if its accumulator
+    /// MEM0 replacement is only viable if its accumulator
     /// path avoids the broad shadow repair that made the correctness-clean
     /// production candidate wall-negative.
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_mem0_direct_accum_candidate_e2e_verify() {
+    async fn mem0_direct_accum_candidate_e2e_verify() {
         use risc0_circuit_rv32im::prove::{
             accum_gpu_mem0_direct_rows, set_accum_gpu_mem0_direct_enabled,
             set_witgen_gpu_mem0_replace_candidate_enabled, set_witgen_gpu_probe_enabled,
@@ -6844,7 +6844,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_mem0_direct_accum_candidate_xgboost_e2e_verify() {
+    async fn mem0_direct_accum_candidate_xgboost_e2e_verify() {
         use forust_ml::GradientBooster;
         use risc0_circuit_rv32im::prove::{
             accum_gpu_mem0_direct_rows, set_accum_gpu_mem0_direct_enabled,
@@ -6908,12 +6908,12 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         set_witgen_gpu_probe_enabled(false);
     }
 
-    /// SP7dq: constrain the MEM0 replacement candidate to LW rows first.
+    /// Constrain the MEM0 replacement candidate to LW rows first.
     /// Prior evidence showed the all-minor candidate helped xgboost but hurt
     /// BusyLoop+KeccakUnion; the immediate test is whether avoiding tiny
     /// per-minor work keeps correctness while reducing that overhead.
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_mem0_lw_direct_accum_candidate_e2e_verify() {
+    async fn mem0_lw_direct_accum_candidate_e2e_verify() {
         use risc0_circuit_rv32im::prove::{
             accum_gpu_mem0_direct_rows, set_accum_gpu_mem0_direct_enabled,
             set_witgen_gpu_mem0_replace_candidate_enabled, set_witgen_gpu_mem0_replace_minor_mask,
@@ -7029,7 +7029,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_mem0_lw_direct_accum_candidate_xgboost_e2e_verify() {
+    async fn mem0_lw_direct_accum_candidate_xgboost_e2e_verify() {
         use forust_ml::GradientBooster;
         use risc0_circuit_rv32im::prove::{
             accum_gpu_mem0_direct_rows, set_accum_gpu_mem0_direct_enabled,
@@ -7114,11 +7114,11 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         set_witgen_gpu_probe_enabled(false);
     }
 
-    /// SP7dr: candidate direct accumulator for MEM1/store rows. This should
+    /// Candidate direct accumulator for MEM1/store rows. This should
     /// remove another full major from CPU TopAccum without requiring GPU
     /// witgen ownership of the MEM1 data rows.
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_mem1_direct_accum_candidate_e2e_verify() {
+    async fn mem1_direct_accum_candidate_e2e_verify() {
         use risc0_circuit_rv32im::prove::{
             accum_gpu_mem1_direct_rows, set_accum_gpu_mem1_direct_enabled,
         };
@@ -7209,7 +7209,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_mem1_direct_accum_candidate_xgboost_e2e_verify() {
+    async fn mem1_direct_accum_candidate_xgboost_e2e_verify() {
         use forust_ml::GradientBooster;
         use risc0_circuit_rv32im::prove::{
             accum_gpu_mem1_direct_rows, set_accum_gpu_mem1_direct_enabled,
@@ -7274,12 +7274,12 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         set_accum_gpu_mem1_direct_enabled(false);
     }
 
-    /// SP7em: candidate direct accumulator for CONTROL0 rows. Generated
+    /// Candidate direct accumulator for CONTROL0 rows. Generated
     /// CONTROL0 TopAccum is rejected by inverse pressure, but this narrow path
     /// keeps witness generation CPU-owned and only moves the lookup accumulator
     /// prefixes for major 7 to WebGPU.
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_control0_direct_accum_candidate_e2e_verify() {
+    async fn control0_direct_accum_candidate_e2e_verify() {
         use risc0_circuit_rv32im::prove::{
             accum_gpu_control0_direct_rows, set_accum_gpu_control0_direct_enabled,
         };
@@ -7370,7 +7370,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_control0_direct_accum_candidate_xgboost_e2e_verify() {
+    async fn control0_direct_accum_candidate_xgboost_e2e_verify() {
         use forust_ml::GradientBooster;
         use risc0_circuit_rv32im::prove::{
             accum_gpu_control0_direct_rows, set_accum_gpu_control0_direct_enabled,
@@ -7436,7 +7436,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_mem1_witgen_replace_candidate_e2e_verify() {
+    async fn mem1_witgen_replace_candidate_e2e_verify() {
         use risc0_circuit_rv32im::prove::{
             accum_gpu_mem1_direct_rows, set_accum_gpu_mem1_direct_enabled,
             set_witgen_gpu_mem1_replace_candidate_enabled, set_witgen_gpu_mem1_replace_minor_mask,
@@ -7559,7 +7559,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_mem1_witgen_replace_candidate_xgboost_e2e_verify() {
+    async fn mem1_witgen_replace_candidate_xgboost_e2e_verify() {
         use forust_ml::GradientBooster;
         use risc0_circuit_rv32im::prove::{
             accum_gpu_mem1_direct_rows, set_accum_gpu_mem1_direct_enabled,
@@ -7653,7 +7653,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_mem1_witgen_replace_nonblocking_candidate_e2e_verify() {
+    async fn mem1_witgen_replace_nonblocking_candidate_e2e_verify() {
         use risc0_circuit_rv32im::prove::{
             accum_gpu_mem1_direct_rows, set_accum_gpu_mem1_direct_enabled,
             set_witgen_gpu_mem1_replace_candidate_enabled, set_witgen_gpu_mem1_replace_minor_mask,
@@ -7777,7 +7777,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_mem1_witgen_replace_nonblocking_candidate_xgboost_e2e_verify() {
+    async fn mem1_witgen_replace_nonblocking_candidate_xgboost_e2e_verify() {
         use forust_ml::GradientBooster;
         use risc0_circuit_rv32im::prove::{
             accum_gpu_mem1_direct_rows, set_accum_gpu_mem1_direct_enabled,
@@ -7877,7 +7877,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_nonblocking_witgen_prewarm_candidate_xgboost_e2e_verify() {
+    async fn nonblocking_witgen_prewarm_candidate_xgboost_e2e_verify() {
         use forust_ml::GradientBooster;
         use risc0_circuit_rv32im::prove::{
             set_witgen_gpu_replace_nonblocking_pending_enabled,
@@ -7942,7 +7942,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_nonblocking_witgen_prewarm_candidate_e2e_verify() {
+    async fn nonblocking_witgen_prewarm_candidate_e2e_verify() {
         use risc0_circuit_rv32im::prove::{
             set_witgen_gpu_replace_nonblocking_pending_enabled,
             witgen_gpu_replace_nonblocking_pending_skips, witgen_gpu_short_circuit_cycles,
@@ -8033,7 +8033,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_replace_xgboost() {
+    async fn witgen_replace_xgboost() {
         use forust_ml::GradientBooster;
         use risc0_circuit_rv32im::prove::{
             accum_gpu_misc0_direct_rows, accum_gpu_misc1_direct_rows, accum_gpu_misc2_direct_rows,
@@ -8156,7 +8156,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         set_witgen_gpu_probe_enabled(false);
     }
 
-    /// SP7 iter 6d-g step 6.2.13 -- cell-level diff diagnostic. Runs
+    /// Cell-level diff diagnostic. Runs
     /// GPU pre-dispatch, snapshots the CPU shadow, then resets it +
     /// re-scatters injector + runs rust_steps with mask=0 so we get a
     /// pure-CPU result. Diffs the two snapshots cell-by-cell and logs
@@ -8167,7 +8167,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     /// Expected to FAIL with the bail message and the DIFF_MISMATCH
     /// / DIFF_SUMMARY log lines being the actionable output.
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_diff_xgboost() {
+    async fn witgen_diff_xgboost() {
         use forust_ml::GradientBooster;
         use risc0_circuit_rv32im::prove::set_witgen_gpu_diff_enabled;
         use xgboost_methods::{XGBOOST_ELF, XGBOOST_ID};
@@ -8194,7 +8194,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_diff_busy_loop() {
+    async fn witgen_diff_busy_loop() {
         use risc0_circuit_rv32im::prove::set_witgen_gpu_diff_enabled;
         use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
 
@@ -8253,37 +8253,37 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_diff_busy_loop_misc2() {
+    async fn witgen_diff_busy_loop_misc2() {
         run_witgen_diff_busy_loop_candidate_major(2, "misc2").await;
     }
 
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_diff_busy_loop_mul0() {
+    async fn witgen_diff_busy_loop_mul0() {
         run_witgen_diff_busy_loop_candidate_major(3, "mul0").await;
     }
 
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_diff_busy_loop_div0() {
+    async fn witgen_diff_busy_loop_div0() {
         run_witgen_diff_busy_loop_candidate_major(4, "div0").await;
     }
 
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_diff_busy_loop_mem0() {
+    async fn witgen_diff_busy_loop_mem0() {
         run_witgen_diff_busy_loop_candidate_major(5, "mem0").await;
     }
 
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_diff_busy_loop_mem1() {
+    async fn witgen_diff_busy_loop_mem1() {
         run_witgen_diff_busy_loop_candidate_major(6, "mem1").await;
     }
 
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_diff_busy_loop_ecall0() {
+    async fn witgen_diff_busy_loop_ecall0() {
         run_witgen_diff_busy_loop_candidate_major(8, "ecall0").await;
     }
 
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_replace_diff_busy_loop() {
+    async fn witgen_replace_diff_busy_loop() {
         use risc0_circuit_rv32im::prove::{
             set_witgen_gpu_diff_enabled, set_witgen_gpu_probe_enabled,
             set_witgen_gpu_replace_enabled,
@@ -8317,7 +8317,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_replace_diff_xgboost() {
+    async fn witgen_replace_diff_xgboost() {
         use forust_ml::GradientBooster;
         use risc0_circuit_rv32im::prove::{
             set_witgen_gpu_diff_enabled, set_witgen_gpu_probe_enabled,
@@ -8359,15 +8359,15 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         set_witgen_gpu_probe_enabled(false);
     }
 
-    /// SP7 iter 6d-g step 3 -- batch Tint compile validation for all
+    /// Batch Tint compile validation for all
     /// 13 TopChunk0 major opcode arms. Walks `TOP_CHUNK0_ARM_DELTAS`,
     /// assembles each (baseline + delta + per-arm @compute wrapper),
     /// and confirms Tint accepts every one. Once all 13 pass, the
-    /// per-arm dispatch infrastructure is fully validated; iter-6d-g
-    /// step 4 (HAL multi-kernel cache async-prewarm) just stitches
+    /// per-arm dispatch infrastructure is fully validated; the HAL's
+    /// multi-kernel cache async-prewarm stitches
     /// these compiles together via spawn_local.
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_all_arm_deltas_compile_on_chrome() {
+    async fn all_arm_deltas_compile_on_chrome() {
         use risc0_circuit_rv32im::prove::wgsl_pruner::{
             assemble_arm_kernel, TOP_CHUNK0_ARM_DELTAS,
         };
@@ -8384,7 +8384,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             // what we're checking, not dispatch correctness.
             let wrapper = format!(
                 "@compute @workgroup_size(64)\n\
-                 fn iter6d_g_{}_main(@builtin(global_invocation_id) gid: vec3<u32>) {{\n\
+                 fn {}_main(@builtin(global_invocation_id) gid: vec3<u32>) {{\n\
                    cycle = gid.x;\n\
                    if (cycle >= params.data_rows) {{ return; }}\n\
                    // No-op call only to keep {} reachable.\n\
@@ -8393,10 +8393,10 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 label, sub_fn,
             );
             let module = assemble_arm_kernel(delta, &wrapper);
-            let entry = format!("iter6d_g_{}_main", label);
-            let ok = sp7_probe("iter6d_g_all", &module, Box::leak(entry.into_boxed_str())).await;
+            let entry = format!("{}_main", label);
+            let ok = compile_probe("all", &module, Box::leak(entry.into_boxed_str())).await;
             risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                "iter6d_g_all arm={} module_bytes={} tint_compile_ok={}",
+                "all arm={} module_bytes={} tint_compile_ok={}",
                 label,
                 module.len(),
                 ok,
@@ -8408,21 +8408,21 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "iter6d_g_all VERDICT compiled={}/{} failed={:?}",
+            "all VERDICT compiled={}/{} failed={:?}",
             compiled,
             TOP_CHUNK0_ARM_DELTAS.len(),
             failed
         ));
     }
 
-    /// SP7 iter 6d-g step 1 -- runtime assembly: confirm
+    /// Runtime assembly: confirm
     /// `assemble_arm_kernel(WITGEN_BASELINE_WGSL, EXEC_SHA0_CHUNK0_DELTA_WGSL,
     /// wrapper)` produces a Tint-compilable kernel byte-equivalent to
-    /// the iter-6d-f-take-2 pre-assembled vendored file. Once this
+    /// the pre-assembled vendored file. Once this
     /// passes, the path is clear for vendoring ~26 small deltas (~3 MB
     /// total) instead of ~26 full modules (~22 MB).
     #[wasm_bindgen_test(async)]
-    async fn iter6d_g_assembled_arm_kernel_compiles_on_chrome() {
+    async fn assembled_arm_kernel_compiles_on_chrome() {
         use risc0_circuit_rv32im::prove::wgsl_pruner::{
             assemble_arm_kernel, EXEC_SHA0_CHUNK0_DELTA_WGSL, EXEC_SHA0_CHUNK0_ONLY_COMPUTE_ENTRY,
         };
@@ -8435,7 +8435,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             "iter6d_g assembled module_bytes={}",
             module.len()
         ));
-        let ok = sp7_probe("iter6d_g", &module, "exec_sha0_chunk0_only_main").await;
+        let ok = compile_probe("iter6d_g", &module, "exec_sha0_chunk0_only_main").await;
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
             "iter6d_g assembled tint_compile_ok={}",
             ok
@@ -8447,50 +8447,50 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         );
     }
 
-    /// SP7 iter 6d-f-take-2 -- Tint compile check for a per-major-arm
+    /// Tint compile check for a per-major-arm
     /// kernel (the Sha0 path). 838 KB module, well under the 2 MB
     /// cliff that took down the all-chunks fat-module attempt. If
     /// this compiles + dispatches cleanly, per-major-arm dispatch
     /// is the path forward: ~16-20 arms × ~800 KB-1 MB per kernel.
     #[wasm_bindgen_test(async)]
-    async fn iter6d_f_take2_sha0_per_arm_compiles_on_chrome() {
+    async fn sha0_per_arm_compiles_on_chrome() {
         use risc0_circuit_rv32im::prove::wgsl_pruner::{
             EXEC_SHA0_CHUNK0_ONLY_COMPUTE_ENTRY, EXEC_SHA0_CHUNK0_ONLY_WGSL,
         };
         console_error_panic_hook::set_once();
         let module = format!("{EXEC_SHA0_CHUNK0_ONLY_WGSL}{EXEC_SHA0_CHUNK0_ONLY_COMPUTE_ENTRY}");
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "iter6d_f_take2 sha0_per_arm module_bytes={}",
+            "take2 sha0_per_arm module_bytes={}",
             module.len()
         ));
-        let ok = sp7_probe("iter6d_f_take2", &module, "exec_sha0_chunk0_only_main").await;
+        let ok = compile_probe("take2", &module, "exec_sha0_chunk0_only_main").await;
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "iter6d_f_take2 sha0_per_arm tint_compile_ok={}",
+            "take2 sha0_per_arm tint_compile_ok={}",
             ok
         ));
         if ok {
             risc0_zkp::hal::webgpu::log_webgpu_metric(
-                "iter6d_f_take2 VERDICT: per-major-arm dispatch viable; \
+                "take2 VERDICT: per-major-arm dispatch viable; \
                  generate remaining 15-19 arms and wire multi-kernel dispatch",
             );
         } else {
             risc0_zkp::hal::webgpu::log_webgpu_metric(
-                "iter6d_f_take2 VERDICT: even per-major-arm kernel fails Tint -- \
+                "take2 VERDICT: even per-major-arm kernel fails Tint -- \
                  layout binding mismatch or sub-fn closure exceeds reachable cliff",
             );
         }
     }
 
-    /// SP7 iter 6d-f attempt 1 -- Tint compile + dispatch check for the
+    /// Tint compile + dispatch check for the
     /// "all-chunks" variant (2.35 MB module with multi-chunk merge
     /// helpers). On the boundary of Chrome's whole-module cliff
     /// (1.99-3.27 MB uncertainty band) -- this test is the empirical
-    /// pass/fail determination. If it passes, iter-6d-f can replace
-    /// rust_steps witgen on segments 2-N. If it fails, the next
-    /// iteration needs per-major-opcode chunk dispatch instead of
+    /// pass/fail determination. If it passes, the fat module could
+    /// replace rust_steps witgen on segments 2-N. If it fails,
+    /// per-major-opcode chunk dispatch is needed instead of
     /// a single fat module.
     #[wasm_bindgen_test(async)]
-    async fn iter6d_f_exec_top_chunk0_all_compiles_on_chrome() {
+    async fn exec_top_chunk0_all_compiles_on_chrome() {
         use risc0_circuit_rv32im::prove::wgsl_pruner::{
             EXEC_TOP_CHUNK0_ALL_COMPUTE_ENTRY, EXEC_TOP_CHUNK0_ALL_WGSL,
         };
@@ -8500,7 +8500,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             "iter6d_f all-chunks module_bytes={}",
             module.len()
         ));
-        let ok = sp7_probe("iter6d_f", &module, "exec_top_chunk0_all_main").await;
+        let ok = compile_probe("iter6d_f", &module, "exec_top_chunk0_all_main").await;
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
             "iter6d_f all-chunks tint_compile_ok={}",
             ok
@@ -8521,41 +8521,41 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    /// SP7 iter 6d-a -- end-to-end Tint compile check for the vendored
+    /// End-to-end Tint compile check for the vendored
     /// `exec_TopChunk0` pruned module + @compute wrapper.
     ///
     /// naga validates the concatenated module at the cargo-test level
-    /// (`iter6d_a_compute_entry_concat_validates_with_naga`); this
+    /// (`compute_entry_concat_validates_with_naga`); this
     /// test runs the equivalent path through Chrome's Tint compiler,
     /// which is the stricter validator for our actual shipping target.
     /// Catches any tint-vs-naga divergence introduced by the
-    /// vendored module before iter-6d-b wires the kernel into the
+    /// vendored module before the kernel is wired into the
     /// witness-generator dispatch path.
     #[wasm_bindgen_test(async)]
-    async fn iter6d_a_exec_top_chunk0_compiles_on_chrome() {
+    async fn exec_top_chunk0_compiles_on_chrome() {
         use risc0_circuit_rv32im::prove::wgsl_pruner::{
             EXEC_TOP_CHUNK0_COMPUTE_ENTRY, EXEC_TOP_CHUNK0_WGSL,
         };
         console_error_panic_hook::set_once();
         let module = format!("{EXEC_TOP_CHUNK0_WGSL}{EXEC_TOP_CHUNK0_COMPUTE_ENTRY}");
-        let ok = sp7_probe("iter6d_a", &module, "exec_top_chunk0_main").await;
+        let ok = compile_probe("iter6d_a", &module, "exec_top_chunk0_main").await;
         assert!(
             ok,
             "exec_TopChunk0 + @compute wrapper must compile on Chrome Tint"
         );
     }
 
-    /// SP7 iter 5d — `@compute` entries for the arm-split chunk probes.
+    /// `@compute` entries for the arm-split chunk probes.
     /// split_exectop.py emits each arm-split chunk as a step_Top-SHAPED VOID
     /// function `step_chunk_n*_c*(data0, global1)` (builds the TopLayout
     /// internally, `return;`), so these `@compute` entries are byte-for-byte
     /// identical to `witgen_top_full` except the void fn they call -- the arm
-    /// subset is the ONLY variable. (iter-5d found the earlier
+    /// subset is the ONLY variable. (The earlier
     /// `_ = exec_Top_n*(..)` form was Tint-pathological: ~60-95 s compile
     /// then device-loss; the original `step_Top` path fast-fails cleanly.)
     /// witgen_top_full calls the unsplit step_Top (1.68 MB closure --
-    /// the iter-5c known-failure control).
-    const SP7_SWEEP_ENTRIES: &str = "
+    /// the known-failure control).
+    const WITGEN_SWEEP_ENTRIES: &str = "
 @compute @workgroup_size(64)
 fn witgen_n4_c0(@builtin(global_invocation_id) gid: vec3<u32>) {
   cycle = gid.x;
@@ -8583,46 +8583,46 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ";
 
-    /// Assemble the iter-5d chunked probe module: prelude + all types + all
+    /// Assemble the chunked probe module: prelude + all types + all
     /// layout + the arm-split chunked step_Top closure + the nop control +
     /// the sweep entries.
-    fn sp7_chunked_module() -> String {
-        const PRELUDE: &str = include_str!("sp7_wgsl/witgen_prelude.wgsl");
-        const TYPES: &str = include_str!("sp7_wgsl/types.wgsl.inc");
-        const LAYOUT: &str = include_str!("sp7_wgsl/layout.wgsl.inc");
-        const STEPS_CHUNKED: &str = include_str!("sp7_wgsl/steps_step_Top_chunked.wgsl");
+    fn chunked_module() -> String {
+        const PRELUDE: &str = include_str!("witgen_wgsl/witgen_prelude.wgsl");
+        const TYPES: &str = include_str!("witgen_wgsl/types.wgsl.inc");
+        const LAYOUT: &str = include_str!("witgen_wgsl/layout.wgsl.inc");
+        const STEPS_CHUNKED: &str = include_str!("witgen_wgsl/steps_step_Top_chunked.wgsl");
         format!(
-            "{PRELUDE}\n{TYPES}\n{LAYOUT}\n{STEPS_CHUNKED}\n{SP7_NOP_ENTRY}\n{SP7_SWEEP_ENTRIES}"
+            "{PRELUDE}\n{TYPES}\n{LAYOUT}\n{STEPS_CHUNKED}\n{WITGEN_NOP_ENTRY}\n{WITGEN_SWEEP_ENTRIES}"
         )
     }
 
-    /// SP7 iter 5d — does the N=2 arm-split chunk of exec_Top dispatch?
+    /// Does the N=2 arm-split chunk of exec_Top dispatch?
     ///
-    /// iter 5c proved step_Top's full 1.68 MB closure device-loses even
+    /// step_Top's full 1.68 MB closure device-loses even
     /// isolated in a sub-whole-module-ceiling module. split_exectop.py
     /// arm-splits exec_Top's flat 13-arm mux; the N=2 partition gives
     /// `exec_Top_n2_c0` a ~0.9 MB reachable closure. This mirrors the
-    /// iter-5c probe structure exactly (nop control + one target, short-
+    /// known-failure probe structure exactly (nop control + one target, short-
     /// circuit) -- 2 probes, ~10 s. If witgen_n2_c0 dispatches, the
     /// arm-split mechanism is confirmed and 2 chunks suffice for step_Top.
     /// Run as its OWN wasm-bindgen-test-runner invocation, --nocapture,
     /// with VK_ICD_FILENAMES set.
     #[wasm_bindgen_test(async)]
-    async fn sp7_chunk_n2c0_probe() {
+    async fn chunk_n2c0_probe() {
         console_error_panic_hook::set_once();
-        let module = sp7_chunked_module();
+        let module = chunked_module();
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "sp7_n2c0 chunked module assembled: {} bytes",
+            "codegen_n2c0 chunked module assembled: {} bytes",
             module.len()
         ));
-        let nop_ok = sp7_probe("sp7_n2c0", &module, "witgen_nop").await;
+        let nop_ok = compile_probe("codegen_n2c0", &module, "witgen_nop").await;
         let chunk_ok = if nop_ok {
-            sp7_probe("sp7_n2c0", &module, "witgen_n2_c0").await
+            compile_probe("codegen_n2c0", &module, "witgen_n2_c0").await
         } else {
             false
         };
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "sp7_n2c0 verdict: nop_ok={nop_ok} witgen_n2_c0_ok={chunk_ok} -- {}",
+            "codegen_n2c0 verdict: nop_ok={nop_ok} witgen_n2_c0_ok={chunk_ok} -- {}",
             if chunk_ok {
                 "N=2 arm-split chunk (~0.9 MB closure) dispatches -- arm-split \
                  CONFIRMED, 2 chunks suffice for step_Top"
@@ -8636,26 +8636,26 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
         ));
     }
 
-    /// SP7 iter 5d — does the smaller N=4 arm-split chunk dispatch?
+    /// Does the smaller N=4 arm-split chunk dispatch?
     /// `exec_Top_n4_c0` has a ~0.5 MB reachable closure. Same 2-probe
-    /// structure as sp7_chunk_n2c0_probe; the fallback granularity if N=2
+    /// structure as chunk_n2c0_probe; the fallback granularity if N=2
     /// is over the reachable ceiling.
     #[wasm_bindgen_test(async)]
-    async fn sp7_chunk_n4c0_probe() {
+    async fn chunk_n4c0_probe() {
         console_error_panic_hook::set_once();
-        let module = sp7_chunked_module();
+        let module = chunked_module();
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "sp7_n4c0 chunked module assembled: {} bytes",
+            "codegen_n4c0 chunked module assembled: {} bytes",
             module.len()
         ));
-        let nop_ok = sp7_probe("sp7_n4c0", &module, "witgen_nop").await;
+        let nop_ok = compile_probe("codegen_n4c0", &module, "witgen_nop").await;
         let chunk_ok = if nop_ok {
-            sp7_probe("sp7_n4c0", &module, "witgen_n4_c0").await
+            compile_probe("codegen_n4c0", &module, "witgen_n4_c0").await
         } else {
             false
         };
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "sp7_n4c0 verdict: nop_ok={nop_ok} witgen_n4_c0_ok={chunk_ok} -- {}",
+            "codegen_n4c0 verdict: nop_ok={nop_ok} witgen_n4_c0_ok={chunk_ok} -- {}",
             if chunk_ok {
                 "N=4 arm-split chunk (~0.5 MB closure) dispatches -- arm-split \
                  CONFIRMED at N=4 granularity (4 chunks for step_Top)"
@@ -8669,26 +8669,26 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
         ));
     }
 
-    /// SP7 iter 5d — control: does the UNSPLIT step_Top still device-loss on
-    /// the chunked module, exactly as it did on iter-5c's pruned module?
-    /// Confirms the chunked module behaves like iter-5c (so any chunk
+    /// control: does the UNSPLIT step_Top still device-loss on
+    /// the chunked module, exactly as it did on the pruned module?
+    /// Confirms the chunked module behaves the same (so any chunk
     /// dispatch result is trustworthy, not a chunked-module artifact).
     #[wasm_bindgen_test(async)]
-    async fn sp7_chunk_full_probe() {
+    async fn chunk_full_probe() {
         console_error_panic_hook::set_once();
-        let module = sp7_chunked_module();
+        let module = chunked_module();
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "sp7_full chunked module assembled: {} bytes",
+            "codegen_full chunked module assembled: {} bytes",
             module.len()
         ));
-        let nop_ok = sp7_probe("sp7_full", &module, "witgen_nop").await;
+        let nop_ok = compile_probe("codegen_full", &module, "witgen_nop").await;
         let full_ok = if nop_ok {
-            sp7_probe("sp7_full", &module, "witgen_top_full").await
+            compile_probe("codegen_full", &module, "witgen_top_full").await
         } else {
             false
         };
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "sp7_full verdict: nop_ok={nop_ok} witgen_top_full_ok={full_ok} -- {}",
+            "codegen_full verdict: nop_ok={nop_ok} witgen_top_full_ok={full_ok} -- {}",
             if full_ok {
                 "UNEXPECTED: full step_Top closure dispatched -- contradicts iter-5c"
             } else if nop_ok {
@@ -8701,7 +8701,7 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
         ));
     }
 
-    /// SP7 iter 5d de-risk — does a SINGLE-arm spliced chunk dispatch?
+    /// De-risk probe — does a SINGLE-arm spliced chunk dispatch?
     ///
     /// Every multi-arm spliced chunk (n4/n2, ~0.5-0.9 MB closures) device-loses
     /// after ~60-95 s, even the void-shim form byte-identical to the working
@@ -8712,21 +8712,21 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
     /// WgslLanguageSyntax, is the fix and will be fine). If it dispatches, the
     /// splice is OK and the real reachable ceiling is brutally low (~0.1 MB).
     #[wasm_bindgen_test(async)]
-    async fn sp7_chunk_arm3_probe() {
+    async fn chunk_arm3_probe() {
         console_error_panic_hook::set_once();
-        let module = sp7_chunked_module();
+        let module = chunked_module();
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "sp7_arm3 chunked module assembled: {} bytes",
+            "codegen_arm3 chunked module assembled: {} bytes",
             module.len()
         ));
-        let nop_ok = sp7_probe("sp7_arm3", &module, "witgen_nop").await;
+        let nop_ok = compile_probe("codegen_arm3", &module, "witgen_nop").await;
         let arm_ok = if nop_ok {
-            sp7_probe("sp7_arm3", &module, "witgen_arm3").await
+            compile_probe("codegen_arm3", &module, "witgen_arm3").await
         } else {
             false
         };
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "sp7_arm3 verdict: nop_ok={nop_ok} witgen_arm3_ok={arm_ok} -- {}",
+            "codegen_arm3 verdict: nop_ok={nop_ok} witgen_arm3_ok={arm_ok} -- {}",
             if arm_ok {
                 "single-arm splice (~0.11 MB) dispatches -- the SPLICE is OK; \
                  multi-arm chunks fail on real ceiling/size, ceiling is ~0.1 MB"
@@ -8739,26 +8739,26 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
         ));
     }
 
-    /// SP7 iter 5d de-risk — does the single Sha arm (exec_Sha0, ~0.39 MB)
-    /// dispatch as a spliced chunk? Pairs with sp7_chunk_arm3_probe: if arm3
+    /// De-risk probe — does the single Sha arm (exec_Sha0, ~0.39 MB)
+    /// dispatch as a spliced chunk? Pairs with chunk_arm3_probe: if arm3
     /// (tiny) works but arm11 (Sha) does not, exec_Sha0's real-code subtree is
     /// the pathology; if both behave the same, it is the splice or the size.
     #[wasm_bindgen_test(async)]
-    async fn sp7_chunk_arm11_probe() {
+    async fn chunk_arm11_probe() {
         console_error_panic_hook::set_once();
-        let module = sp7_chunked_module();
+        let module = chunked_module();
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "sp7_arm11 chunked module assembled: {} bytes",
+            "codegen_arm11 chunked module assembled: {} bytes",
             module.len()
         ));
-        let nop_ok = sp7_probe("sp7_arm11", &module, "witgen_nop").await;
+        let nop_ok = compile_probe("codegen_arm11", &module, "witgen_nop").await;
         let arm_ok = if nop_ok {
-            sp7_probe("sp7_arm11", &module, "witgen_arm11").await
+            compile_probe("codegen_arm11", &module, "witgen_arm11").await
         } else {
             false
         };
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "sp7_arm11 verdict: nop_ok={nop_ok} witgen_arm11_ok={arm_ok} -- {}",
+            "codegen_arm11 verdict: nop_ok={nop_ok} witgen_arm11_ok={arm_ok} -- {}",
             if arm_ok {
                 "single Sha arm (~0.39 MB) dispatches"
             } else if nop_ok {
@@ -8769,7 +8769,7 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
         ));
     }
 
-    /// SP6d iter 8 — end-to-end pool prove that exercises segment
+    /// End-to-end pool prove that exercises segment
     /// distribution + composite_to_succinct on a multi-segment fixture.
     /// BusyLoop{500_000} at default po2_18 produces ≥ 2 segments; the
     /// pool's `prove_with_ctx_async` distributes per-segment proves
@@ -8809,7 +8809,7 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
         ));
     }
 
-    /// SP6d iter 11 — end-to-end public pool prove with pending keccaks +
+    /// End-to-end public pool prove with pending keccaks +
     /// assumption resolve. The default pool entrypoint routes through the
     /// dependency-graph scheduler, which keeps independent keccak proofs,
     /// union nodes, lifts, joins, and resolves ready across the pool.
@@ -8850,12 +8850,12 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
         log_webgpu_pool_diagnostics(pool.as_ref(), "pool_prove_session_keccak_union_smoke");
     }
 
-    /// SP6d iter 8 — end-to-end pool prove on the xgboost R9 fixture.
+    /// End-to-end pool prove on the xgboost R9 fixture.
     /// xgboost is the canonical multi-segment workload (several po2_18
     /// segments, no assumptions): the pool proves segments serially on
     /// slot 0, then distributes the per-segment lifts + tree joins
     /// across both slots via `composite_to_succinct_async`. This is the
-    /// SP6d QA-gate fixture — it must produce a verifying succinct
+    /// pool QA-gate fixture — it must produce a verifying succinct
     /// receipt with the expected journal output.
     #[wasm_bindgen_test(async)]
     async fn webgpu_pool_xgboost_smoke() {
@@ -9127,99 +9127,33 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
         assert_eq!(prove_info.stats.segments, 1);
     }
 
-    /// SP3 staged-WGSL `eval_check` runtime parity test.
+    /// Staged-WGSL `eval_check` runtime parity test.
     ///
-    /// iter 5 wired the dispatch; iter 6 ported the runtime interpreter's
-    /// slot-allocation discipline (`eval_check_last_uses` +
-    /// `EvalCheckSlotAllocator`) into the codegen module so the emitted
-    /// kernel reuses `fp` / `mix_tot` / `mix_mul` slots — `fp_slots` drops
-    /// from ~15k (one per PolyExtStep) to ~927 (the live set) for rv32im,
-    /// matching the runtime interpreter's allocation. The kernel uses
-    /// `@compute @workgroup_size(1)` to bound per-thread private memory.
-    ///
-    /// **iter 6 result** (`evidence/logs/sp3-iter6-staged-1778632000.txt`):
-    /// the kernel compiles and dispatches cleanly (6 `eval_check_staged_submit`
-    /// markers, 0 `webgpu-uncaptured-error` events, 0 fall-throughs), but
-    /// the prove pipeline still aborts on a later `mapAsync` with
-    /// `AbortError: external Instance reference no longer exists`.
-    /// 150 s wall time (vs 318 s on iter 5 — slot allocation halved the
-    /// per-cycle GPU work, so iter 6 is structurally correct), but the
-    /// straight-line 20k-op kernel still exhausts the test environment's
-    /// per-dispatch budget (likely SwiftShader headless-Chrome timeout
-    /// or TDR on the actual GPU). **iter 7** lands the multi-stage split
-    /// that chunks the DEF into ~1k-op stages joined via a scratch
-    /// storage buffer, mirroring CUDA's 4-file `eval_check_{0,1,2,3}.cu`
-    /// layout. Until that lands, this test stays `#[ignore]`'d.
-    /// **iter 7c result** (`evidence/logs/sp3-iter7c-staged-v2-*`): with
-    /// the 4-GiB `maxBufferSize` and 16 storage-buffers-per-stage
-    /// `requiredLimits` bumps, the staged pipelines now compile and
-    /// dispatch cleanly — 0 `webgpu-uncaptured-error` events during the
-    /// rv32im segment prove (1 staged dispatch fires at `domain=131072`
-    /// in ~0 ms with `base_field_fp=false`). But the prove pipeline
-    /// progresses into the recursion lift and the test environment
-    /// (headless Chrome + ChromeDriver + SwiftShader on this CI box)
-    /// runs out of process RAM — ChromeDriver dies with `signal: 9
-    /// (SIGKILL)`. The recursion DEF emits a ~1.68 GiB scratch buffer
-    /// at po2=18 (max_live_fp * 4 u32 * domain) under multi-stage,
-    /// which fits in the bumped limits but stacks badly with the
-    /// already-large CI footprint. iter 7d (next) needs either (a) a
-    /// tighter chunking heuristic that minimizes per-cycle live-set
-    /// for the recursion DEF specifically, or (b) running parity
-    /// against a single fixture small enough to fit (e.g., a custom
-    /// PolyExt program with synthetic taps, not the production
-    /// recursion DEF). Until then, `#[ignore]`'d.
-    /// **iter 7d result** (`evidence/logs/sp3-iter7d-v2-cached-*`): with
-    /// the tiled dispatch + cached scratch/scratch_params buffers
-    /// (allocated once per DEF, reused across all eval_check calls), peak
-    /// GPU memory drops from ~1.68 GiB to ~27 MiB per pipeline. The first
-    /// staged dispatch fires cleanly (`eval_check_staged_submit
-    /// domain=131072 elapsed_ms=2`, 0 webgpu-uncaptured-error). The
-    /// prove pipeline progresses into `finalize_async check_group` and
-    /// then ChromeDriver dies with `signal: 9 (SIGKILL)` again —
-    /// indicating the OOM trigger is not in the staged code path's
-    /// per-call allocations (those are now cached) but in the
-    /// cumulative async GPU work across many `eval_check` calls within
-    /// `finalize_async`. Each call submits ~32 tiles × 4 stages = 128
-    /// dispatches without an intermediate queue drain; the bookkeeping
-    /// (encoder objects, queue commands, JS object retention) piles up
-    /// during the sync `dispatch_eval_check_poly_ext` path before the
-    /// async caller resumes the event loop.
-    ///
-    /// iter 7e (next): orchestrate the dispatch via the encoder
-    /// directly — open one command encoder per `eval_check` call,
-    /// `begin_compute_pass` once, dispatch all (tile × stage) pairs
-    /// inside that pass with `setBindGroup` dynamic offsets to advance
-    /// tile_base, end the pass and submit a single command buffer per
-    /// call. Should reduce per-call queue overhead from 128 submissions
-    /// to 1 while preserving the same scratch-bounding properties.
-    /// SP3 retrospective (2026-05-13): #[ignore]'d. The staged WGSL
-    /// eval_check path is wired up, structurally correct (27 codegen
-    /// unit tests green), and works end-to-end for small DEFs. It
-    /// does NOT yet outperform the runtime interpreter on the rv32im
-    /// production DEF on Chrome WebGPU — best measured staged
-    /// runtime is ~22 s for poseidon2_basic (vs ~660 ms interpreter,
-    /// ~33x slower) and the device gets lost on the subsequent
-    /// recursion lift's first GPU op. 30 SP3 iterations (7a–7bb)
-    /// established this is a WGSL→SPIR-V code-gen ceiling on
+    /// The staged path is wired end-to-end and structurally correct: the
+    /// codegen module ports the runtime interpreter's slot-allocation
+    /// discipline (`eval_check_last_uses` + `EvalCheckSlotAllocator`), so
+    /// `fp_slots` drops from ~15k (one per PolyExtStep) to ~927 (the live
+    /// set) for rv32im, and the tiled dispatch caches scratch buffers per
+    /// DEF (peak GPU memory ~27 MiB per pipeline). It does NOT outperform
+    /// the runtime interpreter on the rv32im production DEF on Chrome
+    /// WebGPU — best measured staged runtime was ~22 s for poseidon2_basic
+    /// (vs ~660 ms interpreter, ~33x slower), and the device got lost on
+    /// the subsequent recursion lift's first GPU op. Thirty iterations of
+    /// probing established this is a WGSL→SPIR-V code-gen ceiling on
     /// Chrome/Dawn for ~1.6 MB straight-line compute kernels — not
-    /// addressable from the codegen layer. Forward-compatible
-    /// improvements (per-chunk slot allocator, mix_pows UBO,
-    /// workgroup_size=32, CUDA-aligned chunk_body) remain in the
-    /// codebase; the staged path is opt-in via
-    /// `set_staged_eval_check_enabled(true)` and dormant in
-    /// production (`eval_check_webgpu` falls through to the
-    /// interpreter when the flag is false).
+    /// addressable from the codegen layer. Forward-compatible improvements
+    /// (per-chunk slot allocator, mix_pows UBO, workgroup_size=32,
+    /// CUDA-aligned chunk_body) remain in the codebase; the staged path is
+    /// opt-in via `set_staged_eval_check_enabled(true)` and dormant in
+    /// production (`eval_check_webgpu` falls through to the interpreter
+    /// when the flag is false).
     ///
     /// Revisit when:
     /// - WGSL/Dawn improves code-gen for large compute kernels, OR
     /// - We restructure the staged kernel (e.g., interpreter-style
     ///   loop over compile-time-known op stream) as a separate phase.
-    ///
-    /// See `~/.claude/projects/-home-rami-repos-risc0/memory/
-    /// project_sp3_staged_kernel_ceiling.md` for the full
-    /// retrospective with per-iter data.
     #[wasm_bindgen_test(async)]
-    #[ignore = "SP3 staged path is opt-in scaffolding; see retrospective comment + memory note"]
+    #[ignore = "staged path is opt-in scaffolding; see doc comment"]
     async fn poseidon2_basic_async_staged_eval_check_verifies() {
         use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
 

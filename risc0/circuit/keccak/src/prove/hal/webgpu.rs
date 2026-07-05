@@ -56,14 +56,14 @@ struct WebGpuKeccakProver {
 }
 
 impl WebGpuKeccakProver {
-    /// M9a: the keccak proof's phase-head CPU — preflight construction,
+    /// The keccak proof's phase-head CPU — preflight construction,
     /// scatter, and the witness pass — on a pool worker instead of this
     /// wasm thread. These blocks (~165 ms/proof) run while other proofs'
     /// readback chains are in flight (the keccak/union phase interleaves
     /// keccak proofs, union recursion proofs, and rv32im segment commits
-    /// all day), and per the M6d physics every inline millisecond starves
+    /// all day), and every millisecond spent inline on this thread starves
     /// those mapAsync callbacks. All three pieces are pre-transcript
-    /// (phase-head), so per the M8a physics the offload is clean — no
+    /// (phase-head), so the offload is clean — no
     /// mid-transcript foreground wait rides on the pool's injector queue.
     /// The preflight is built AND consumed on the worker; buffers travel
     /// as `Send` CPU-shadow handles (fresh buffers, shadows current by
@@ -145,7 +145,7 @@ impl WebGpuCircuitEvalCheck for WebGpuCircuitHal {
     }
 }
 
-/// M9a: the scatter body, generic over the buffer HAL so the
+/// The scatter body, generic over the buffer HAL so the
 /// pool-offloaded witgen phase can run it against bare `CpuBuffer`
 /// shadow handles (`MetaBuffer<CpuHal>`), exactly like the generic
 /// `rust_steps::generate_witness`.
@@ -295,7 +295,7 @@ impl KeccakProver for WebGpuKeccakProver {
                 )
             );
 
-            // M9a: preflight + scatter + witness pass run on a pool worker
+            // Preflight + scatter + witness pass run on a pool worker
             // so this thread keeps observing the other in-flight proofs'
             // readback completions.
             self.witgen_offloaded_async(inputs, cycles, &global, &data)

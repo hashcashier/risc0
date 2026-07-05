@@ -31,16 +31,13 @@
 //!   This is required for circuits whose DEF uses `ConstExt` or carries
 //!   extension intermediates (e.g., recursion).
 //!
-//! Scope per `02-to-be-plan.md`:
-//! - SP2 (seed): module exists, RED-marked parity test, no real emission.
-//! - SP3 iter 1: real generic emitter (vec4 only) + 9 structural tests.
-//! - SP3 iter 2 (this iteration): split into `Base` / `Ext` field modes
-//!   matching the runtime interpreter; `rv32im_codegen_for_po2` defaults to
-//!   base-field. Not yet wired into the prove path's fast-path.
-//! - SP3 follow-on: full prelude (bindings, params, helpers) emitted as
-//!   part of the kernel; dispatch wiring with staged-then-interpreter
-//!   fallback; runtime parity test under `examples/browser-prove/src/lib.rs`;
-//!   multi-stage split for the production rv32im DEF (~20k ops).
+//! Status: the staged path is a validated *alternative* to the runtime
+//! interpreter, not the production default. The prelude (bindings, params,
+//! helpers) is emitted as part of the kernel, the dispatch wiring falls
+//! back to the interpreter, and a runtime parity test lives under
+//! `examples/browser-prove/src/lib.rs`. `rv32im_codegen_for_po2` remains a
+//! scaffold: the production rv32im DEF (~20k ops) exceeds single-kernel
+//! budgets, and the interpreter outperforms staged emission there.
 
 use alloc::{
     string::{String, ToString},
@@ -218,7 +215,7 @@ pub struct StagedKernel {
     pub fp_slots: usize,
     /// Number of MixState locals (`mix_tot` + `mix_mul`) the body uses.
     pub mix_slots: usize,
-    /// SP3 iter 7m: WGSL `@compute @workgroup_size(N)` chosen by the
+    /// WGSL `@compute @workgroup_size(N)` chosen by the
     /// emitter to maximize GPU SIMD utilization while keeping
     /// per-workgroup private memory below
     /// `WEBGPU_COMPUTE_WORKGROUP_STORAGE_BUDGET`. The dispatch wiring
@@ -228,11 +225,11 @@ pub struct StagedKernel {
     /// The WGSL source code for this kernel's *body*. The runtime prelude
     /// (bindings, params, arithmetic helpers, `read_tap` / `read_global` /
     /// `load_mix_pow` / `write_check`) is provided by `webgpu.rs` and
-    /// concatenated by the dispatch wiring (SP3 follow-on).
+    /// concatenated by the dispatch wiring.
     pub wgsl_source: String,
 }
 
-/// SP3 iter 7p: default `workgroup_size` for the staged eval_check
+/// Default `workgroup_size` for the staged eval_check
 /// kernel. Mirrors the runtime interpreter's Ext-mode dispatch
 /// (`WEBGPU_EVAL_CHECK_INTERPRETER_WORKGROUP_SIZE` in `webgpu.rs`).
 /// Function-scope `var` arrays are per-thread private memory —
@@ -242,7 +239,7 @@ pub struct StagedKernel {
 /// the existing interpreter path for the same DEFs.
 pub const WEBGPU_STAGED_WORKGROUP_SIZE: u32 = 32;
 
-/// SP3 iter 7p: bytes-per-thread budget used for *workgroup-shared*
+/// Bytes-per-thread budget used for *workgroup-shared*
 /// scratch in Base mode. The interpreter falls back to a
 /// `var<workgroup>` scratch when fp_slots are too large for
 /// per-thread `var` to be a clean win; we don't currently emit a
@@ -253,7 +250,7 @@ pub const WEBGPU_STAGED_WORKGROUP_SIZE: u32 = 32;
 #[allow(dead_code)]
 pub const WEBGPU_COMPUTE_WORKGROUP_STORAGE_BUDGET: u32 = 49152;
 
-/// SP3 iter 7p: return the staged kernel's workgroup_size. Per-thread
+/// Return the staged kernel's workgroup_size. Per-thread
 /// state (`fp` / `mix_tot` / `mix_mul`) lives in WGSL function-scope
 /// `var` arrays — driver-managed per-thread private memory — so we
 /// don't divide by per-thread byte footprint the way a
@@ -343,7 +340,7 @@ pub fn def_is_base_field(def: &PolyExtStepDef) -> bool {
 
 /// Internal state for emitting a single staged WGSL kernel from a DEF.
 ///
-/// iter 6 (slot allocation):
+/// Slot allocation:
 /// - `fp_alloc` / `mix_alloc` hand out lowest free slot indices, mirroring
 ///   the runtime interpreter's allocation discipline.
 /// - `fp_slot_map[var_idx]` records which physical slot was assigned to
@@ -397,7 +394,7 @@ impl<'a> WgslEmitter<'a> {
         })
     }
 
-    /// SP3 iter 7t: reset the emitter's slot allocators and slot maps
+    /// Reset the emitter's slot allocators and slot maps
     /// at a chunk boundary. Caller must then call `seed_live_fp` /
     /// `seed_live_mix` for each var that was live across the
     /// boundary, in `live_idx` order — that re-establishes the
@@ -414,7 +411,7 @@ impl<'a> WgslEmitter<'a> {
         }
     }
 
-    /// SP3 iter 7t: allocate a fresh slot for `var` in the current
+    /// Allocate a fresh slot for `var` in the current
     /// chunk's allocator. The caller has the var live (from prev
     /// boundary's `live_fp`) and emits a scratch-load into the
     /// returned slot. Returns the assigned slot.
@@ -427,7 +424,7 @@ impl<'a> WgslEmitter<'a> {
         slot
     }
 
-    /// SP3 iter 7t: mix-side counterpart to `seed_live_fp`.
+    /// Mix-side counterpart to `seed_live_fp`.
     fn seed_live_mix(&mut self, var: usize) -> usize {
         let slot = self.mix_alloc.alloc();
         if var >= self.mix_slot_map.len() {
@@ -752,9 +749,9 @@ impl<'a> WgslEmitter<'a> {
         wgsl.push_str(
             "// runtime prelude (bindings, params, ext_*/add/sub/mul helpers,\n// read_g{0,1,2}_*, read_global_*, load_mix_pow, write_check) is the\n// `STAGED_EVAL_CHECK_PRELUDE_WGSL` constant; this body is appended after it.\n",
         );
-        // SP3 iter 7m: workgroup_size sized to fit `fp` + `mix_tot` +
+        // workgroup_size sized to fit `fp` + `mix_tot` +
         // `mix_mul` private arrays inside the typical 48 KiB per-
-        // workgroup storage budget. Iter 6 used a hardcoded `1`; on
+        // workgroup storage budget. An earlier revision hardcoded `1`; on
         // poseidon2_basic that left the GPU dramatically underutilized
         // and the staged kernel ran ~10x slower than the interpreter.
         let workgroup_size = choose_workgroup_size(self.field_mode, fp_slots, mix_slots);
@@ -794,8 +791,7 @@ impl<'a> WgslEmitter<'a> {
 ///
 /// The result's `wgsl_source` is the kernel body; the runtime prelude
 /// (bindings, params, arithmetic helpers, per-group readers) is
-/// concatenated by `staged_full_kernel_wgsl` (or by the dispatch wiring
-/// when SP3 iter 5 lands).
+/// concatenated by `staged_full_kernel_wgsl` or by the dispatch wiring.
 ///
 /// Returns `CodegenError::ConstExtInBaseField` if the DEF needs ext
 /// constants under Base mode, or `CodegenError::TapIndexOutOfRange` /
@@ -854,9 +850,9 @@ pub fn staged_kernel_from_def(
 /// The prelude binding layout intentionally matches the runtime
 /// interpreter's at `webgpu.rs:EVAL_CHECK_BASE_INTERPRETER_WGSL`, MINUS
 /// the `instrs` binding and `instr_*` params (the staged kernel embeds
-/// the DEF inline, so there's no instruction stream to read). When SP3's
-/// dispatch wiring lands, the same `Params` UBO can be reused — staged
-/// dispatches simply leave `instr_*` fields ignored.
+/// the DEF inline, so there's no instruction stream to read). The dispatch
+/// wiring reuses the same `Params` UBO — staged dispatches simply leave
+/// `instr_*` fields ignored.
 pub const STAGED_EVAL_CHECK_PRELUDE_WGSL: &str = include_str!("webgpu_codegen/prelude.wgsl");
 
 /// Emit a complete, ready-to-compile WGSL shader for an arbitrary
@@ -882,14 +878,15 @@ pub fn staged_full_kernel_wgsl(
 }
 
 // ============================================================================
-// SP3 iter 7: multi-stage staged-kernel planner.
+// Multi-stage staged-kernel planner.
 //
 // The single-kernel emitter (iters 1-6) inlines the entire DEF block into one
 // compute shader. For the rv32im production DEF (~20k PolyExtSteps) the
 // resulting kernel exhausts the per-dispatch budget of Chrome's SwiftShader
-// fallback (and likely of real-GPU TDR limits too — see iter 6 evidence).
+// fallback (and likely of real-GPU TDR limits too).
 //
-// iter 7 splits the DEF into N chunks of ~5k ops each, mirroring CUDA's
+// The multi-kernel planner splits the DEF into N chunks of ~5k ops each,
+// mirroring CUDA's
 // 4-file `eval_check_{0,1,2,3}.cu` layout. Between chunks, the kernel
 // serializes the live fp/mix vars to a per-cycle scratch storage buffer; the
 // next chunk reloads them at its entry. The scratch buffer is sized to
@@ -898,15 +895,15 @@ pub fn staged_full_kernel_wgsl(
 //
 // This module adds the planner that walks the DEF, runs the same slot
 // allocator the single-kernel emitter uses, and captures the live-set
-// snapshot at each chunk boundary. The follow-on iter (7b) emits per-chunk
-// WGSL using the planner's output; iter 7c wires multi-kernel dispatch.
+// snapshot at each chunk boundary. The per-chunk emitter consumes the
+// planner's output; the dispatch wiring runs the chunks in sequence.
 // ============================================================================
 
 /// One chunk-boundary snapshot: which fp and mix vars are live at the end
 /// of the chunk that produced ops `[prev_end, end)`, along with their
 /// physical slot assignments at that moment.
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// SP3 iter 7t: live-set snapshot at a chunk boundary.
+/// Live-set snapshot at a chunk boundary.
 ///
 /// Stores `var_idx` (poly_ext fp/mix var indices) for each live var.
 /// The `live_idx` (position in the vec) is the stable cross-chunk
@@ -920,12 +917,12 @@ pub struct ChunkBoundary {
     /// Exclusive end op_idx for this chunk. Chunk K runs ops
     /// `[boundaries[K-1].end, boundaries[K].end)` (with boundary -1 = 0).
     pub end: usize,
-    /// SP3 iter 7t: fp vars live at this boundary, in stable
+    /// Fp vars live at this boundary, in stable
     /// `live_idx` order. Each entry is the `var_idx` (poly_ext fp
     /// var index). The `live_idx` is the position in this vec and
     /// is the cross-chunk scratch buffer offset.
     pub live_fp: Vec<usize>,
-    /// SP3 iter 7t: mix vars live at this boundary, in stable
+    /// Mix vars live at this boundary, in stable
     /// `live_idx` order. Each entry is the `var_idx` (poly_ext mix
     /// var index).
     pub live_mix: Vec<usize>,
@@ -993,7 +990,7 @@ fn emit_chunk_wgsl(
     ret_var: usize,
 ) -> Result<StagedKernel, CodegenError> {
     emitter.body.clear();
-    // SP3 iter 7t: reset the emitter's slot allocators at every chunk
+    // Reset the emitter's slot allocators at every chunk
     // boundary (including chunk 0, where the reset is a no-op since the
     // emitter was just created). Live-in vars re-allocate fresh slots
     // below. This is what bounds each chunk's `fp_slots` /
@@ -1085,8 +1082,8 @@ fn emit_chunk_wgsl(
         writeln!(emitter.body, "  write_check(cycle, mix_tot[{ret_slot}]);").unwrap();
     }
 
-    // 4) Materialize as a StagedKernel. SP3 iter 7t: `fp_slots` /
-    // `mix_slots` are now PER-CHUNK (the emitter resets at every
+    // 4) Materialize as a StagedKernel. `fp_slots` /
+    // `mix_slots` are PER-CHUNK (the emitter resets at every
     // boundary and re-seeds live-ins, so its `max_used()` after
     // emitting this chunk is the chunk-local high-water). Each
     // stage's WGSL declares `array<..., fp_slots>` sized to its own
@@ -1106,15 +1103,15 @@ fn emit_chunk_wgsl(
     wgsl.push_str(
         "// runtime prelude (bindings, params, ext_*/add/sub/mul helpers,\n// read_g{0,1,2}_*, read_global_*, load_mix_pow, write_check,\n// read/write_*_scratch) is the `STAGED_EVAL_CHECK_PRELUDE_WGSL` constant.\n",
     );
-    // SP3 iter 7m: pick workgroup_size to fit `fp` + `mix_tot` +
+    // Pick workgroup_size to fit `fp` + `mix_tot` +
     // `mix_mul` private arrays in the per-workgroup storage budget
-    // (~48 KiB). Iter 6/7's hardcoded `1` left the GPU heavily
+    // (~48 KiB). A hardcoded `1` here left the GPU heavily
     // underutilized; sizing per the actual private memory footprint
     // lets each workgroup pack 16-64 threads. Each chunk uses
     // `plan.fp_slots` / `plan.mix_slots` (the cross-chunk high-water)
     // so all stages share a stable size.
     let workgroup_size = choose_workgroup_size(field_mode, fp_slots, mix_slots);
-    // SP3 iter 7z: CUDA-inspired structure. CUDA's `eval_check` calls
+    // CUDA-inspired structure. CUDA's `eval_check` calls
     // `poly_fp` which calls `rv32im_v2_0..19` device functions — nvcc
     // optimizes register allocation per function. We mirror that by
     // declaring `fp`/`mix_tot`/`mix_mul` at module scope (`var<private>`,
@@ -1136,7 +1133,7 @@ fn emit_chunk_wgsl(
     wgsl.push_str("}\n");
     writeln!(wgsl, "@compute @workgroup_size({workgroup_size})").unwrap();
     wgsl.push_str("fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
-    // SP3 iter 7g: CUDA-shape dispatch. The host calls
+    // CUDA-shape dispatch. The host calls
     // `dispatch_workgroups(tile_size / workgroup_size, num_tiles, 1)` ONCE
     // per stage. `tile_local = gid.x` is the thread's offset within a
     // tile; `tile_idx = gid.y` is which tile this thread belongs to;
@@ -1361,7 +1358,7 @@ pub fn plan_multi_kernel(
         let is_last_op = op_idx + 1 == block_len;
         let at_boundary = op_idx + 1 >= next_boundary_at;
         if at_boundary || is_last_op {
-            // SP3 iter 7t: store only var_idx (not slot). The slot is
+            // Store only var_idx (not slot). The slot is
             // chunk-local now; the live_idx (position in this vec) is
             // the stable scratch-buffer identifier.
             let live_fp: Vec<usize> = fp_slot_map
@@ -1402,12 +1399,11 @@ pub fn plan_multi_kernel(
 /// the generator unconditionally uses `FieldMode::Base` to mirror the
 /// runtime base-field interpreter's `fp[lane][slot]: u32` slot layout.
 ///
-/// At SP3 iter 3 this is still a scaffold: the rv32im production DEF is
-/// ~20k ops and emitting one straight-line kernel may exceed WGSL shader
-/// length / compile-time budgets in Chrome. Production wiring + multi-stage
-/// split (mirroring the 4-file CUDA `eval_check_{0,1,2,3}.cu` layout) is
-/// the next SP3 commit. For now this returns an empty set for all po2; the
-/// production prove path continues to use the runtime interpreter.
+/// This is a scaffold: the rv32im production DEF is ~20k ops and emitting
+/// one straight-line kernel exceeds WGSL shader length / compile-time
+/// budgets in Chrome (the multi-kernel planner below mirrors the 4-file
+/// CUDA `eval_check_{0,1,2,3}.cu` layout instead). It returns an empty set
+/// for all po2; the production prove path uses the runtime interpreter.
 pub fn rv32im_codegen_for_po2(_po2: u32) -> Vec<StagedKernel> {
     Vec::new()
 }
@@ -1682,7 +1678,7 @@ mod tests {
     #[test]
     fn staged_kernel_emits_one_line_per_step_with_op_comment() {
         let kernel = staged_kernel_from_def("tiny", &TINY_DEF, &[]).unwrap();
-        // iter 6: emit comments include both poly_ext var index and the
+        // Emit comments include both poly_ext var index and the
         // physical slot the allocator chose. Match the simpler op-name
         // anchor that's stable across slot-allocation outcomes.
         for (idx, op) in TINY_DEF.block.iter().enumerate() {
@@ -1759,8 +1755,8 @@ mod tests {
         assert_eq!(plan.boundaries[2].end, 5);
 
         // After chunk 0 (ops Const(7), Const(3)): fp_var 0 and fp_var 1
-        // are live (used by Add at op 2 in chunk 1). SP3 iter 7t: the
-        // boundary now records just var_idx (slot is chunk-local).
+        // are live (used by Add at op 2 in chunk 1). The
+        // boundary records just var_idx (slot is chunk-local).
         assert_eq!(
             plan.boundaries[0].live_fp,
             vec![0, 1],
@@ -1833,7 +1829,7 @@ mod tests {
         assert!(!s1.contains("write_check(cycle, mix_tot["));
 
         // Stage 2: load 1 fp + 1 mix, run AndEqz, write_check.
-        // SP3 iter 7t: per-chunk allocator restarts at slot 0 for each
+        // Per-chunk allocator restarts at slot 0 for each
         // stage. Stage 2's first live-in (fp_var 2) lands in fp[0],
         // not fp[2] (the global single-allocator slot).
         let s2 = &multi.stages[2].wgsl_source;
@@ -1874,8 +1870,7 @@ mod tests {
         // FULL_DEF has 10 ops; target 3 ops/chunk → 4 chunks ([0,3), [3,6), [6,9), [9,10)).
         let plan = plan_multi_kernel(&FULL_DEF, 3).unwrap();
         assert_eq!(plan.boundaries.len(), 4);
-        // The slot reuse from iter 6 still applies — the planner runs the
-        // same allocator.
+        // Slot reuse still applies — the planner runs the same allocator.
         assert_eq!(plan.fp_slots, 5);
         // Liveness at boundary 2 (end of [6,9)): mix_var 1 is live
         // (used by AndCond at op 9). fp_var 0 is live (used by AndCond's
@@ -1893,7 +1888,7 @@ mod tests {
             let kernels = rv32im_codegen_for_po2(po2);
             assert!(
                 kernels.is_empty(),
-                "rv32im_codegen_for_po2({po2}) is empty until SP3 follow-on lands the multi-stage split and dispatch wiring"
+                "rv32im_codegen_for_po2({po2}) is expected to stay empty (scaffold; see module docs)"
             );
         }
     }
@@ -1925,10 +1920,10 @@ mod tests {
                 "prelude missing read_g{g}_ext"
             );
         }
-        // Placeholder helpers from iter 3 are gone.
+        // The early scalar placeholder helpers must not reappear.
         assert!(
             !prelude.contains("fn read_tap_scalar"),
-            "iter 4 replaces placeholder read_tap_scalar with read_g{{0,1,2}}_scalar"
+            "the scalar placeholder read_tap_scalar must remain replaced by read_g{{0,1,2}}_scalar"
         );
         assert!(!prelude.contains("fn read_tap_ext"));
         // Global readers and mix-power loader and check writer.
@@ -1949,7 +1944,7 @@ mod tests {
         assert!(prelude.contains("@group(0) @binding(3) var<storage, read> group2:"));
         assert!(prelude.contains("@group(0) @binding(4) var<storage, read> global0:"));
         assert!(prelude.contains("@group(0) @binding(5) var<storage, read> global1:"));
-        // SP3 iter 7x: mix_pows is a uniform buffer (CUDA `__constant__`
+        // mix_pows is a uniform buffer (CUDA `__constant__`
         // analog), not a storage buffer like the interpreter uses.
         assert!(prelude.contains("@group(0) @binding(7) var<uniform> mix_pows:"));
         assert!(prelude.contains("@group(0) @binding(8) var<uniform> params:"));
@@ -1964,7 +1959,7 @@ mod tests {
         let full = staged_full_kernel_wgsl("tiny", &TINY_DEF, &[], FieldMode::Base)
             .expect("Base ok for TINY_DEF (no Get ops)");
         let prelude_anchor = "fn write_check(cycle: u32, val: vec4<u32>)";
-        // iter 7m: kernel uses `@compute @workgroup_size(N)` where N is
+        // Kernel uses `@compute @workgroup_size(N)` where N is
         // picked by `choose_workgroup_size` to fit private memory.
         let body_anchor = "@compute @workgroup_size";
         let prelude_pos = full.find(prelude_anchor).expect("prelude present");
@@ -1986,7 +1981,7 @@ mod tests {
         assert!(full.contains("fn ext_mul(lhs: vec4<u32>, rhs: vec4<u32>)"));
         // Mul(5, 3) under slot reuse: f5 lives in slot 2, f3 in slot 3, f6 in slot 1.
         assert!(full.contains("fp[1] = ext_mul(fp[2], fp[3]);"));
-        // iter 7m: workgroup_size is picked by choose_workgroup_size to
+        // workgroup_size is picked by choose_workgroup_size to
         // fit fp_slots+mix_slots in the per-workgroup storage budget.
         // For FULL_DEF in Ext mode the chosen size is non-zero; we
         // just assert the @workgroup_size attribute is present.
@@ -2003,8 +1998,7 @@ mod tests {
     /// emitted ops mirror `PolyExtStepDef`'s declared fp_expected /
     /// mix_expected / mix_exponents exactly. Runtime byte-equivalent parity
     /// against `risc0_zkp::adapter::PolyExtStepDef::step` requires a real
-    /// WebGPU device and lives in `examples/browser-prove/src/lib.rs` once
-    /// SP3 wiring lands.
+    /// WebGPU device and lives in `examples/browser-prove/src/lib.rs`.
     #[test]
     fn structural_parity_matches_polyext_for_tiny_def_under_base_mode() {
         let (fp_expected, mix_expected) = def_var_counts(&TINY_DEF);

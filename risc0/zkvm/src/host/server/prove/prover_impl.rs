@@ -55,7 +55,7 @@ pub(crate) const WEBGPU_DEFAULT_KECCAK_MAX_PO2: u32 = 14;
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 use risc0_zkp::hal::webgpu::WebGpuStageTimer;
 
-/// M6d: output of a segment's witgen pipeline stage, awaiting its commit
+/// Output of a segment's witgen pipeline stage, awaiting its commit
 /// stage. Carries the claim-side data the commit stage needs (the
 /// rv32im-level job consumes the circuit `PreflightResults`) plus the
 /// resolved segment so post-prove hooks fire with the same argument as
@@ -123,10 +123,10 @@ impl ProverImpl {
     }
 }
 
-/// M7a: run a receipt integrity check on a pool worker instead of blocking
+/// Run a receipt integrity check on a pool worker instead of blocking
 /// this wasm thread. Each check is pure CPU over the owned receipt
 /// (~15 ms), but a block of that size under in-flight readbacks delays
-/// every other proof's mapAsync callback (the M6d starvation physics).
+/// every other proof's mapAsync callback (readback starvation).
 /// The receipt travels through the worker and back via the oneshot.
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
 async fn verify_integrity_offloaded<R, F>(receipt: R, verify: F) -> Result<R>
@@ -152,7 +152,7 @@ where
 /// adjacent execution spans, so any adjacency-preserving shape yields the
 /// same session claim — the shape only affects scheduling. The `mid` is
 /// carried in the node (not recomputed) so every consumer agrees on the
-/// shape. An M7 probe (2026-07-04) reshaped this tree to isolate the
+/// shape. A probe reshaped this tree to isolate the
 /// final leaf under the root so early joins could finish the whole
 /// `(0, N-1)` subtree during the segment phase; it collapsed the
 /// post-segment tail 5.0 -> 3.3 s but stretched the segment window by
@@ -260,7 +260,7 @@ impl ProverImpl {
             session.assumptions.len()
         ));
         let prove_session_wall_start = js_sys::Date::now();
-        // SP6d iter 4: use the HAL's per-instance counter so a multi-HAL
+        // Use the HAL's per-instance counter so a multi-HAL
         // pool doesn't over-count by other slots' GPU work.
         let prove_session_active_start = self
             .webgpu_hal()
@@ -278,13 +278,13 @@ impl ProverImpl {
             "browser WebGPU async proving does not yet support PoVW receipts"
         );
 
-        // M6d: two-deep segment pipeline. A segment prove is a CPU-heavy
+        // Two-deep segment pipeline. A segment prove is a CPU-heavy
         // witgen phase (preflight + buffer setup + rayon witness
         // generation) followed by a GPU-heavy commit phase (transcript
         // commits + eval_check + FRI, dominated by queue drains and
         // readback waits). Segments are independent proofs, so segment
         // N+1's witgen phase runs under segment N's commit tail —
-        // `try_join` polls both on this thread; the M5 worker pool grinds
+        // `try_join` polls both on this thread; the worker pool grinds
         // witgen while commit awaits its readbacks. Depth stays at 2: a
         // third in-flight segment costs ~350 MB of shadows for no overlap
         // gain (the witgen phase is the shorter stage), and commit phases
@@ -299,7 +299,7 @@ impl ProverImpl {
         // N+1's witgen phase starts, i.e. before segment N's receipt
         // exists. Empty in every browser fixture; noted for future hook
         // users.
-        // M7b/M7c: early lifts under the segment phase. A lift's only
+        // Early lifts under the segment phase. A lift's only
         // input is one finished SegmentReceipt, and lifting is the leaf
         // tier of the composite_to_succinct join tree — so for Succinct
         // receipts ONE dedicated recursion device lifts segment i the
@@ -307,12 +307,11 @@ impl ProverImpl {
         // segment phase ends. Only non-final segments qualify: the final
         // segment's claim gets the session output merged after this loop.
         //
-        // Scheduling physics (measured on xgboost, 11 segments,
-        // 2026-07-04):
-        // - M7a is the prerequisite — recursion preflight/witgen/verify
-        //   CPU runs on pool workers, so an in-flight lift no longer
-        //   blocks this thread's readback callbacks mid-commit (the M6d
-        //   iteration-1 starvation).
+        // Scheduling physics (measured on xgboost, 11 segments):
+        // - Offloaded recursion CPU is the prerequisite — preflight,
+        //   witgen, and verify run on pool workers, so an in-flight lift
+        //   no longer blocks this thread's readback callbacks mid-commit
+        //   (readback starvation).
         // - Width is capped at ONE early proof at a time, measured twice:
         //   two concurrent lifts hid 12.0 s of span but stretched the
         //   segment window 6.9 -> 9.8 s (xgboost 14695 vs 14348 ms at
@@ -495,7 +494,7 @@ impl ProverImpl {
 
         let mut zkr_receipts = HashMap::new();
         let mut keccak_receipts = VecDeque::new();
-        // M4e: pipeline keccak proofs across the dedicated recursion
+        // Pipeline keccak proofs across the dedicated recursion
         // devices while the union peak-stack consumes receipts strictly
         // in request order on the main device. The union tree shape is
         // protocol-fixed (the guest computes the same binary-counter
@@ -516,8 +515,8 @@ impl ProverImpl {
             let keccak_count = session.pending_keccaks.len();
             // Keccak proofs get the dedicated devices; the main HAL runs
             // the union chain (it carries segment-phase queue residue
-            // anyway). Without extras this degenerates to the serial
-            // pre-M4e behavior on the main device.
+            // anyway). Without extras this degenerates to serial proving
+            // on the main device.
             let main_hal = self.webgpu_hal()?;
             let mut free_hals: Vec<Rc<WebGpuHal>> = self.webgpu_recursion_hals.clone();
             if free_hals.is_empty() {
@@ -687,12 +686,12 @@ impl ProverImpl {
         })
     }
 
-    /// M6d pipeline stage A: resolve + preflight + witgen phase for one
+    /// Segment pipeline stage A: resolve + preflight + witgen phase for one
     /// segment. Transcript-free, so it may run while another segment's
     /// commit stage is in flight. The witness CPU pass runs on pool
     /// workers so this wasm thread stays free to service that commit
     /// stage's readback callbacks; offloading the (~30 ms) preflight
-    /// replay too was probed on 2026-07-04 and measured wall-neutral
+    /// replay too was probed and measured wall-neutral
     /// (xgboost 15267 -> 15532 ms), so it stays inline.
     async fn segment_witgen_stage_async(
         &self,
@@ -725,7 +724,7 @@ impl ProverImpl {
         })
     }
 
-    /// M6d pipeline stage B: transcript commits + finalize + receipt
+    /// Segment pipeline stage B: transcript commits + finalize + receipt
     /// decode + verify for a staged segment, then post-prove hooks.
     async fn segment_commit_stage_async(
         &self,
@@ -749,8 +748,8 @@ impl ProverImpl {
         Ok(receipt)
     }
 
-    /// Commit phase + receipt decode + verify. Shared by the M6d segment
-    /// pipeline and the SP6d pool's `prove_segment_core_async` (whose
+    /// Commit phase + receipt decode + verify. Shared by the segment
+    /// pipeline and the multi-device pool's `prove_segment_core_async` (whose
     /// callers run session hooks themselves).
     async fn finish_segment_commit_async(
         &self,
@@ -788,8 +787,8 @@ impl ProverImpl {
         Ok(receipt)
     }
 
-    /// Serial composition of the M6d pipeline stages, kept for callers
-    /// that schedule segments themselves (the SP6d multi-device pool
+    /// Serial composition of the pipeline stages, kept for callers
+    /// that schedule segments themselves (the multi-device pool
     /// orchestrator). Hooks are the caller's responsibility here.
     pub(crate) async fn prove_segment_core_async(
         &self,
@@ -952,7 +951,7 @@ impl ProverImpl {
     }
 
     /// [`Self::composite_to_succinct_async`] with join-tree nodes that
-    /// were already proven (M7: early lifts run under the segment phase).
+    /// were already proven (early lifts run under the segment phase).
     /// `predone` holds finished, unconsumed node receipts; `prespawned`
     /// additionally covers nodes whose receipts were already consumed.
     /// Today the early machinery only produces leaves, which exist in any
@@ -964,7 +963,7 @@ impl ProverImpl {
         prespawned: HashSet<(usize, usize)>,
         predone: BTreeMap<(usize, usize), SuccinctReceipt<ReceiptClaim>>,
     ) -> Result<SuccinctReceipt<ReceiptClaim>> {
-        // M3c: run the lift/join phase as a balanced join tree under a
+        // Run the lift/join phase as a balanced join tree under a
         // width-2 scheduler instead of a serial left fold.
         //
         // Joins are associative over adjacent execution spans, so any
@@ -972,7 +971,7 @@ impl ProverImpl {
         // claim; a balanced tree cuts the dependency depth from N-1 to
         // ceil(log2 N), turning the join chain from the critical path
         // into schedulable work. Two proofs run interleaved at a time
-        // (recursion∥recursion is the concurrency SP6d validated for
+        // (recursion∥recursion is the concurrency validated for
         // wasm32 memory; segment∥anything OOMs at po2=18): while one
         // blocks on a merkle-root readback (GPU busy), the other's CPU
         // witgen fills the wait. Each proof future carries a private

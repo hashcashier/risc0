@@ -48,11 +48,11 @@ pub struct WebGpuProver {
 }
 
 /// Number of recursion proofs the succinct-phase scheduler keeps in
-/// flight (one WebGPU device each). Two was the wasm32 memory ceiling at
-/// po2=18 before M4a (width 3 hit the allocator-OOM `unreachable`
-/// signature mid-phase); M4a lazy shadows cut the per-proof materialized
-/// footprint ~600→172 MB, so M4c retries width 3. Width 4 re-probed under
-/// the M5 threads regime + 4 GiB atomics ceiling (M6b, 2026-07-03): no OOM
+/// flight (one WebGPU device each). Width 2 was originally the wasm32
+/// memory ceiling at po2=18 (width 3 hit the allocator-OOM `unreachable`
+/// signature mid-phase); lazy shadows later cut the per-proof materialized
+/// footprint ~600→172 MB, which made width 3 fit. Width 4 was re-probed
+/// under the threaded build's 4 GiB memory ceiling: no OOM,
 /// but dead flat on xgboost (17050 vs 17052 ms) and slightly worse on
 /// KeccakUnion — the phase is no longer limited by proof-level concurrency.
 pub(crate) const WEBGPU_SUCCINCT_PIPELINE_WIDTH: usize = 3;
@@ -119,7 +119,7 @@ impl WebGpuProver {
         self.hal.performance_limits()
     }
 
-    /// SP6d iter 5: exposes the underlying HAL so a pool orchestrator
+    /// Exposes the underlying HAL so a pool orchestrator
     /// can hand work to this prover's GPUDevice via the public
     /// `lift_webgpu` / `join_webgpu` entry points in
     /// `risc0_zkvm::host::recursion::prove`.
@@ -138,7 +138,7 @@ impl WebGpuProver {
         self.hal.set_eval_check_gpu_enabled(enabled);
     }
 
-    /// Enable or disable the SP3 staged-WGSL `eval_check` fast path.
+    /// Enable or disable the staged-WGSL `eval_check` path.
     /// Default `false` — browser parity tests opt in per fixture once
     /// runtime parity against the interpreter is established.
     #[doc(hidden)]

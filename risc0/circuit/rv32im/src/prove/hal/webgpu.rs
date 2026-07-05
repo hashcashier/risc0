@@ -51,7 +51,7 @@ use crate::{
     RV32IM_SEAL_VERSION,
 };
 
-// SP7 iter 6d-c (2026-05-15): hold the HAL handle so generate_witness
+// Hold the HAL handle so generate_witness
 // can dispatch the GPU exec_TopChunk0 kernel alongside the CPU
 // rust_steps reference. Probe-mode for now: GPU output is timed and
 // dropped; rust_steps remains the authority.
@@ -59,31 +59,31 @@ use crate::{
 // `witgen_gpu_probe_enabled` is opt-in (default off) since the first
 // dispatch triggers a ~60 s Tint compile of the 1.08 MB pruned WGSL
 // module -- enabling it on a baseline xgboost run would add ~60 s wall
-// for ~6 s savings ceiling (see project_sp7_witgen_savings_ceiling).
-// Tests set the flag explicitly; the probe is the measurement
-// infrastructure iter-6d-d/e need to design pre-warm + dispatch.
+// for a measured ~6 s savings ceiling. Tests set the flag explicitly;
+// the probe is the measurement infrastructure behind the pre-warm +
+// dispatch design.
 //
 // The first dispatch lazily fills `witgen_top_chunk0_kernel`; subsequent
 // segments reuse the cached pipeline + layout for free.
-/// SP7 iter 6d-c: process-global flag that turns on the probe-mode GPU
+/// Process-global flag that turns on the probe-mode GPU
 /// witgen dispatch. Tests flip this before `webgpu_prover()` is
 /// constructed; production runs leave it off. Atomic so it can be read
 /// from sync paths without RefCell borrow churn.
 pub static WITGEN_GPU_PROBE_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Public setter for the iter-6d-c probe flag.
+/// Public setter for the witgen GPU probe flag.
 pub fn set_witgen_gpu_probe_enabled(enabled: bool) {
     WITGEN_GPU_PROBE_ENABLED.store(enabled, Ordering::SeqCst);
 }
 
-/// SP7 iter 6d-g step 6.2.3: process-global flag that, when set,
+/// Process-global flag that, when set,
 /// causes rust_steps to skip its `step_Top` call for cycles whose major
 /// opcode is in the 8 zero-back_Reg arms (MISC0/1/2, MUL0, DIV0,
 /// MEM0/1, ECALL0). The GPU prewarm + per-arm dispatch must have
 /// populated data_buf for those arms first. Default off. Tests opt in.
 pub static WITGEN_GPU_REPLACE_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Public setter for the iter-6d-g step 6.2.3 replace flag.
+/// Public setter for the witgen GPU replace flag.
 pub fn set_witgen_gpu_replace_enabled(enabled: bool) {
     WITGEN_GPU_REPLACE_ENABLED.store(enabled, Ordering::SeqCst);
     WITGEN_GPU_REPLACE_ON_DEMAND_KERNEL_COMPILES.store(0, Ordering::SeqCst);
@@ -130,11 +130,11 @@ pub fn witgen_gpu_replace_nonblocking_pending_skips() -> usize {
 fn record_witgen_replace_on_demand_kernel_compile(label: &str) {
     let count = WITGEN_GPU_REPLACE_ON_DEMAND_KERNEL_COMPILES.fetch_add(1, Ordering::SeqCst) + 1;
     risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-        "iter6d_g_on_demand_compile_count label={label} count={count}"
+        "witgen_arm_on_demand_compile_count label={label} count={count}"
     ));
 }
 
-/// SP7 iter 6d-g step 6.2.13: cell-level diff diagnostic. When enabled,
+/// Cell-level diff diagnostic. When enabled,
 /// `prove_core_async` runs the GPU pre-dispatch normally, snapshots the
 /// CPU shadow data buffer, then resets it to INVALID + re-scatters the
 /// injector + forces mask=0, runs rust_steps to fill everything via the
@@ -149,7 +149,7 @@ static WITGEN_GPU_DIFF_MAJOR: AtomicUsize = AtomicUsize::new(WITGEN_GPU_DIFF_MAJ
 static WITGEN_GPU_REPLACE_DIFF_TARGET_SEGMENT: AtomicUsize = AtomicUsize::new(0);
 static WITGEN_GPU_REPLACE_DIFF_SEEN_SEGMENTS: AtomicUsize = AtomicUsize::new(0);
 
-/// Public setter for the iter-6d-g step 6.2.13 diff flag.
+/// Public setter for the witgen GPU diff flag.
 pub fn set_witgen_gpu_diff_enabled(enabled: bool) {
     WITGEN_GPU_DIFF_ENABLED.store(enabled, Ordering::SeqCst);
     if enabled {
@@ -202,7 +202,7 @@ fn finish_witgen_from_populated_parts(
     }
 }
 
-/// SP7 TopAccum arm5 real-buffer probe. This is intentionally opt-in:
+/// TopAccum arm-5 real-buffer probe. This is intentionally opt-in:
 /// the first version validates one real proof row after CPU TopAccum has
 /// populated authoritative buffers, then leaves the normal proof flow to
 /// verify the receipt end to end.
@@ -510,7 +510,7 @@ struct TopAccumArm5ProbeCompare {
 }
 
 thread_local! {
-    /// SP7 iter 6d-d: session-local cache for the witgen kernel. Lives
+    /// Session-local cache for the witgen kernel. Lives
     /// across WebGpuCircuitHal constructions so the spawn_local'd
     /// async prewarm task's result is reachable from every segment's
     /// `dispatch_witgen_top_chunk0_probe` call. (ProverImpl's
@@ -518,10 +518,10 @@ thread_local! {
     /// segment, so a struct field would defeat the cache.)
     static WITGEN_TOP_CHUNK0_KERNEL: RefCell<Option<WebGpuKernel>> =
         const { RefCell::new(None) };
-    /// SP7 iter 6d-e: chunk1 sibling kernel cache.
+    /// chunk1 sibling kernel cache.
     static WITGEN_TOP_CHUNK1_KERNEL: RefCell<Option<WebGpuKernel>> =
         const { RefCell::new(None) };
-    /// SP7 iter 6d-g step 4: per-arm kernel cache for TOP_CHUNK0_ARM_DELTAS.
+    /// Per-arm kernel cache for TOP_CHUNK0_ARM_DELTAS.
     /// Keyed by arm label (the first element of each tuple in
     /// TOP_CHUNK0_ARM_DELTAS), one entry per major opcode arm.
     /// Populated by the spawn_local prewarm task; consumed by
@@ -532,7 +532,7 @@ thread_local! {
     /// createComputePipelineAsync but have not resolved into cached kernels.
     static WITGEN_ARM_PENDING_KERNELS: RefCell<std::collections::BTreeMap<&'static str, WebGpuStartedComputeKernel>> =
         RefCell::new(std::collections::BTreeMap::new());
-    /// SP7 iter 6d-g step 6.2.4: per-arm chunk1 kernel cache. Mirrors
+    /// Per-arm chunk1 kernel cache. Mirrors
     /// WITGEN_ARM_KERNELS but for the chunk1 sub-fns (exec_Misc0Chunk1
     /// etc.). Together with chunk0 these cover all minor opcodes of each
     /// arm; rust_steps short-circuit needs BOTH chunks dispatched per
@@ -573,15 +573,15 @@ thread_local! {
     /// session, so multiple `prewarm_witgen_kernel()` calls (one per
     /// segment_prover) only fire the compile once.
     static WITGEN_PREWARM_SPAWNED: Cell<bool> = const { Cell::new(false) };
-    /// SP7 iter 6d-g step 6.2.0: cached shadow_init pipeline.
+    /// Cached shadow_init pipeline.
     /// Compiled once per session and reused across all segments.
     static SHADOW_INIT_KERNEL: RefCell<Option<WebGpuKernel>> =
         const { RefCell::new(None) };
-    /// SP7 TopAccum arm5 real-buffer probe pipeline. Compiled lazily
+    /// TopAccum arm-5 real-buffer probe pipeline. Compiled lazily
     /// on first opt-in proof and reused for later segments.
     static TOPACCUM_ARM5_PROBE_KERNEL: RefCell<Option<WebGpuKernel>> =
         const { RefCell::new(None) };
-    /// SP7 TopAccum arm5 split-inverse scratch probe pipelines. The large
+    /// TopAccum arm-5 split-inverse scratch probe pipelines. The large
     /// arm5 module stays free of the real ext_inv body; it captures inverse
     /// inputs, a tiny kernel inverts them, then the arm5 module consumes the
     /// side-buffered inverses.
@@ -593,7 +593,7 @@ thread_local! {
         const { RefCell::new(None) };
     static TOPACCUM_ARM5_INV_CONSUME_RAW_KERNEL: RefCell<Option<WebGpuKernel>> =
         const { RefCell::new(None) };
-    /// SP7 TopAccum arm5 scratch-vs-CPU row compare pipeline.
+    /// TopAccum arm-5 scratch-vs-CPU row compare pipeline.
     static TOPACCUM_ARM5_COMPARE_KERNEL: RefCell<Option<WebGpuKernel>> =
         const { RefCell::new(None) };
     /// Narrow MISC0 accumulator replacement. Unlike generated TopAccum arms,
@@ -623,7 +623,7 @@ thread_local! {
     /// CPU-owned; only their lookup accumulator contributions move to WebGPU.
     static ACCUM_CONTROL0_DIRECT_KERNEL: RefCell<Option<WebGpuKernel>> =
         const { RefCell::new(None) };
-    /// M8b: narrow POSEIDON1 accumulator replacement. Paging-hash witness
+    /// Narrow POSEIDON1 accumulator replacement. Paging-hash witness
     /// rows stay CPU-owned; only their two cycle-table accumulator terms
     /// move to WebGPU.
     static ACCUM_POSEIDON1_DIRECT_KERNEL: RefCell<Option<WebGpuKernel>> =
@@ -2166,7 +2166,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     wgsl
 }
 
-/// M8b: direct WebGPU accumulator for POSEIDON1 (major 10) rows — the
+/// Direct WebGPU accumulator for POSEIDON1 (major 10) rows — the
 /// paged-memory hashing cycles that dominate the CPU accum stepper's
 /// remaining cycle count (173 K of 416 K stepped cycles per xgboost run;
 /// the four uncovered majors 3/8/9/10 each cost ~25% of the pass). A
@@ -2174,9 +2174,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// terms; its user-accum state is the BigInt nop constants, and the
 /// cross-row recurrences stay in the terminal-prefix + machine-column-
 /// carry passes, exactly like the six production direct arms. This is
-/// the hand-written scalar form those arms use — NOT the SP7n
-/// zirgen-generated arm10 kernel, which was rejected on 2026-05-18 after
-/// its generated body queued 45 s of hidden GPU work on BusyLoop.
+/// the hand-written scalar form those arms use — NOT the
+/// zirgen-generated arm10 kernel, which was rejected after its
+/// generated body queued 45 s of hidden GPU work on BusyLoop.
 fn accum_poseidon1_direct_wgsl() -> String {
     let poseidon1 = LAYOUT_TOP.inst_result.arm10;
     let user = LAYOUT_TOP_ACCUM.user._0;
@@ -2941,7 +2941,7 @@ fn topaccum_arm5_inv_entry(template: &str, inv_count: u32) -> String {
     template.replace("__INV_COUNT__", &format!("{inv_count}u"))
 }
 
-/// SP7 iter 6d-g step 6.2.0 (2026-05-16): build the per-cycle preflight
+/// Build the per-cycle preflight
 /// metadata buffer consumed by `SHADOW_INIT_WGSL`. Layout: 4 u32 per
 /// cycle = `[pc, state, machine_mode, packed_minor_major]`. The packed
 /// field is `(major as u32) << 16 | (minor as u32)` so per-arm wrappers
@@ -2957,7 +2957,7 @@ fn build_preflight_meta(preflight: &PreflightTrace) -> Vec<u32> {
     out
 }
 
-/// SP7 iter 6d-g step 6.2.5 (2026-05-16): per-cycle diff counts
+/// Per-cycle diff counts
 /// (`preflight.cycles[i].diff_count[0..1]`) packed as `[a0, a1, b0, b1, ...]`
 /// for the patched `extern_getDiffCount` to index. The patched stub
 /// reads `preflight_diff_count_buf[idx]` where `idx = decode(txn_cycle)
@@ -2991,7 +2991,7 @@ fn build_preflight_txns(preflight: &PreflightTrace) -> Vec<u32> {
     out
 }
 
-/// SP7 iter 6d-g step 6.2.1c (2026-05-16): synthesize per-arm
+/// Synthesize a per-arm
 /// @compute wrapper that replicates `exec_TopChunk0`'s logic to
 /// construct `InstInputStruct` from preflight + shadow-init'd cells
 /// and then calls the arm sub-fn directly. Replaces the no-op
@@ -3002,8 +3002,8 @@ fn build_preflight_txns(preflight: &PreflightTrace) -> Vec<u32> {
 /// sub-fn signature has an extra `global: u32` arg. All other arms
 /// use the standard 3-arg signature.
 ///
-/// Only safe for the 8 zero-back_Reg arms identified in the
-/// 2026-05-16 audit (MISC0/1/2, MUL0, DIV0, MEM0/1, ECALL0). Arms
+/// Only safe for the 8 audited zero-back_Reg arms
+/// (MISC0/1/2, MUL0, DIV0, MEM0/1, ECALL0). Arms
 /// with internal back_Reg deps (CONTROL0, POSEIDON0/1, SHA0, BIGINT0)
 /// would read uninitialized cells and produce garbage; keep them
 /// no-op until a deeper materialization scheme lands.
@@ -3035,7 +3035,7 @@ fn synth_arm_wrapper(label: &str, sub_fn: &str, arm_idx: usize) -> String {
          }}\n\
          \n\
          @compute @workgroup_size(64)\n\
-         fn iter6d_g_{label}_main(@builtin(global_invocation_id) gid: vec3<u32>) {{\n\
+         fn witgen_arm_{label}_main(@builtin(global_invocation_id) gid: vec3<u32>) {{\n\
            let lane = gid.x;\n\
            if (lane >= arrayLength(&cycle_list)) {{ return; }}\n\
            cycle = cycle_list[lane];\n\
@@ -3076,9 +3076,8 @@ fn synth_arm_wrapper(label: &str, sub_fn: &str, arm_idx: usize) -> String {
     )
 }
 
-/// SP7 iter 6d-g step 6.2.1c: arms with zero internal back_Reg calls
-/// per the 2026-05-16 audit. Safe to GPU-witgen-replace given outer
-/// shadow-init. Indexed by major opcode.
+/// Arms with zero internal back_Reg calls (audited). Safe to
+/// GPU-witgen-replace given outer shadow-init. Indexed by major opcode.
 const ZERO_BACK_REG_ARMS: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 8];
 // MISC2 and MEM0 remain diff/probe-capable, but representative e2e evidence
 // showed their sparse CPU-shadow repair is currently wall-negative. Keep
@@ -3175,7 +3174,7 @@ fn needed_extra_minors(
         .collect()
 }
 
-/// SP7 iter 6d-g step 6.2.4: synthesize chunk1 wrapper. Uses
+/// Synthesize chunk1 wrapper. Uses
 /// EXEC_TOP_CHUNK1_WGSL as the standalone module (already contains
 /// exec_NondetReg, exec_NondetBitReg, exec_InstInput, exec_OneHot_13_,
 /// back_Reg, back_NondetReg, lookup helpers, kLayout_Top, etc.). The
@@ -3204,7 +3203,7 @@ fn synth_arm_chunk1_wrapper(label: &str, arm_idx: usize) -> String {
          @group(0) @binding(6) var<storage, read> preflight_meta: array<u32>;\n\
          \n\
          @compute @workgroup_size(64)\n\
-         fn iter6d_g_{label}_c1_main(@builtin(global_invocation_id) gid: vec3<u32>) {{\n\
+         fn witgen_arm_{label}_c1_main(@builtin(global_invocation_id) gid: vec3<u32>) {{\n\
            let lane = gid.x;\n\
            if (lane >= arrayLength(&cycle_list)) {{ return; }}\n\
            cycle = cycle_list[lane];\n\
@@ -3244,7 +3243,7 @@ fn synth_arm_chunk1_wrapper(label: &str, arm_idx: usize) -> String {
 #[allow(dead_code)]
 pub(crate) struct WebGpuCircuitHal {
     hal: Rc<WebGpuHal>,
-    /// Per-prove GPU-witgen replacement arm mask (M6d). Each segment prove
+    /// Per-prove GPU-witgen replacement arm mask. Each segment prove
     /// owns a fresh `WebGpuCircuitHal`, so storing the mask here (instead
     /// of the legacy process-wide static in `rust_steps`) lets the segment
     /// pipeline overlap segment N+1's witgen phase — which computes its
@@ -3255,9 +3254,9 @@ pub(crate) struct WebGpuCircuitHal {
 
 /// Concatenation of the vendored exec_TopChunk0 pruned module and the thin
 /// `@compute @workgroup_size(64) fn exec_top_chunk0_main` entry wrapper.
-/// naga-validated by `iter6d_a_compute_entry_concat_validates_with_naga`
+/// naga-validated by `compute_entry_concat_validates_with_naga`
 /// (cargo-test side) and Tint-validated by
-/// `iter6d_a_exec_top_chunk0_compiles_on_chrome` (wasm-bindgen side).
+/// `exec_top_chunk0_compiles_on_chrome` (wasm-bindgen side).
 const WITGEN_TOP_CHUNK0_WGSL: &str = concat!(
     include_str!("../../zirgen/exec_top_chunk0.wgsl"),
     "\n",
@@ -3272,7 +3271,7 @@ const WITGEN_TOP_CHUNK0_WGSL: &str = concat!(
     "}\n",
 );
 
-/// SP7 iter 6d-e: chunk1 sibling of [`WITGEN_TOP_CHUNK0_WGSL`]. Same
+/// chunk1 sibling of [`WITGEN_TOP_CHUNK0_WGSL`]. Same
 /// shape but uses the chunk1-everywhere pruned module + an
 /// `exec_top_chunk1_main` entry.
 const WITGEN_TOP_CHUNK1_WGSL: &str = concat!(
@@ -3561,7 +3560,7 @@ impl WebGpuCircuitHal {
         };
 
         let arm_layout = self.hal.create_bind_group_layout(
-            "iter6d_g_arm_layout",
+            "witgen_arm_arm_layout",
             &[
                 WebGpuBindingLayout::storage(0, 0),
                 WebGpuBindingLayout::storage(1, 0),
@@ -3587,9 +3586,9 @@ impl WebGpuCircuitHal {
             if !ready && !pending {
                 let wrapper = synth_arm_wrapper(label, sub_fn, arm_idx);
                 let module = assemble_arm_kernel(delta, &wrapper);
-                let entry = format!("iter6d_g_{}_main", label);
+                let entry = format!("witgen_arm_{}_main", label);
                 let started = self.hal.start_compute_kernel_async(
-                    "iter6d_g_arm_kernel",
+                    "witgen_arm_arm_kernel",
                     &module,
                     &entry,
                     &arm_layouts,
@@ -3609,9 +3608,9 @@ impl WebGpuCircuitHal {
             }
             let wrapper = synth_arm_wrapper(extra_label, extra_sub_fn, 0);
             let module = assemble_arm_kernel(extra_delta, &wrapper);
-            let entry = format!("iter6d_g_{extra_label}_main");
+            let entry = format!("witgen_arm_{extra_label}_main");
             let started = self.hal.start_compute_kernel_async(
-                "iter6d_g_misc0_extra_kernel",
+                "witgen_arm_misc0_extra_kernel",
                 &module,
                 &entry,
                 &arm_layouts,
@@ -3635,9 +3634,9 @@ impl WebGpuCircuitHal {
                 }
                 let wrapper = synth_arm_wrapper(extra_label, extra_sub_fn, 5);
                 let module = assemble_arm_kernel(extra_delta, &wrapper);
-                let entry = format!("iter6d_g_{extra_label}_main");
+                let entry = format!("witgen_arm_{extra_label}_main");
                 let started = self.hal.start_compute_kernel_async(
-                    "iter6d_g_mem0_extra_kernel",
+                    "witgen_arm_mem0_extra_kernel",
                     &module,
                     &entry,
                     &arm_layouts,
@@ -3663,9 +3662,9 @@ impl WebGpuCircuitHal {
                 }
                 let wrapper = synth_arm_wrapper(extra_label, extra_sub_fn, 6);
                 let module = assemble_arm_kernel(extra_delta, &wrapper);
-                let entry = format!("iter6d_g_{extra_label}_main");
+                let entry = format!("witgen_arm_{extra_label}_main");
                 let started = self.hal.start_compute_kernel_async(
-                    "iter6d_g_mem1_extra_kernel",
+                    "witgen_arm_mem1_extra_kernel",
                     &module,
                     &entry,
                     &arm_layouts,
@@ -3696,9 +3695,9 @@ impl WebGpuCircuitHal {
                 module.push('\n');
             }
             module.push_str(&wrapper);
-            let entry = format!("iter6d_g_{}_c1_main", label);
+            let entry = format!("witgen_arm_{}_c1_main", label);
             let started = self.hal.start_compute_kernel_async(
-                "iter6d_g_arm_chunk1_kernel",
+                "witgen_arm_arm_chunk1_kernel",
                 &module,
                 &entry,
                 &arm_layouts,
@@ -3727,14 +3726,14 @@ impl WebGpuCircuitHal {
                     WITGEN_ARM_KERNELS.with(|cell| cell.borrow_mut().insert(label, kernel));
                     WITGEN_ARM_PENDING_KERNELS.with(|cell| cell.borrow_mut().remove(label));
                     risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "iter6d_g_prewarm arm={} DONE",
+                        "witgen_arm_prewarm arm={} DONE",
                         label
                     ));
                 }
                 Err(err) => {
                     WITGEN_ARM_PENDING_KERNELS.with(|cell| cell.borrow_mut().remove(label));
                     risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "iter6d_g_prewarm arm={} FAILED err={err:?}",
+                        "witgen_arm_prewarm arm={} FAILED err={err:?}",
                         label
                     ));
                 }
@@ -3748,7 +3747,7 @@ impl WebGpuCircuitHal {
                     WITGEN_MISC0_EXTRA_PENDING_KERNELS
                         .with(|cell| cell.borrow_mut().remove(&minor));
                     risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "iter6d_g_prewarm arm={} DONE",
+                        "witgen_arm_prewarm arm={} DONE",
                         label
                     ));
                 }
@@ -3756,7 +3755,7 @@ impl WebGpuCircuitHal {
                     WITGEN_MISC0_EXTRA_PENDING_KERNELS
                         .with(|cell| cell.borrow_mut().remove(&minor));
                     risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "iter6d_g_prewarm arm={} FAILED err={err:?}",
+                        "witgen_arm_prewarm arm={} FAILED err={err:?}",
                         label
                     ));
                 }
@@ -3769,14 +3768,14 @@ impl WebGpuCircuitHal {
                     WITGEN_MEM0_EXTRA_KERNELS.with(|cell| cell.borrow_mut().insert(minor, kernel));
                     WITGEN_MEM0_EXTRA_PENDING_KERNELS.with(|cell| cell.borrow_mut().remove(&minor));
                     risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "iter6d_g_prewarm arm={} DONE",
+                        "witgen_arm_prewarm arm={} DONE",
                         label
                     ));
                 }
                 Err(err) => {
                     WITGEN_MEM0_EXTRA_PENDING_KERNELS.with(|cell| cell.borrow_mut().remove(&minor));
                     risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "iter6d_g_prewarm arm={} FAILED err={err:?}",
+                        "witgen_arm_prewarm arm={} FAILED err={err:?}",
                         label
                     ));
                 }
@@ -3789,14 +3788,14 @@ impl WebGpuCircuitHal {
                     WITGEN_MEM1_EXTRA_KERNELS.with(|cell| cell.borrow_mut().insert(minor, kernel));
                     WITGEN_MEM1_EXTRA_PENDING_KERNELS.with(|cell| cell.borrow_mut().remove(&minor));
                     risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "iter6d_g_prewarm arm={} DONE",
+                        "witgen_arm_prewarm arm={} DONE",
                         label
                     ));
                 }
                 Err(err) => {
                     WITGEN_MEM1_EXTRA_PENDING_KERNELS.with(|cell| cell.borrow_mut().remove(&minor));
                     risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "iter6d_g_prewarm arm={} FAILED err={err:?}",
+                        "witgen_arm_prewarm arm={} FAILED err={err:?}",
                         label
                     ));
                 }
@@ -3809,14 +3808,14 @@ impl WebGpuCircuitHal {
                     WITGEN_ARM_KERNELS_CHUNK1.with(|cell| cell.borrow_mut().insert(label, kernel));
                     WITGEN_ARM_PENDING_KERNELS_CHUNK1.with(|cell| cell.borrow_mut().remove(label));
                     risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "iter6d_g_prewarm arm={}_chunk1 DONE",
+                        "witgen_arm_prewarm arm={}_chunk1 DONE",
                         label
                     ));
                 }
                 Err(err) => {
                     WITGEN_ARM_PENDING_KERNELS_CHUNK1.with(|cell| cell.borrow_mut().remove(label));
                     risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "iter6d_g_prewarm arm={}_chunk1 FAILED err={err:?}",
+                        "witgen_arm_prewarm arm={}_chunk1 FAILED err={err:?}",
                         label
                     ));
                 }
@@ -3825,27 +3824,27 @@ impl WebGpuCircuitHal {
 
         if misc0_extra_requested != 0 {
             risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                "iter6d_g_prewarm misc0_extra requested={misc0_extra_requested}",
+                "witgen_arm_prewarm misc0_extra requested={misc0_extra_requested}",
             ));
         }
         if mem0_extra_requested != 0 {
             risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                "iter6d_g_prewarm mem0_extra requested={mem0_extra_requested}",
+                "witgen_arm_prewarm mem0_extra requested={mem0_extra_requested}",
             ));
         }
         if mem1_extra_requested != 0 {
             risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                "iter6d_g_prewarm mem1_extra requested={mem1_extra_requested}",
+                "witgen_arm_prewarm mem1_extra requested={mem1_extra_requested}",
             ));
         }
         if arm_chunk0_requested != 0 {
             risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                "iter6d_g_prewarm ALL arms requested={arm_chunk0_requested}",
+                "witgen_arm_prewarm ALL arms requested={arm_chunk0_requested}",
             ));
         }
         if arm_chunk1_requested != 0 {
             risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                "iter6d_g_prewarm chunk1 ALL requested={arm_chunk1_requested}",
+                "witgen_arm_prewarm chunk1 ALL requested={arm_chunk1_requested}",
             ));
         }
     }
@@ -3871,7 +3870,7 @@ impl WebGpuCircuitHal {
             let kernel = self.hal.finish_compute_kernel_async(started).await?;
             WITGEN_ARM_KERNELS.with(|cell| cell.borrow_mut().insert(*label, kernel));
             risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                "iter6d_g_prewarm_pending arm={} chunk0 DONE",
+                "witgen_arm_prewarm_pending arm={} chunk0 DONE",
                 label,
             ));
         }
@@ -3882,7 +3881,7 @@ impl WebGpuCircuitHal {
             let kernel = self.hal.finish_compute_kernel_async(started).await?;
             WITGEN_ARM_KERNELS_CHUNK1.with(|cell| cell.borrow_mut().insert(*label, kernel));
             risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                "iter6d_g_prewarm_pending arm={} chunk1 DONE",
+                "witgen_arm_prewarm_pending arm={} chunk1 DONE",
                 label,
             ));
         }
@@ -3899,7 +3898,7 @@ impl WebGpuCircuitHal {
                 let kernel = self.hal.finish_compute_kernel_async(started).await?;
                 WITGEN_MISC0_EXTRA_KERNELS.with(|cell| cell.borrow_mut().insert(minor, kernel));
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "iter6d_g_prewarm_pending misc0_minor={} DONE",
+                    "witgen_arm_prewarm_pending misc0_minor={} DONE",
                     minor,
                 ));
             }
@@ -3917,7 +3916,7 @@ impl WebGpuCircuitHal {
                 let kernel = self.hal.finish_compute_kernel_async(started).await?;
                 WITGEN_MEM0_EXTRA_KERNELS.with(|cell| cell.borrow_mut().insert(minor, kernel));
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "iter6d_g_prewarm_pending mem0_minor={} DONE",
+                    "witgen_arm_prewarm_pending mem0_minor={} DONE",
                     minor,
                 ));
             }
@@ -3935,7 +3934,7 @@ impl WebGpuCircuitHal {
                 let kernel = self.hal.finish_compute_kernel_async(started).await?;
                 WITGEN_MEM1_EXTRA_KERNELS.with(|cell| cell.borrow_mut().insert(minor, kernel));
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "iter6d_g_prewarm_pending mem1_minor={} DONE",
+                    "witgen_arm_prewarm_pending mem1_minor={} DONE",
                     minor,
                 ));
             }
@@ -3944,7 +3943,7 @@ impl WebGpuCircuitHal {
         Ok(())
     }
 
-    /// SP7 iter 6d-d (2026-05-15): kick off the witgen kernel Tint
+    /// Kick off the witgen kernel Tint
     /// compile asynchronously. The browser GPU process compiles in
     /// parallel with the wasm thread's guest execution + session
     /// setup; by the time `WebGpuCircuitHal::generate_witness` runs,
@@ -3973,25 +3972,25 @@ impl WebGpuCircuitHal {
             Ok(prewarm) => prewarm,
             Err(err) => {
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "iter6d_g_prewarm start_FAILED err={err:?}"
+                    "witgen_arm_prewarm start_FAILED err={err:?}"
                 ));
                 WitgenReplacementPrewarm::default()
             }
         };
         let hal = self.hal.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            // SP7 iter 6d-e: compile both top-mux chunks. Chrome
+            // Compile both top-mux chunks. Chrome
             // pipelines createComputePipelineAsync internally so the
             // two compiles can overlap with each other and with
             // session execution. Measured wall on xgboost: chunk0
             // compile ~2.65 s, chunk1 ~similar.
-            let _t = WebGpuStageTimer::new("iter6d_d_witgen_prewarm_async");
+            let _t = WebGpuStageTimer::new("witgen_prewarm_async");
             Self::finish_witgen_replacement_prewarm(hal.clone(), replacement_prewarm).await;
             if replace_prewarm_requested {
                 return;
             }
             let layout = match hal.create_bind_group_layout(
-                "iter6d_c_witgen_layout",
+                "witgen_probe_layout",
                 &[
                     WebGpuBindingLayout::storage(0, 0),
                     WebGpuBindingLayout::storage(1, 0),
@@ -4003,7 +4002,7 @@ impl WebGpuCircuitHal {
                 Ok(layout) => layout,
                 Err(err) => {
                     risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "iter6d_d_witgen_prewarm_async layout_FAILED err={err:?}"
+                        "witgen_prewarm_async layout_FAILED err={err:?}"
                     ));
                     return;
                 }
@@ -4013,13 +4012,13 @@ impl WebGpuCircuitHal {
             let layouts0 = [layout.clone()];
             let layouts1 = [layout.clone()];
             let chunk0_fut = hal.create_compute_kernel_async(
-                "iter6d_c_witgen_kernel_chunk0",
+                "witgen_probe_kernel_chunk0",
                 WITGEN_TOP_CHUNK0_WGSL,
                 "exec_top_chunk0_main",
                 &layouts0,
             );
             let chunk1_fut = hal.create_compute_kernel_async(
-                "iter6d_e_witgen_kernel_chunk1",
+                "witgen_probe_kernel_chunk1",
                 WITGEN_TOP_CHUNK1_WGSL,
                 "exec_top_chunk1_main",
                 &layouts1,
@@ -4027,33 +4026,29 @@ impl WebGpuCircuitHal {
             match chunk0_fut.await {
                 Ok(kernel) => {
                     WITGEN_TOP_CHUNK0_KERNEL.with(|cell| *cell.borrow_mut() = Some(kernel));
-                    risc0_zkp::hal::webgpu::log_webgpu_metric(
-                        "iter6d_d_witgen_prewarm_async chunk0 DONE",
-                    );
+                    risc0_zkp::hal::webgpu::log_webgpu_metric("witgen_prewarm_async chunk0 DONE");
                 }
                 Err(err) => {
                     risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "iter6d_d_witgen_prewarm_async chunk0_FAILED err={err:?}"
+                        "witgen_prewarm_async chunk0_FAILED err={err:?}"
                     ));
                 }
             }
             match chunk1_fut.await {
                 Ok(kernel) => {
                     WITGEN_TOP_CHUNK1_KERNEL.with(|cell| *cell.borrow_mut() = Some(kernel));
-                    risc0_zkp::hal::webgpu::log_webgpu_metric(
-                        "iter6d_e_witgen_prewarm_async chunk1 DONE",
-                    );
+                    risc0_zkp::hal::webgpu::log_webgpu_metric("witgen_prewarm_async chunk1 DONE");
                 }
                 Err(err) => {
                     risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "iter6d_e_witgen_prewarm_async chunk1_FAILED err={err:?}"
+                        "witgen_prewarm_async chunk1_FAILED err={err:?}"
                     ));
                 }
             }
         });
     }
 
-    /// Returns the witgen kernel if the iter-6d-d async prewarm task
+    /// Returns the witgen kernel if the async prewarm task
     /// finished. None means "not ready yet" -- caller skips the GPU
     /// dispatch and relies on rust_steps.
     fn lookup_witgen_top_chunk0_kernel(&self) -> Option<WebGpuKernel> {
@@ -4245,7 +4240,7 @@ impl WebGpuCircuitHal {
         }
 
         let layout = self.hal.create_bind_group_layout(
-            "iter6d_g_arm_layout",
+            "witgen_arm_arm_layout",
             &[
                 WebGpuBindingLayout::storage(0, 0),
                 WebGpuBindingLayout::storage(1, 0),
@@ -4268,7 +4263,7 @@ impl WebGpuCircuitHal {
             } else {
                 String::new()
             };
-            let chunk0_entry = format!("iter6d_g_{}_main", label);
+            let chunk0_entry = format!("witgen_arm_{}_main", label);
             let chunk1_module = if !chunk1_ready {
                 let patched_chunk1 = patch_extern_get_diff_count(EXEC_TOP_CHUNK1_WGSL);
                 let patched_chunk1 = patch_extern_get_memory_txn(&patched_chunk1);
@@ -4283,7 +4278,7 @@ impl WebGpuCircuitHal {
             } else {
                 String::new()
             };
-            let chunk1_entry = format!("iter6d_g_{}_c1_main", label);
+            let chunk1_entry = format!("witgen_arm_{}_c1_main", label);
             let misc0_extra_modules: Vec<(u8, String, String, &'static str)> =
                 MISC0_EXTRA_CHUNK_DELTAS
                     .iter()
@@ -4298,7 +4293,7 @@ impl WebGpuCircuitHal {
                         }
                         let wrapper = synth_arm_wrapper(extra_label, extra_sub_fn, 0);
                         let module = assemble_arm_kernel(extra_delta, &wrapper);
-                        let entry = format!("iter6d_g_{extra_label}_main");
+                        let entry = format!("witgen_arm_{extra_label}_main");
                         Some((*minor, module, entry, *extra_label))
                     })
                     .collect();
@@ -4306,7 +4301,7 @@ impl WebGpuCircuitHal {
                 .iter()
                 .map(|(_, module, entry, _)| {
                     self.hal.create_compute_kernel_async(
-                        "iter6d_g_misc0_extra_kernel_on_demand",
+                        "witgen_arm_misc0_extra_kernel_on_demand",
                         module,
                         entry,
                         &layouts,
@@ -4321,7 +4316,7 @@ impl WebGpuCircuitHal {
                     Some(
                         self.hal
                             .create_compute_kernel_async(
-                                "iter6d_g_arm_kernel_on_demand",
+                                "witgen_arm_arm_kernel_on_demand",
                                 &chunk0_module,
                                 &chunk0_entry,
                                 &layouts,
@@ -4337,7 +4332,7 @@ impl WebGpuCircuitHal {
                     Some(
                         self.hal
                             .create_compute_kernel_async(
-                                "iter6d_g_arm_chunk1_kernel_on_demand",
+                                "witgen_arm_arm_chunk1_kernel_on_demand",
                                 &chunk1_module,
                                 &chunk1_entry,
                                 &layouts,
@@ -4353,7 +4348,7 @@ impl WebGpuCircuitHal {
                 WITGEN_ARM_KERNELS.with(|cell| cell.borrow_mut().insert(*label, kernel));
                 record_witgen_replace_on_demand_kernel_compile(label);
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "iter6d_g_on_demand arm={} chunk0 DONE",
+                    "witgen_arm_on_demand arm={} chunk0 DONE",
                     label,
                 ));
             }
@@ -4362,7 +4357,7 @@ impl WebGpuCircuitHal {
                 WITGEN_ARM_KERNELS_CHUNK1.with(|cell| cell.borrow_mut().insert(*label, kernel));
                 record_witgen_replace_on_demand_kernel_compile(label);
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "iter6d_g_on_demand arm={} chunk1 DONE",
+                    "witgen_arm_on_demand arm={} chunk1 DONE",
                     label,
                 ));
             }
@@ -4372,7 +4367,7 @@ impl WebGpuCircuitHal {
                 WITGEN_MISC0_EXTRA_KERNELS.with(|cell| cell.borrow_mut().insert(*minor, kernel));
                 record_witgen_replace_on_demand_kernel_compile(extra_label);
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "iter6d_g_on_demand arm={} DONE",
+                    "witgen_arm_on_demand arm={} DONE",
                     extra_label,
                 ));
             }
@@ -4386,7 +4381,7 @@ impl WebGpuCircuitHal {
             } else {
                 String::new()
             };
-            let chunk0_entry = format!("iter6d_g_{}_main", label);
+            let chunk0_entry = format!("witgen_arm_{}_main", label);
             let chunk1_module = if !chunk1_ready {
                 let patched_chunk1 = patch_extern_get_diff_count(EXEC_TOP_CHUNK1_WGSL);
                 let patched_chunk1 = patch_extern_get_memory_txn(&patched_chunk1);
@@ -4401,7 +4396,7 @@ impl WebGpuCircuitHal {
             } else {
                 String::new()
             };
-            let chunk1_entry = format!("iter6d_g_{}_c1_main", label);
+            let chunk1_entry = format!("witgen_arm_{}_c1_main", label);
             let misc2_extra_modules: Vec<(u8, String, String, &'static str)> =
                 MISC2_EXTRA_CHUNK_DELTAS
                     .iter()
@@ -4416,7 +4411,7 @@ impl WebGpuCircuitHal {
                         }
                         let wrapper = synth_arm_wrapper(extra_label, extra_sub_fn, 2);
                         let module = assemble_arm_kernel(extra_delta, &wrapper);
-                        let entry = format!("iter6d_g_{extra_label}_main");
+                        let entry = format!("witgen_arm_{extra_label}_main");
                         Some((*minor, module, entry, *extra_label))
                     })
                     .collect();
@@ -4424,7 +4419,7 @@ impl WebGpuCircuitHal {
                 .iter()
                 .map(|(_, module, entry, _)| {
                     self.hal.create_compute_kernel_async(
-                        "iter6d_g_misc2_extra_kernel_on_demand",
+                        "witgen_arm_misc2_extra_kernel_on_demand",
                         module,
                         entry,
                         &layouts,
@@ -4439,7 +4434,7 @@ impl WebGpuCircuitHal {
                     Some(
                         self.hal
                             .create_compute_kernel_async(
-                                "iter6d_g_arm_kernel_on_demand",
+                                "witgen_arm_arm_kernel_on_demand",
                                 &chunk0_module,
                                 &chunk0_entry,
                                 &layouts,
@@ -4455,7 +4450,7 @@ impl WebGpuCircuitHal {
                     Some(
                         self.hal
                             .create_compute_kernel_async(
-                                "iter6d_g_arm_chunk1_kernel_on_demand",
+                                "witgen_arm_arm_chunk1_kernel_on_demand",
                                 &chunk1_module,
                                 &chunk1_entry,
                                 &layouts,
@@ -4471,7 +4466,7 @@ impl WebGpuCircuitHal {
                 WITGEN_ARM_KERNELS.with(|cell| cell.borrow_mut().insert(*label, kernel));
                 record_witgen_replace_on_demand_kernel_compile(label);
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "iter6d_g_on_demand arm={} chunk0 DONE",
+                    "witgen_arm_on_demand arm={} chunk0 DONE",
                     label,
                 ));
             }
@@ -4480,7 +4475,7 @@ impl WebGpuCircuitHal {
                 WITGEN_ARM_KERNELS_CHUNK1.with(|cell| cell.borrow_mut().insert(*label, kernel));
                 record_witgen_replace_on_demand_kernel_compile(label);
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "iter6d_g_on_demand arm={} chunk1 DONE",
+                    "witgen_arm_on_demand arm={} chunk1 DONE",
                     label,
                 ));
             }
@@ -4490,7 +4485,7 @@ impl WebGpuCircuitHal {
                 WITGEN_MISC2_EXTRA_KERNELS.with(|cell| cell.borrow_mut().insert(*minor, kernel));
                 record_witgen_replace_on_demand_kernel_compile(extra_label);
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "iter6d_g_on_demand arm={} DONE",
+                    "witgen_arm_on_demand arm={} DONE",
                     extra_label,
                 ));
             }
@@ -4504,7 +4499,7 @@ impl WebGpuCircuitHal {
             } else {
                 String::new()
             };
-            let chunk0_entry = format!("iter6d_g_{}_main", label);
+            let chunk0_entry = format!("witgen_arm_{}_main", label);
             let chunk1_module = if !chunk1_ready {
                 let patched_chunk1 = patch_extern_get_diff_count(EXEC_TOP_CHUNK1_WGSL);
                 let patched_chunk1 = patch_extern_get_memory_txn(&patched_chunk1);
@@ -4519,7 +4514,7 @@ impl WebGpuCircuitHal {
             } else {
                 String::new()
             };
-            let chunk1_entry = format!("iter6d_g_{}_c1_main", label);
+            let chunk1_entry = format!("witgen_arm_{}_c1_main", label);
             let mem0_extra_modules: Vec<(u8, String, String, &'static str)> =
                 MEM0_EXTRA_CHUNK_DELTAS
                     .iter()
@@ -4534,7 +4529,7 @@ impl WebGpuCircuitHal {
                         }
                         let wrapper = synth_arm_wrapper(extra_label, extra_sub_fn, 5);
                         let module = assemble_arm_kernel(extra_delta, &wrapper);
-                        let entry = format!("iter6d_g_{extra_label}_main");
+                        let entry = format!("witgen_arm_{extra_label}_main");
                         Some((*minor, module, entry, *extra_label))
                     })
                     .collect();
@@ -4542,7 +4537,7 @@ impl WebGpuCircuitHal {
                 .iter()
                 .map(|(_, module, entry, _)| {
                     self.hal.create_compute_kernel_async(
-                        "iter6d_g_mem0_extra_kernel_on_demand",
+                        "witgen_arm_mem0_extra_kernel_on_demand",
                         module,
                         entry,
                         &layouts,
@@ -4557,7 +4552,7 @@ impl WebGpuCircuitHal {
                     Some(
                         self.hal
                             .create_compute_kernel_async(
-                                "iter6d_g_arm_kernel_on_demand",
+                                "witgen_arm_arm_kernel_on_demand",
                                 &chunk0_module,
                                 &chunk0_entry,
                                 &layouts,
@@ -4573,7 +4568,7 @@ impl WebGpuCircuitHal {
                     Some(
                         self.hal
                             .create_compute_kernel_async(
-                                "iter6d_g_arm_chunk1_kernel_on_demand",
+                                "witgen_arm_arm_chunk1_kernel_on_demand",
                                 &chunk1_module,
                                 &chunk1_entry,
                                 &layouts,
@@ -4589,7 +4584,7 @@ impl WebGpuCircuitHal {
                 WITGEN_ARM_KERNELS.with(|cell| cell.borrow_mut().insert(*label, kernel));
                 record_witgen_replace_on_demand_kernel_compile(label);
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "iter6d_g_on_demand arm={} chunk0 DONE",
+                    "witgen_arm_on_demand arm={} chunk0 DONE",
                     label,
                 ));
             }
@@ -4598,7 +4593,7 @@ impl WebGpuCircuitHal {
                 WITGEN_ARM_KERNELS_CHUNK1.with(|cell| cell.borrow_mut().insert(*label, kernel));
                 record_witgen_replace_on_demand_kernel_compile(label);
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "iter6d_g_on_demand arm={} chunk1 DONE",
+                    "witgen_arm_on_demand arm={} chunk1 DONE",
                     label,
                 ));
             }
@@ -4608,7 +4603,7 @@ impl WebGpuCircuitHal {
                 WITGEN_MEM0_EXTRA_KERNELS.with(|cell| cell.borrow_mut().insert(*minor, kernel));
                 record_witgen_replace_on_demand_kernel_compile(extra_label);
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "iter6d_g_on_demand arm={} DONE",
+                    "witgen_arm_on_demand arm={} DONE",
                     extra_label,
                 ));
             }
@@ -4622,7 +4617,7 @@ impl WebGpuCircuitHal {
             } else {
                 String::new()
             };
-            let chunk0_entry = format!("iter6d_g_{}_main", label);
+            let chunk0_entry = format!("witgen_arm_{}_main", label);
             let chunk1_module = if !chunk1_ready {
                 let patched_chunk1 = patch_extern_get_diff_count(EXEC_TOP_CHUNK1_WGSL);
                 let patched_chunk1 = patch_extern_get_memory_txn(&patched_chunk1);
@@ -4637,7 +4632,7 @@ impl WebGpuCircuitHal {
             } else {
                 String::new()
             };
-            let chunk1_entry = format!("iter6d_g_{}_c1_main", label);
+            let chunk1_entry = format!("witgen_arm_{}_c1_main", label);
             let mem1_extra_modules: Vec<(u8, String, String, &'static str)> =
                 MEM1_EXTRA_CHUNK_DELTAS
                     .iter()
@@ -4652,7 +4647,7 @@ impl WebGpuCircuitHal {
                         }
                         let wrapper = synth_arm_wrapper(extra_label, extra_sub_fn, 6);
                         let module = assemble_arm_kernel(extra_delta, &wrapper);
-                        let entry = format!("iter6d_g_{extra_label}_main");
+                        let entry = format!("witgen_arm_{extra_label}_main");
                         Some((*minor, module, entry, *extra_label))
                     })
                     .collect();
@@ -4660,7 +4655,7 @@ impl WebGpuCircuitHal {
                 .iter()
                 .map(|(_, module, entry, _)| {
                     self.hal.create_compute_kernel_async(
-                        "iter6d_g_mem1_extra_kernel_on_demand",
+                        "witgen_arm_mem1_extra_kernel_on_demand",
                         module,
                         entry,
                         &layouts,
@@ -4675,7 +4670,7 @@ impl WebGpuCircuitHal {
                     Some(
                         self.hal
                             .create_compute_kernel_async(
-                                "iter6d_g_arm_kernel_on_demand",
+                                "witgen_arm_arm_kernel_on_demand",
                                 &chunk0_module,
                                 &chunk0_entry,
                                 &layouts,
@@ -4691,7 +4686,7 @@ impl WebGpuCircuitHal {
                     Some(
                         self.hal
                             .create_compute_kernel_async(
-                                "iter6d_g_arm_chunk1_kernel_on_demand",
+                                "witgen_arm_arm_chunk1_kernel_on_demand",
                                 &chunk1_module,
                                 &chunk1_entry,
                                 &layouts,
@@ -4707,7 +4702,7 @@ impl WebGpuCircuitHal {
                 WITGEN_ARM_KERNELS.with(|cell| cell.borrow_mut().insert(*label, kernel));
                 record_witgen_replace_on_demand_kernel_compile(label);
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "iter6d_g_on_demand arm={} chunk0 DONE",
+                    "witgen_arm_on_demand arm={} chunk0 DONE",
                     label,
                 ));
             }
@@ -4716,7 +4711,7 @@ impl WebGpuCircuitHal {
                 WITGEN_ARM_KERNELS_CHUNK1.with(|cell| cell.borrow_mut().insert(*label, kernel));
                 record_witgen_replace_on_demand_kernel_compile(label);
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "iter6d_g_on_demand arm={} chunk1 DONE",
+                    "witgen_arm_on_demand arm={} chunk1 DONE",
                     label,
                 ));
             }
@@ -4726,7 +4721,7 @@ impl WebGpuCircuitHal {
                 WITGEN_MEM1_EXTRA_KERNELS.with(|cell| cell.borrow_mut().insert(*minor, kernel));
                 record_witgen_replace_on_demand_kernel_compile(extra_label);
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "iter6d_g_on_demand arm={} DONE",
+                    "witgen_arm_on_demand arm={} DONE",
                     extra_label,
                 ));
             }
@@ -4736,11 +4731,11 @@ impl WebGpuCircuitHal {
         if !chunk0_ready {
             let wrapper = synth_arm_wrapper(label, sub_fn, arm_idx);
             let module = assemble_arm_kernel(delta, &wrapper);
-            let entry = format!("iter6d_g_{}_main", label);
+            let entry = format!("witgen_arm_{}_main", label);
             let kernel = self
                 .hal
                 .create_compute_kernel_async(
-                    "iter6d_g_arm_kernel_on_demand",
+                    "witgen_arm_arm_kernel_on_demand",
                     &module,
                     &entry,
                     &layouts,
@@ -4749,7 +4744,7 @@ impl WebGpuCircuitHal {
             WITGEN_ARM_KERNELS.with(|cell| cell.borrow_mut().insert(*label, kernel));
             record_witgen_replace_on_demand_kernel_compile(label);
             risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                "iter6d_g_on_demand arm={} chunk0 DONE",
+                "witgen_arm_on_demand arm={} chunk0 DONE",
                 label,
             ));
         }
@@ -4764,11 +4759,11 @@ impl WebGpuCircuitHal {
                 module.push('\n');
             }
             module.push_str(&wrapper);
-            let entry = format!("iter6d_g_{}_c1_main", label);
+            let entry = format!("witgen_arm_{}_c1_main", label);
             let kernel = self
                 .hal
                 .create_compute_kernel_async(
-                    "iter6d_g_arm_chunk1_kernel_on_demand",
+                    "witgen_arm_arm_chunk1_kernel_on_demand",
                     &module,
                     &entry,
                     &layouts,
@@ -4777,7 +4772,7 @@ impl WebGpuCircuitHal {
             WITGEN_ARM_KERNELS_CHUNK1.with(|cell| cell.borrow_mut().insert(*label, kernel));
             record_witgen_replace_on_demand_kernel_compile(label);
             risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                "iter6d_g_on_demand arm={} chunk1 DONE",
+                "witgen_arm_on_demand arm={} chunk1 DONE",
                 label,
             ));
         }
@@ -4785,18 +4780,12 @@ impl WebGpuCircuitHal {
         Ok(())
     }
 
-    /// SP7 iter 6d-g step 6 (partial -- dispatch infrastructure only):
-    /// build 13 per-arm cycle-list buffers from preflight and dispatch
-    /// each prewarmed per-arm kernel over its cycle subset. Kernels
-    /// are still no-ops (data_buf[cycle] = data_buf[cycle]) per
-    /// iter-6d-g step 4, so this contributes no perf yet -- but
-    /// validates that the multi-kernel dispatch path runs cleanly in
-    /// the prove pipeline.
+    /// Build 13 per-arm cycle-list buffers from preflight and dispatch
+    /// each prewarmed per-arm kernel over its cycle subset. Wired arm
+    /// kernels construct `InstInputStruct` + `BoundLayout` and call the
+    /// arm sub-fn, writing real witness cells; `rust_steps` then
+    /// short-circuits the cycles covered by GPU dispatch.
     ///
-    /// Future iter-6d-g step 6 work: replace no-op wrappers with
-    /// arm-specific InstInputStruct + BoundLayout construction +
-    /// sub-fn call. Then rust_steps::step_exec can be short-circuited
-    /// for cycles covered by GPU dispatch.
     /// Returns the set of arm_idx values that were actually dispatched on
     /// this call (kernel cached + cycles > 0). Caller can use this to
     /// decide whether `rust_steps` may short-circuit those arms.
@@ -4828,11 +4817,11 @@ impl WebGpuCircuitHal {
             }
         }
         let _t = WebGpuStageTimer::new(format!(
-            "iter6d_g_per_arm_dispatch arms={} total_cycles={}",
+            "witgen_arm_per_arm_dispatch arms={} total_cycles={}",
             TOP_CHUNK0_ARM_DELTAS.len(),
             preflight.cycles.len(),
         ));
-        // iter-6d-g step 6.2.1a: layout now has binding 5 (cycle_list)
+        // The layout has binding 5 (cycle_list)
         // and binding 6 (preflight_meta). Per-arm wrappers read major/
         // minor from preflight_meta via packed_minor_major at index 3.
         // step 6.2.5: binding 7 is preflight_diff_count_buf (patched
@@ -4840,7 +4829,7 @@ impl WebGpuCircuitHal {
         // are preflight_txn_start and preflight_txns_buf (patched
         // extern_getMemoryTxn reads them with a per-invocation counter).
         let layout = self.hal.create_bind_group_layout(
-            "iter6d_g_arm_layout",
+            "witgen_arm_arm_layout",
             &[
                 WebGpuBindingLayout::storage(0, 0),
                 WebGpuBindingLayout::storage(1, 0),
@@ -4858,14 +4847,14 @@ impl WebGpuCircuitHal {
         let placeholder_bytes: u64 = 256;
         let accum_buf = self
             .hal
-            .create_storage_buffer("iter6d_g_arm_accum_ph", placeholder_bytes)?;
+            .create_storage_buffer("witgen_arm_arm_accum_ph", placeholder_bytes)?;
         let mix_buf = self
             .hal
-            .create_storage_buffer("iter6d_g_arm_mix_ph", placeholder_bytes)?;
+            .create_storage_buffer("witgen_arm_arm_mix_ph", placeholder_bytes)?;
         let params: [u32; 8] = [total_cycles, 1, total_cycles, 1, 0, 0, 0, 0];
         let params_buf = self
             .hal
-            .create_uniform_buffer("iter6d_g_arm_params_ph", bytemuck::cast_slice(&params))?;
+            .create_uniform_buffer("witgen_arm_arm_params_ph", bytemuck::cast_slice(&params))?;
         // Upload preflight_meta for per-arm wrappers (separate buffer
         // from the shadow_init kernel's upload; could be shared in a
         // future tightening, but keeping separate avoids cross-pass
@@ -4874,20 +4863,20 @@ impl WebGpuCircuitHal {
         let meta_bytes: &[u8] = bytemuck::cast_slice(meta.as_slice());
         let preflight_buf = self
             .hal
-            .create_storage_buffer("iter6d_g_arm_preflight", meta_bytes.len() as u64)?;
+            .create_storage_buffer("witgen_arm_arm_preflight", meta_bytes.len() as u64)?;
         self.hal
-            .write_buffer_named(&preflight_buf, "iter6d_g_arm_preflight", 0, meta_bytes)?;
+            .write_buffer_named(&preflight_buf, "witgen_arm_arm_preflight", 0, meta_bytes)?;
         let data_gpu = data
             .buf
             .raw_buffer()
-            .ok_or_else(|| anyhow::anyhow!("iter-6d-g: data missing GPU storage"))?;
+            .ok_or_else(|| anyhow::anyhow!("pre-witgen dispatch: data missing GPU storage"))?;
         let global_gpu = global
             .buf
             .raw_buffer()
-            .ok_or_else(|| anyhow::anyhow!("iter-6d-g: global missing GPU storage"))?;
+            .ok_or_else(|| anyhow::anyhow!("pre-witgen dispatch: global missing GPU storage"))?;
         {
             let _t = WebGpuStageTimer::new(format!(
-                "iter6d_g_shadow_init cycles={}",
+                "witgen_arm_shadow_init cycles={}",
                 preflight.cycles.len()
             ));
             let kernel = SHADOW_INIT_KERNEL.with(|cell| cell.borrow().clone());
@@ -4895,7 +4884,7 @@ impl WebGpuCircuitHal {
                 Some(k) => k,
                 None => {
                     let layout = self.hal.create_bind_group_layout(
-                        "iter6d_g_shadow_init_layout",
+                        "witgen_arm_shadow_init_layout",
                         &[
                             WebGpuBindingLayout::storage(0, 0),
                             WebGpuBindingLayout::uniform(1, 16),
@@ -4903,7 +4892,7 @@ impl WebGpuCircuitHal {
                         ],
                     )?;
                     let k = self.hal.create_compute_kernel(
-                        "iter6d_g_shadow_init",
+                        "witgen_arm_shadow_init",
                         SHADOW_INIT_WGSL,
                         "shadow_init_main",
                         &[layout],
@@ -4914,11 +4903,11 @@ impl WebGpuCircuitHal {
             };
             let shadow_params: [u32; 4] = [total_cycles, data.cols as u32, 0, 0];
             let shadow_params_buf = self.hal.create_uniform_buffer(
-                "iter6d_g_shadow_params",
+                "witgen_arm_shadow_params",
                 bytemuck::cast_slice(&shadow_params),
             )?;
             let shadow_layout = self.hal.create_bind_group_layout(
-                "iter6d_g_shadow_init_layout",
+                "witgen_arm_shadow_init_layout",
                 &[
                     WebGpuBindingLayout::storage(0, 0),
                     WebGpuBindingLayout::uniform(1, 16),
@@ -4926,7 +4915,7 @@ impl WebGpuCircuitHal {
                 ],
             )?;
             let shadow_bind_group = self.hal.create_bind_group(
-                "iter6d_g_shadow_bg",
+                "witgen_arm_shadow_bg",
                 &shadow_layout,
                 &[
                     WebGpuBufferBinding::new(0, data_gpu),
@@ -4937,7 +4926,7 @@ impl WebGpuCircuitHal {
             self.hal
                 .dispatch_compute_1d(&kernel, &shadow_bind_group, total_cycles.div_ceil(64));
             risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                "iter6d_g_shadow_init cycles={} meta_bytes={} reused_arm_preflight=true",
+                "witgen_arm_shadow_init cycles={} meta_bytes={} reused_arm_preflight=true",
                 total_cycles,
                 meta_bytes.len(),
             ));
@@ -4950,10 +4939,10 @@ impl WebGpuCircuitHal {
         let diff_count_bytes: &[u8] = bytemuck::cast_slice(diff_count.as_slice());
         let diff_count_buf = self
             .hal
-            .create_storage_buffer("iter6d_g_arm_diff_count", diff_count_bytes.len() as u64)?;
+            .create_storage_buffer("witgen_arm_arm_diff_count", diff_count_bytes.len() as u64)?;
         self.hal.write_buffer_named(
             &diff_count_buf,
-            "iter6d_g_arm_diff_count",
+            "witgen_arm_arm_diff_count",
             0,
             diff_count_bytes,
         )?;
@@ -4965,19 +4954,19 @@ impl WebGpuCircuitHal {
         let txn_start_bytes: &[u8] = bytemuck::cast_slice(txn_start.as_slice());
         let txn_start_buf = self
             .hal
-            .create_storage_buffer("iter6d_g_arm_txn_start", txn_start_bytes.len() as u64)?;
+            .create_storage_buffer("witgen_arm_arm_txn_start", txn_start_bytes.len() as u64)?;
         self.hal.write_buffer_named(
             &txn_start_buf,
-            "iter6d_g_arm_txn_start",
+            "witgen_arm_arm_txn_start",
             0,
             txn_start_bytes,
         )?;
         let txns_bytes: &[u8] = bytemuck::cast_slice(txns.as_slice());
         let txns_buf = self
             .hal
-            .create_storage_buffer("iter6d_g_arm_txns", txns_bytes.len() as u64)?;
+            .create_storage_buffer("witgen_arm_arm_txns", txns_bytes.len() as u64)?;
         self.hal
-            .write_buffer_named(&txns_buf, "iter6d_g_arm_txns", 0, txns_bytes)?;
+            .write_buffer_named(&txns_buf, "witgen_arm_arm_txns", 0, txns_bytes)?;
         let mut dispatched = 0usize;
         let mut skipped = 0usize;
         let mut dispatched_arms: Vec<usize> = Vec::with_capacity(TOP_CHUNK0_ARM_DELTAS.len());
@@ -5001,7 +4990,7 @@ impl WebGpuCircuitHal {
                 skipped += 1;
                 continue;
             };
-            // iter-6d-g step 6.2.4: for short-circuit safety the arm's
+            // For short-circuit safety the arm's
             // chunk1 kernel MUST also be dispatched (chunk0 alone covers
             // only some minor opcodes; chunk1 covers the rest).
             // No-op-wrapper arms (5 inter-cycle) don't have chunk1
@@ -5128,11 +5117,11 @@ impl WebGpuCircuitHal {
             let cycle_bytes: &[u8] = bytemuck::cast_slice(per_arm_cycles[arm_idx].as_slice());
             let cycle_buf = self
                 .hal
-                .create_storage_buffer("iter6d_g_arm_cycle_list", cycle_bytes.len() as u64)?;
+                .create_storage_buffer("witgen_arm_arm_cycle_list", cycle_bytes.len() as u64)?;
             self.hal
-                .write_buffer_named(&cycle_buf, "iter6d_g_arm_cycle_list", 0, cycle_bytes)?;
+                .write_buffer_named(&cycle_buf, "witgen_arm_arm_cycle_list", 0, cycle_bytes)?;
             let bind_group = self.hal.create_bind_group(
-                "iter6d_g_arm_bg",
+                "witgen_arm_arm_bg",
                 &layout,
                 &[
                     WebGpuBufferBinding::new(0, data_gpu),
@@ -5150,7 +5139,7 @@ impl WebGpuCircuitHal {
             let workgroups = (cycle_count as u32).div_ceil(64);
             self.hal
                 .dispatch_compute_1d(&kernel, &bind_group, workgroups);
-            // iter-6d-g step 6.2.4: dispatch chunk1 too if we have it
+            // Dispatch chunk1 too if we have it
             // (shares the same bind group -- bindings are identical).
             if let Some(k1) = chunk1_kernel {
                 self.hal.dispatch_compute_1d(&k1, &bind_group, workgroups);
@@ -5172,17 +5161,17 @@ impl WebGpuCircuitHal {
                 }
                 let filtered_cycle_bytes: &[u8] = bytemuck::cast_slice(filtered_cycles.as_slice());
                 let filtered_cycle_buf = self.hal.create_storage_buffer(
-                    "iter6d_g_arm_minor_cycle_list",
+                    "witgen_arm_arm_minor_cycle_list",
                     filtered_cycle_bytes.len() as u64,
                 )?;
                 self.hal.write_buffer_named(
                     &filtered_cycle_buf,
-                    "iter6d_g_arm_minor_cycle_list",
+                    "witgen_arm_arm_minor_cycle_list",
                     0,
                     filtered_cycle_bytes,
                 )?;
                 let filtered_bind_group = self.hal.create_bind_group(
-                    "iter6d_g_arm_minor_bg",
+                    "witgen_arm_arm_minor_bg",
                     &layout,
                     &[
                         WebGpuBufferBinding::new(0, data_gpu),
@@ -5201,7 +5190,7 @@ impl WebGpuCircuitHal {
                 self.hal
                     .dispatch_compute_1d(kernel, &filtered_bind_group, filtered_workgroups);
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "iter6d_g_minor_dispatch arm={} minor={} cycles={}",
+                    "witgen_arm_minor_dispatch arm={} minor={} cycles={}",
                     arm_idx,
                     minor,
                     filtered_cycles.len()
@@ -5215,7 +5204,7 @@ impl WebGpuCircuitHal {
             dispatched_arms.push(arm_idx);
         }
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "iter6d_g_per_arm_dispatch dispatched={} skipped={}",
+            "witgen_arm_per_arm_dispatch dispatched={} skipped={}",
             dispatched, skipped,
         ));
         // Keep buffers + bind groups alive until dispatch completes.
@@ -5239,7 +5228,7 @@ impl WebGpuCircuitHal {
         global: &MetaBuffer<WebGpuHal>,
         total_cycles: u32,
     ) -> Result<usize> {
-        // iter-6d-e: dispatch chunk0 and chunk1 (if available). Each
+        // Dispatch chunk0 and chunk1 (if available). Each
         // kernel internally filters by major opcode arm via its mux
         // dispatch; cycles whose opcode is outside the kernel's arms
         // execute the trailing `unreachable` branch (effectively a
@@ -5250,19 +5239,17 @@ impl WebGpuCircuitHal {
         let chunk1 = self.lookup_witgen_top_chunk1_kernel();
         let kernels: Vec<WebGpuKernel> = [chunk0, chunk1].into_iter().flatten().collect();
         if kernels.is_empty() {
-            risc0_zkp::hal::webgpu::log_webgpu_metric(
-                "iter6d_c_witgen_probe SKIP kernels_not_ready",
-            );
+            risc0_zkp::hal::webgpu::log_webgpu_metric("witgen_probe_probe SKIP kernels_not_ready");
             return Ok(0);
         }
         let chunks_ready = kernels.len();
         let _t = WebGpuStageTimer::new(format!(
-            "iter6d_c_witgen_probe cycles={} chunks={}",
+            "witgen_probe_probe cycles={} chunks={}",
             total_cycles,
             kernels.len(),
         ));
         let layout = self.hal.create_bind_group_layout(
-            "iter6d_c_witgen_layout",
+            "witgen_probe_layout",
             &[
                 WebGpuBindingLayout::storage(0, 0),
                 WebGpuBindingLayout::storage(1, 0),
@@ -5277,26 +5264,26 @@ impl WebGpuCircuitHal {
         let placeholder_bytes: u64 = 256;
         let accum_buf = self
             .hal
-            .create_storage_buffer("iter6d_c_witgen_accum_placeholder", placeholder_bytes)?;
+            .create_storage_buffer("witgen_probe_accum_placeholder", placeholder_bytes)?;
         let mix_buf = self
             .hal
-            .create_storage_buffer("iter6d_c_witgen_mix_placeholder", placeholder_bytes)?;
+            .create_storage_buffer("witgen_probe_mix_placeholder", placeholder_bytes)?;
         let params: [u32; 8] = [total_cycles, 1, total_cycles, 1, 0, 0, 0, 0];
         let params_bytes: &[u8] = bytemuck::cast_slice(&params);
         let params_buf = self
             .hal
-            .create_uniform_buffer("iter6d_c_witgen_params_placeholder", params_bytes)?;
+            .create_uniform_buffer("witgen_probe_params_placeholder", params_bytes)?;
 
         let data_gpu = data
             .buf
             .raw_buffer()
-            .ok_or_else(|| anyhow::anyhow!("iter-6d-c: data buffer missing GPU storage"))?;
+            .ok_or_else(|| anyhow::anyhow!("witgen probe: data buffer missing GPU storage"))?;
         let global_gpu = global
             .buf
             .raw_buffer()
-            .ok_or_else(|| anyhow::anyhow!("iter-6d-c: global buffer missing GPU storage"))?;
+            .ok_or_else(|| anyhow::anyhow!("witgen probe: global buffer missing GPU storage"))?;
         let bind_group = self.hal.create_bind_group(
-            "iter6d_c_witgen_bg",
+            "witgen_probe_bg",
             &layout,
             &[
                 WebGpuBufferBinding::new(0, data_gpu),
@@ -5320,7 +5307,7 @@ impl WebGpuCircuitHal {
             return Ok(kernel);
         }
         use crate::prove::wgsl_pruner::{
-            TOPACCUM_ARM5_CYCLE_LIST_ENTRY, TOPACCUM_ARM5_PROBE_WGSL, WITGEN_BASELINE_WGSL,
+            TOPACCUM_ARM5_CYCLE_LIST_ENTRY, TOPACCUM_ARM5_WGSL, WITGEN_BASELINE_WGSL,
         };
         let layout = self.hal.create_bind_group_layout(
             "rv32im_accum_topaccum_arm5_probe_layout",
@@ -5335,7 +5322,7 @@ impl WebGpuCircuitHal {
         )?;
         let mut module = String::with_capacity(
             WITGEN_BASELINE_WGSL.len()
-                + TOPACCUM_ARM5_PROBE_WGSL.len()
+                + TOPACCUM_ARM5_WGSL.len()
                 + TOPACCUM_ARM5_CYCLE_LIST_ENTRY.len()
                 + 2,
         );
@@ -5343,7 +5330,7 @@ impl WebGpuCircuitHal {
         if !module.ends_with('\n') {
             module.push('\n');
         }
-        module.push_str(TOPACCUM_ARM5_PROBE_WGSL);
+        module.push_str(TOPACCUM_ARM5_WGSL);
         if !module.ends_with('\n') {
             module.push('\n');
         }
@@ -5382,7 +5369,7 @@ impl WebGpuCircuitHal {
             return Ok((capture, buffer, consume, raw, TOPACCUM_ARM5_INV_CALLS));
         }
 
-        use crate::prove::wgsl_pruner::{TOPACCUM_ARM5_PROBE_WGSL, WITGEN_BASELINE_WGSL};
+        use crate::prove::wgsl_pruner::{TOPACCUM_ARM5_WGSL, WITGEN_BASELINE_WGSL};
         let layout = self.hal.create_bind_group_layout(
             "rv32im_accum_topaccum_arm5_split_inv_layout",
             &[
@@ -5395,14 +5382,10 @@ impl WebGpuCircuitHal {
                 WebGpuBindingLayout::storage(6, 0),
             ],
         )?;
-        let (capture_body, capture_inv_count) = topaccum_arm5_replace_ext_inv_calls(
-            TOPACCUM_ARM5_PROBE_WGSL,
-            "topaccum_arm5_capture_inv",
-        )?;
-        let (consume_body, consume_inv_count) = topaccum_arm5_replace_ext_inv_calls(
-            TOPACCUM_ARM5_PROBE_WGSL,
-            "topaccum_arm5_consume_inv",
-        )?;
+        let (capture_body, capture_inv_count) =
+            topaccum_arm5_replace_ext_inv_calls(TOPACCUM_ARM5_WGSL, "topaccum_arm5_capture_inv")?;
+        let (consume_body, consume_inv_count) =
+            topaccum_arm5_replace_ext_inv_calls(TOPACCUM_ARM5_WGSL, "topaccum_arm5_consume_inv")?;
         anyhow::ensure!(
             capture_inv_count == consume_inv_count,
             "TopAccum arm5 capture/consume inverse call counts differ"
@@ -6596,8 +6579,8 @@ impl WebGpuCircuitHal {
         Ok(rows)
     }
 
-    /// SP7 iter 6d-g step 6.2.8 (2026-05-16): async pre-dispatch hook.
-    /// Does the iter-6d-g GPU work (shadow_init + per-arm chunks) and then
+    /// Async pre-dispatch hook.
+    /// Does the pre-witgen GPU work (shadow_init + per-arm chunks) and then
     /// `sync_gpu_to_cpu` on the data buffer so rust_steps' subsequent
     /// view_mut sees GPU writes in the CPU shadow. Sets the short-circuit
     /// mask so rust_steps skips arms covered by GPU dispatch.
@@ -6616,7 +6599,7 @@ impl WebGpuCircuitHal {
             self.set_witgen_replace_arm_mask(0);
             return Ok(());
         }
-        // SP7 iter 6d-g step 6.2.11 (2026-05-16): only run the GPU
+        // Only run the GPU
         // dispatches + sync if we're actually going to short-circuit
         // (replace flag on). For probe-only mode, the dispatches'
         // partial cell writes would conflict with rust_steps' full
@@ -6625,7 +6608,7 @@ impl WebGpuCircuitHal {
         // moot since we'd be syncing back values that rust_steps
         // overwrites anyway.
         //
-        // SP7 iter 6d-g step 6.2.13 (2026-05-16): diff mode bypasses
+        // Diff mode bypasses
         // the replace-off gate so we can run GPU writes for snapshot
         // purposes even when not short-circuiting. Caller in
         // `prove_core_async` will reset the CPU shadow + re-scatter
@@ -6638,7 +6621,7 @@ impl WebGpuCircuitHal {
         }
         let replace_mode = replace_enabled;
         let _timer = WebGpuStageTimer::new(format!(
-            "iter6d_g_pre_witgen_dispatch_async cycles={}",
+            "witgen_arm_pre_witgen_dispatch_async cycles={}",
             preflight.cycles.len()
         ));
 
@@ -6675,7 +6658,7 @@ impl WebGpuCircuitHal {
                         .await
                     {
                         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                            "iter6d_g_on_demand arm{arm_idx} FAILED err={err:?}"
+                            "witgen_arm_on_demand arm{arm_idx} FAILED err={err:?}"
                         ));
                     }
                 }
@@ -6692,11 +6675,11 @@ impl WebGpuCircuitHal {
             if nonblocking_pending && needed_replacement_arm {
                 WITGEN_GPU_REPLACE_NONBLOCKING_PENDING_SKIPS.fetch_add(1, Ordering::SeqCst);
                 risc0_zkp::hal::webgpu::log_webgpu_metric(
-                    "iter6d_g_pre_witgen_dispatch_async nonblocking_pending_skip",
+                    "witgen_arm_pre_witgen_dispatch_async nonblocking_pending_skip",
                 );
             }
             risc0_zkp::hal::webgpu::log_webgpu_metric(
-                "iter6d_g_pre_witgen_dispatch_async mask=0x0000 no_ready_replacement no_sync",
+                "witgen_arm_pre_witgen_dispatch_async mask=0x0000 no_ready_replacement no_sync",
             );
             return Ok(());
         }
@@ -6708,7 +6691,7 @@ impl WebGpuCircuitHal {
         let seeded_on_gpu = if replace_mode && !diff_mode {
             self.hal.init_invalid_elem(&data.buf).unwrap_or_else(|err| {
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "iter6d_g_gpu_seed FAILED err={err:?}"
+                    "witgen_arm_gpu_seed FAILED err={err:?}"
                 ));
                 false
             })
@@ -6716,7 +6699,7 @@ impl WebGpuCircuitHal {
             false
         };
         if seeded_on_gpu {
-            risc0_zkp::hal::webgpu::log_webgpu_metric("iter6d_g_gpu_seed invalid_fill");
+            risc0_zkp::hal::webgpu::log_webgpu_metric("witgen_arm_gpu_seed invalid_fill");
         } else {
             data.buf.sync_cpu_to_gpu(self.hal.as_ref())?;
         }
@@ -6735,7 +6718,7 @@ impl WebGpuCircuitHal {
             Ok(arms) => arms,
             Err(err) => {
                 risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                    "iter6d_g_per_arm_dispatch FAILED err={err:?}"
+                    "witgen_arm_per_arm_dispatch FAILED err={err:?}"
                 ));
                 Vec::new()
             }
@@ -6753,7 +6736,7 @@ impl WebGpuCircuitHal {
         }
         self.set_witgen_replace_arm_mask(mask);
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "iter6d_g_pre_witgen_dispatch_async mask=0x{:04x} dispatched_arms={:?}",
+            "witgen_arm_pre_witgen_dispatch_async mask=0x{:04x} dispatched_arms={:?}",
             mask, dispatched_arms,
         ));
         if replace_mode && mask == 0 {
@@ -6788,8 +6771,8 @@ impl WebGpuCircuitHal {
         Ok(())
     }
 
-    /// M6d: the production witgen CPU pass, run on a rayon pool worker
-    /// instead of this wasm thread. The first M6d gate showed why this is
+    /// The production witgen CPU pass, run on a rayon pool worker
+    /// instead of this wasm thread. Measurement showed why this is
     /// load-bearing: with witgen inline, segment N+1's ~100-200 ms
     /// rayon-joins starve segment N's readback callbacks (the merkle code
     /// root readback summed 338 -> 3000 ms across xgboost), and the
@@ -6883,7 +6866,7 @@ impl CircuitWitnessGenerator<WebGpuHal> for WebGpuCircuitHal {
             data.rows,
             data.cols
         ));
-        // SP7 iter 6d-g step 6.2.8 (2026-05-16): GPU dispatches now happen
+        // GPU dispatches now happen
         // in `pre_witgen_dispatch_async` (called from the async prove path
         // BEFORE this sync `generate_witness`). The mask and CPU shadow
         // are already in sync by the time we get here, so rust_steps
@@ -7284,7 +7267,7 @@ impl SegmentProver for WebGpuSegmentProver {
     }
 }
 
-/// M6d: everything a segment's witgen phase produces, ready for the
+/// Everything a segment's witgen phase produces, ready for the
 /// transcript-bound commit phase. Opaque to callers; the zkvm prover
 /// pipelines segment N+1's witgen phase (CPU-heavy) under segment N's
 /// commit phase (GPU-heavy) — the phases only share the device queue.
@@ -7297,7 +7280,7 @@ pub struct WebGpuSegmentJob {
     po2: u32,
 }
 
-/// M6d: witgen phase of a segment prove — buffer setup, SP7 pre-witgen
+/// Witgen phase of a segment prove — buffer setup, pre-witgen
 /// GPU dispatches, and CPU witness generation (rayon-parallel). Touches
 /// no Fiat-Shamir transcript state, so it may run while another
 /// segment's commit phase is in flight on the same device.
@@ -7333,7 +7316,7 @@ async fn witgen_phase_inner(
     let circuit_hal = circuit_hal_rc.as_ref();
 
     let po2 = preflight_results.po2();
-    // SP7 iter 6d-g step 6.2.8 (2026-05-16): split WitnessGenerator
+    // Split WitnessGenerator
     // construction so we can insert an ASYNC pre-dispatch hook
     // (GPU shadow_init + per-arm chunks + sync_gpu_to_cpu) BEFORE
     // sync `generate_witness` runs. This is the fix for the
@@ -7357,12 +7340,12 @@ async fn witgen_phase_inner(
             .pre_witgen_dispatch_async(&trace, &data_buf, &global_buf)
             .await?;
     }
-    // SP7 iter 6d-g step 6.2.13 (2026-05-16): if diff mode is on,
+    // If diff mode is on,
     // snapshot GPU result from CPU shadow, reset shadow to
     // INVALID, re-scatter injector, force mask=0 so rust_steps
     // can write cleanly, then diff BEFORE zeroize.
     //
-    // SP7 iter 6d-g step 6.2.14 (2026-05-16): snapshot AFTER
+    // Snapshot AFTER
     // generate_witness but BEFORE eltwise_zeroize_elem so we can
     // distinguish "INVALID (not written)" from "0 (actually
     // written zero)". The 6.2.13 filter conflated both, missing
@@ -7576,7 +7559,7 @@ async fn witgen_phase_inner(
             trace,
         }
     } else {
-        // M6d: production path offloads the witness CPU pass to a pool
+        // Production path offloads the witness CPU pass to a pool
         // worker so this wasm thread keeps servicing the other in-flight
         // segment's readback callbacks. Diff modes above keep the inline
         // blocking pass — they are single-segment diagnostics.
@@ -7596,7 +7579,7 @@ async fn witgen_phase_inner(
     })
 }
 
-/// M6d: transcript-bound commit phase — header commit, code/data/accum
+/// Transcript-bound commit phase — header commit, code/data/accum
 /// group commits, accumulation, and finalize (eval_check + FRI).
 /// Consumes the job; the seal is complete when this returns.
 pub async fn webgpu_segment_commit_phase(job: WebGpuSegmentJob) -> Result<crate::prove::Seal> {
@@ -7717,7 +7700,7 @@ pub fn enable_webgpu_witgen_accum_acceleration_for_hal(hal: Rc<WebGpuHal>) {
     set_accum_gpu_mem1_direct_enabled(true);
     set_accum_gpu_control0_direct_enabled(true);
     set_accum_gpu_poseidon1_direct_enabled(true);
-    // M8b: compile the POSEIDON1 direct-accum pipeline at init. Lazily it
+    // Compile the POSEIDON1 direct-accum pipeline at init. Lazily it
     // lands on the FIRST segment's accum commit, where a serial
     // single-segment proof (BusyLoop) has nothing to hide it under
     // (+157 ms measured); pipelined multi-segment proofs hid it fully.
@@ -7731,7 +7714,7 @@ pub fn enable_webgpu_witgen_accum_acceleration_for_hal(hal: Rc<WebGpuHal>) {
 
 pub fn segment_prover(hal: Rc<WebGpuHal>) -> Result<Box<dyn SegmentProver>> {
     let circuit_hal = Rc::new(WebGpuCircuitHal::new(hal.clone()));
-    // SP7 iter 6d-d: kick off the witgen kernel Tint compile in the
+    // Kick off the witgen kernel Tint compile in the
     // background. No-op when WITGEN_GPU_PROBE_ENABLED is false.
     circuit_hal.prewarm_witgen_kernel();
     Ok(Box::new(WebGpuSegmentProver { hal, circuit_hal }))

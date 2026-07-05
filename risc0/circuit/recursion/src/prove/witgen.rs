@@ -39,7 +39,7 @@ pub(crate) struct WitnessGenerator<H: Hal> {
 }
 
 /// Buffers allocated for one recursion witness generation, before the
-/// witness pass has filled them. M7a splits [`WitnessGenerator::new`] at
+/// witness pass has filled them. [`WitnessGenerator::new`] splits at
 /// this point so the browser WebGPU path can run the CPU witness pass on a
 /// pool worker between [`WitnessGenerator::alloc_buffers`] and
 /// [`WitnessGenerator::finish_after_generate`].

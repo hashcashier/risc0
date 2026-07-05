@@ -1112,7 +1112,7 @@ impl Drop for EqzElisionGuard {
     }
 }
 
-/// M6d: guard form of [`with_eqz_elided`] for the pool-offloaded witgen
+/// Guard form of [`with_eqz_elided`] for the pool-offloaded witgen
 /// pass, where elision must stay on across an `.await` rather than a
 /// closure. Every taker sets the flag true and restores its previous
 /// value, so overlapping guard lifetimes (an offloaded witgen spanning
@@ -1319,7 +1319,7 @@ where
     result
 }
 
-/// M6d: [`generate_witness`] over bare `CpuBuffer` shadow handles, for the
+/// [`generate_witness`] over bare `CpuBuffer` shadow handles, for the
 /// pool-offloaded witgen pass. `CpuBuffer` is `Send + Sync`, so a rayon
 /// worker can run this while the main wasm thread keeps servicing another
 /// segment's readback callbacks. View discipline matches
@@ -1974,13 +1974,13 @@ fn apply_machine_column_carry(accum: BufferRow<Val>, last_cycle: usize) {
     drop(machine_column_carry_timer);
 }
 
-// SP7 iter-6d-g step 6.2.3: per-segment arm mask. Bit k set => major
-// opcode k's cycles short-circuit step_Top. M6d: this global is a
+// Per-segment arm mask. Bit k set => major
+// opcode k's cycles short-circuit step_Top. This global is a
 // DIAGNOSTICS MIRROR only — it records the mask most recently computed by
 // `pre_witgen_dispatch_async` so tests can assert which arms dispatched.
 // The correctness-bearing copy lives per prove on `WebGpuCircuitHal`
 // (`witgen_replace_arm_mask` Cell) and flows into rust_steps as an
-// explicit parameter, because the M6d segment pipeline overlaps segment
+// explicit parameter, because the segment pipeline overlaps segment
 // N+1's witgen (which computes ITS mask) with segment N's accum phase
 // (which still reads N's mask). CPU HAL passes 0 (no short-circuit ever).
 static WITGEN_GPU_REPLACE_ARM_MASK: AtomicU16 = AtomicU16::new(0);
@@ -2266,14 +2266,14 @@ fn step_exec(
         return Ok(());
     }
     let ctx = ExecContext::new(preflight, tables, cycle);
-    // SP7 iter 6d-g step 6.2.5 diagnostic: tag the error with cycle + arm
-    // info so a downstream bail localizes WHICH cycle's step_Top blew up.
+    // Tag the error with cycle + arm info so a downstream bail localizes
+    // WHICH cycle's step_Top blew up.
     step_Top(&ctx, data, global).map_err(|e| {
         anyhow::anyhow!("step_Top failed at cycle={cycle} major={major} minor={minor}: {e}")
     })
 }
 
-// SP7 iter 6d-g step 6.2.7 (2026-05-16): shadow the anyhow::bail! macro
+// Shadow the anyhow::bail! macro
 // inside the included steps.rs.inc so each "Reached unreachable mux arm"
 // bail carries its line number. Lets us bisect down to a specific mux
 // site without editing the generated file.

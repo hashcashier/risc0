@@ -2,7 +2,7 @@
 
 > **Note:** `.recursive/...` evidence paths referenced in this document are preserved on the `wasm` archive branch; the presentation branch omits that process tree.
 
-Status: performance follow-up run `wasm-webgpu-prover-perf` underway (Phase 0–8 LOCKED 2026-05-12). SP1 baselines captured, SP2 seed landed, SP10 partial hit a multi-segment correctness regression — see Plan Addendum 01.
+Status: optimization campaign complete through M11 (2026-07) — browser xgboost proving lands within ~2.5× of native CUDA on the same GPU. Labels like `SP<N>`/`M<N>` in these docs name campaign phases; see `docs/wasm-webgpu-prover-learnings.md` for the full narrative.
 
 See `docs/wasm-webgpu-prover-learnings.md` for the pause handoff, current
 implementation summary, validation evidence, performance findings, and resume

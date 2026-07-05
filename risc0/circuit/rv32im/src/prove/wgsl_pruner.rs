@@ -12,50 +12,50 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// SP7 iter 6c -- per-@compute-entry pruned WGSL module emitter.
+// Per-@compute-entry pruned WGSL module emitter.
 //
 // gen_zirgen (zirgen branch wgsl-gpu-backend, b956e80) emits one giant
 // `steps.wgsl` containing 211 originals + 174 chunks (the MuxChunk
-// pass splits every wide `zstruct.switch` into per-arm chunks). Per
-// iter-5b/d, both Chrome's whole-module ceiling (~2 MB) and its
+// pass splits every wide `zstruct.switch` into per-arm chunks). Both
+// Chrome's whole-module ceiling (~2 MB) and its
 // reachable-closure ceiling (~0.4 MB) sit below this 9.16 MB blob, so
 // each `@compute` entry must ship in its OWN pruned module containing
 // only the call-graph closure reachable from that entry.
 //
-// iter-6b probe (Python `perleaf_module.py`) showed:
+// A per-leaf module-size probe showed:
 // - exec_TopChunk0/1: 281 KB reach / 1.03 MB module -- sub-cliff,
 //   wireable now.
 // - exec_TopAccum/Extract chunks: 1.7 MB reach / 2.5 MB module --
-//   blocked on iter-6d (the validity/poly_ext glue isn't a wide mux,
+//   over the ceilings (the validity/poly_ext glue isn't a wide mux,
 //   so MuxChunk doesn't shrink it).
 //
-// This module ports the iter-6b algorithm to Rust so it can run at
+// This module ports that probe's algorithm to Rust so it can run at
 // risc0 build time / call time:
 //   1. Parse `fn <name>(` blocks out of `steps.wgsl` + `types.wgsl.inc`.
 //   2. For each callsite to a chunked-base name, rewrite it to call a
-//      specific chunk (currently chunk0 -- the SAME heuristic the iter-6b
-//      probe used; correct chunk-per-arm dispatch is iter-6d work).
+//      specific chunk (chunk0 by default; the per-arm delta assembly
+//      below selects other chunks).
 //   3. Walk the transitive call-graph closure from `entry`.
 //   4. Emit `prelude + types + layout + (steps fns in closure)`.
 //
 // The result is a self-contained WGSL module that naga validates and
 // (for `exec_Top` chunks at least) clears both Tint capacity ceilings.
 //
-// Iter 6d-a (2026-05-15): the pruned exec_TopChunk0 module is vendored at
+// The pruned exec_TopChunk0 module is vendored at
 // `risc0/circuit/rv32im/src/zirgen/exec_top_chunk0.wgsl` (~1 MB) and
 // exposed via [`EXEC_TOP_CHUNK0_WGSL`]. To get a runnable compute
 // pipeline, append [`EXEC_TOP_CHUNK0_COMPUTE_ENTRY`] which adds a thin
 // `@compute @workgroup_size(64) fn main` that sets `cycle = gid.x` and
-// calls `exec_TopChunk0(kLayout_Top-bound, 0u)`. Real dispatch wiring
-// (iter 6d-b) selects the correct chunk per major opcode and feeds
-// preflight data through the bound buffers.
+// calls `exec_TopChunk0(kLayout_Top-bound, 0u)`. The real dispatch wiring
+// selects the correct chunk per major opcode and feeds preflight data
+// through the bound buffers.
 
 /// Pruned `exec_TopChunk0` WGSL module (prelude + types + layout +
 /// reachable-closure of `exec_TopChunk0`). ~1 MB, sub-cliff for both
 /// Chrome's whole-module and reachable-closure capacity ceilings.
 pub const EXEC_TOP_CHUNK0_WGSL: &str = include_str!("../zirgen/exec_top_chunk0.wgsl");
 
-/// SP7 iter 6d-e (2026-05-15): pruned `exec_TopChunk1` WGSL module
+/// Pruned `exec_TopChunk1` WGSL module
 /// (chunk1 of the top-level mux) -- 1.09 MB, sub-cliff. Generated via
 /// `pruned_module_at_chunk(..., "exec_TopChunk1", 1)`. Together with
 /// chunk0 these cover the full top-level mux; sub-chunk bases (e.g.,
@@ -79,7 +79,7 @@ fn exec_top_chunk0_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-/// SP7 iter 6d-e: `@compute` wrapper for [`EXEC_TOP_CHUNK1_WGSL`].
+/// `@compute` wrapper for [`EXEC_TOP_CHUNK1_WGSL`].
 /// Symmetric with the chunk0 wrapper -- only the dispatched function
 /// name changes (`exec_TopChunk1` vs `exec_TopChunk0`).
 pub const EXEC_TOP_CHUNK1_COMPUTE_ENTRY: &str = r#"
@@ -94,18 +94,18 @@ fn exec_top_chunk1_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-/// SP7 iter 6d-g (2026-05-15): shared witgen baseline (prelude +
+/// Shared witgen baseline (prelude +
 /// types.wgsl.inc + layout.wgsl.inc) used by every per-arm kernel.
 /// ~791 KB. Concatenated with a per-arm delta + @compute wrapper at
 /// HAL init to produce the final module passed to
 /// `create_compute_kernel_async`.
 pub const WITGEN_BASELINE_WGSL: &str = include_str!("../zirgen/witgen_baseline.wgsl");
 
-/// SP7 TopAccum arm5 real-buffer probe body. This is the pruned
+/// TopAccum arm-5 kernel body. This is the pruned
 /// reachable closure for `step_TopAccumArm5`, generated from
 /// `steps_step_TopAccum.pruned.wgsl`; it is concatenated with
 /// [`WITGEN_BASELINE_WGSL`] plus a cycle-list compute entry.
-pub const TOPACCUM_ARM5_PROBE_WGSL: &str = include_str!("../zirgen/topaccum_arm5_probe.wgsl");
+pub const TOPACCUM_ARM5_WGSL: &str = include_str!("../zirgen/topaccum_arm5.wgsl");
 
 /// Compute entry used by the real-buffer TopAccum arm5 probe. The HAL
 /// uploads a bounded cycle list so the probe executes on valid proof
@@ -126,7 +126,7 @@ fn topaccum_arm5_cycle_list_main(@builtin(global_invocation_id) gid: vec3<u32>) 
 }
 "#;
 
-/// SP7 iter 6d-g: per-major-arm deltas. Each contains ONLY the
+/// Per-major-arm deltas. Each contains ONLY the
 /// steps fns reachable from one major opcode arm's sub-fn (Chunk0
 /// variant). Total ~38 KB average × 13 arms = ~488 KB vendored.
 /// All deltas paired with [`WITGEN_BASELINE_WGSL`] at runtime via
@@ -187,7 +187,7 @@ pub const EXEC_POSEIDON0_CHUNK0_DELTA_WGSL: &str =
 pub const EXEC_POSEIDON1_CHUNK0_DELTA_WGSL: &str =
     include_str!("../zirgen/exec_poseidon1_chunk0_delta.wgsl");
 
-/// SP7 iter 6d-g: table of (label, delta WGSL, sub-fn name) tuples
+/// Table of (label, delta WGSL, sub-fn name) tuples
 /// for all 13 TopChunk0 major opcode arms. Used by the HAL prewarm
 /// to fire `N` async create_compute_pipeline_async calls in
 /// parallel and by the dispatch path to look up the right kernel
@@ -440,11 +440,11 @@ pub const MEM1_EXTRA_CHUNK_DELTAS: &[(u8, &str, &str, &str)] = &[
     ),
 ];
 
-/// SP7 iter 6d-g: assemble a per-arm full kernel by concatenating
+/// Assemble a per-arm full kernel by concatenating
 /// baseline + delta + the supplied @compute wrapper. The result is
 /// passed to `WebGpuHal::create_compute_kernel_async` for Tint
 /// compilation. Total module size = baseline + delta + wrapper ~=
-/// 838 KB (matches the iter-6d-f-take-2 measured kernel size).
+/// 838 KB (matches the measured kernel size).
 pub fn assemble_arm_kernel(delta: &str, compute_entry: &str) -> String {
     let mut out =
         String::with_capacity(WITGEN_BASELINE_WGSL.len() + delta.len() + compute_entry.len() + 2);
@@ -462,7 +462,7 @@ pub fn assemble_arm_kernel(delta: &str, compute_entry: &str) -> String {
     out
 }
 
-/// SP7 iter 6d-g step 6.2.5 (2026-05-16): replace the stub
+/// Replace the stub
 /// `extern_getDiffCount` body with a buffer-backed lookup so per-arm
 /// short-circuit cycles get the correct diff_count cell writes from
 /// `DoCycleTable`. Stub returns 0 in WGSL but rust expects
@@ -478,7 +478,7 @@ pub fn patch_extern_get_diff_count(wgsl: &str) -> String {
     wgsl.replacen(STUB, REPLACEMENT, 1)
 }
 
-/// SP7 iter 6d-g step 6.2.6 (2026-05-16): replace the stub
+/// Replace the stub
 /// `extern_getMemoryTxn` body with a per-cycle, stateful preflight
 /// lookup matching rust `get_memory_txn`. Stub returns `[0,0,0,0,0]`
 /// in WGSL but rust returns the next sequential preflight txn record
@@ -495,7 +495,7 @@ pub fn patch_extern_get_memory_txn(wgsl: &str) -> String {
     wgsl.replacen(STUB, REPLACEMENT, 1)
 }
 
-/// SP7 iter 6d-g step 6.2.0 (2026-05-16): self-contained shadow-init
+/// Self-contained shadow-init
 /// kernel that pre-populates the 5 outer Top layout cells in
 /// `data_buf` from a per-cycle preflight metadata buffer. Used as
 /// pre-pass to the per-arm dispatch so that `back_Reg(1, ...)` reads
@@ -575,7 +575,7 @@ fn shadow_init_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (cycle >= params.data_rows) {
     return;
   }
-  // SP7 iter 6d-g step 6.2.9 (2026-05-16): match scatter convention from
+  // Match scatter convention from
   // `build_injector::set_cycle` -- the nextPcLow/High/state/mode cells
   // store the CURRENT cycle's pc/state/mode (NOT the next cycle's).
   // Per-cycle the arm sub-fn then OVERWRITES these with its computed
@@ -632,17 +632,17 @@ fn shadow_init_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-/// SP7 iter 6d-f-take-2 (2026-05-15): per-major-arm pruned module.
+/// Per-major-arm pruned module.
 /// Each major opcode arm of exec_TopChunk0 gets its own kernel whose
 /// closure is restricted to the sub-fn path for that arm only.
 /// Module size: ~820 KB (well under Chrome's 2 MB whole-module
 /// cliff). Used in dispatch-per-arm where each kernel runs over the
 /// subset of cycles with that major opcode (per preflight major
-/// opcode lookup -- iter-6d-g work).
+/// opcode lookup).
 pub const EXEC_SHA0_CHUNK0_ONLY_WGSL: &str = include_str!("../zirgen/exec_sha0_chunk0_only.wgsl");
 
-/// SP7 iter 6d-f-take-2: `@compute` wrapper for the Sha0 per-arm
-/// kernel. Calls only exec_Sha0Chunk0 -- iter-6d-g will multi-call
+/// `@compute` wrapper for the Sha0 per-arm
+/// kernel. Calls only exec_Sha0Chunk0; the delta modules multi-call
 /// all Sha0ChunkN with OR-merge to cover all minor opcodes within
 /// the Sha major arm.
 pub const EXEC_SHA0_CHUNK0_ONLY_COMPUTE_ENTRY: &str = r#"
@@ -659,17 +659,17 @@ fn exec_sha0_chunk0_only_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-/// SP7 iter 6d-f attempt 1 (2026-05-15): "all chunks" pruned module --
+/// "All chunks" pruned module --
 /// `exec_TopChunk0_all_chunks` reachable closure with each
 /// `exec_BASE(...)` callsite replaced by a synthesized
 /// `exec_BASE_combined(...)` helper that calls every ChunkN
 /// sequentially and OR-merges the returns (assumes Tint zero-inits
 /// the unreachable-arm return vars). 2.35 MB -- on the boundary of
-/// Chrome's whole-module ceiling (1.99-3.27 MB band per iter-5b).
+/// Chrome's whole-module ceiling (measured 1.99-3.27 MB band).
 /// Generated via `scripts/gen_all_chunks.py` (vendored in this crate).
 pub const EXEC_TOP_CHUNK0_ALL_WGSL: &str = include_str!("../zirgen/exec_top_chunk0_all.wgsl");
 
-/// SP7 iter 6d-f `@compute` wrapper for [`EXEC_TOP_CHUNK0_ALL_WGSL`].
+/// `@compute` wrapper for [`EXEC_TOP_CHUNK0_ALL_WGSL`].
 /// Identical body to the chunk0 wrapper -- only differs in the entry
 /// point name to disambiguate the kernel cache key.
 pub const EXEC_TOP_CHUNK0_ALL_COMPUTE_ENTRY: &str = r#"
@@ -784,14 +784,14 @@ fn rewrite_chunk0(body: &str, chunked_bases: &BTreeSet<&str>) -> String {
     rewrite_to_chunk(body, &chunked_bases.iter().map(|&b| (b, 0u32)).collect(), 0)
 }
 
-/// SP7 iter 6d-g (2026-05-15): same as [`pruned_module_at_chunk`]
+/// Same as [`pruned_module_at_chunk`]
 /// but emits ONLY the rewritten steps fns reachable from `entry`,
 /// without the prelude / types / layout prefix. The caller is
 /// expected to concatenate a shared `prelude + types + layout`
 /// baseline at runtime so vendoring 26+ per-arm kernels costs
 /// `~baseline + N × delta_size` instead of `N × full_module_size`.
 ///
-/// Empirically (2026-05-15): full module ~830 KB, delta ~50-100 KB.
+/// Empirically: full module ~830 KB, delta ~50-100 KB.
 /// Vendoring 26 deltas + one baseline = ~3 MB vs naive 22-26 MB.
 pub fn pruned_delta_at_chunk(
     types_inc: &str,
@@ -924,7 +924,7 @@ pub fn pruned_delta_from_combined_module(
     Ok(out)
 }
 
-/// SP7 iter 6d-e (2026-05-15): generalized chunk rewrite. For each
+/// Generalized chunk rewrite. For each
 /// callsite to a base in `chunked_max_idx`, append `ChunkK` where
 /// `K = min(target_chunk, max_idx)`. The `max_idx` cap lets bases
 /// with fewer chunks than `target_chunk` clamp to their last
@@ -968,7 +968,7 @@ fn rewrite_to_chunk(
 
 /// Generate a pruned, single-major TopAccum probe from the steps-only
 /// TopAccum WGSL artifact. This is the reproducible version of the
-/// checked-in `topaccum_arm5_probe.wgsl` slice, and is used to prevent
+/// checked-in `topaccum_arm5.wgsl` slice, and is used to prevent
 /// additional TopAccum arms from becoming hand-sliced one-offs.
 pub fn topaccum_arm_probe_wgsl(steps: &str, arm: usize) -> Result<String, PrunerError> {
     const TOPACCUM_ARM_COUNT: usize = 13;
@@ -1213,7 +1213,7 @@ pub fn pruned_module(
     pruned_module_at_chunk(prelude, types_inc, layout_inc, steps, entry, 0)
 }
 
-/// SP7 iter 6d-e (2026-05-15): like [`pruned_module`] but rewrites
+/// Like [`pruned_module`] but rewrites
 /// chunked-base callsites to `<base>Chunk{target_chunk}` (clamped to
 /// the highest available chunk index for each base). Used to emit a
 /// per-chunk pruned module so a multi-kernel dispatch can cover all
@@ -1383,13 +1383,13 @@ impl std::error::Error for PrunerError {}
 mod tests {
     use super::*;
 
-    /// Path to the gen_zirgen iter-6a output -- not vendored into the
-    /// crate (9 MB), but expected to be regeneratable via the gen_zirgen
-    /// invocation documented in the SP7 evidence. Set `ZIRGEN_WGSL_OUT`
+    /// Path to the gen_zirgen WGSL output -- not vendored into the
+    /// crate (9 MB), but regenerable via `scripts/gen_all_chunks.py`
+    /// from a zirgen checkout. Set `ZIRGEN_WGSL_OUT`
     /// to the gen_zirgen output directory (default `/tmp/zirgen-out8`)
     /// and `ZIRGEN_SRC` to a zirgen checkout; tests skip cleanly if
     /// either artifact is absent.
-    fn try_load_iter6a() -> Option<(String, String, String, String)> {
+    fn try_load_generated_chunks() -> Option<(String, String, String, String)> {
         let dir = std::path::PathBuf::from(
             std::env::var("ZIRGEN_WGSL_OUT").unwrap_or_else(|_| "/tmp/zirgen-out8".into()),
         );
@@ -1524,11 +1524,11 @@ fn gamma() -> u32 { return beta(2u); }
     }
 
     #[test]
-    fn iter6a_exec_top_chunk0_is_under_capacity_cliffs() {
-        let Some((prelude, types, layout, steps)) = try_load_iter6a() else {
+    fn exec_top_chunk0_is_under_capacity_cliffs() {
+        let Some((prelude, types, layout, steps)) = try_load_generated_chunks() else {
             eprintln!(
-                "skipping: gen_zirgen iter-6a output not present at /tmp/zirgen-out8 \
-                 (regenerate via the SP7 evidence doc command)"
+                "skipping: gen_zirgen output not present at /tmp/zirgen-out8 \
+                 (regenerate via scripts/gen_all_chunks.py)"
             );
             return;
         };
@@ -1536,7 +1536,7 @@ fn gamma() -> u32 { return beta(2u); }
             .expect("pruned module emits");
         let bytes = module.len();
         eprintln!("exec_TopChunk0 pruned module: {} bytes", bytes);
-        // Per iter-5b/d cliffs:
+        // Measured Chrome cliffs:
         //   - whole-module ceiling: 1.99 MB OK, 3.27 MB FAIL -- be safe < 2 MB
         //   - reachable-closure ceiling: 0.39 MB FAIL -- the steps slice
         //     of this module should be < 400 KB
@@ -1556,10 +1556,9 @@ fn gamma() -> u32 { return beta(2u); }
             steps_bytes
         );
 
-        // Also confirm naga can parse the emitted module -- the proof
-        // that iter-6c's chunk0-rewriting produces VALID WGSL, not just
-        // small WGSL. Skip cleanly if naga isn't on $PATH.
-        let out_path = std::path::PathBuf::from("/tmp/iter6c_exec_TopChunk0.wgsl");
+        // Also confirm naga can parse the emitted module -- proof that
+        // chunk0-rewriting produces VALID WGSL, not just small WGSL. Skip cleanly if naga isn't on $PATH.
+        let out_path = std::path::PathBuf::from("/tmp/pruned_exec_TopChunk0.wgsl");
         std::fs::write(&out_path, &module).expect("write probe module");
         let rc = std::process::Command::new("naga").arg(&out_path).output();
         match rc {
@@ -1583,38 +1582,38 @@ fn gamma() -> u32 { return beta(2u); }
     }
 
     #[test]
-    fn iter6a_top_accum_chunk0_is_correctly_documented_as_over_cliff() {
-        let Some((prelude, types, layout, steps)) = try_load_iter6a() else {
-            eprintln!("skipping: gen_zirgen iter-6a output not present at /tmp/zirgen-out8");
+    fn top_accum_chunk0_is_documented_as_over_cliff() {
+        let Some((prelude, types, layout, steps)) = try_load_generated_chunks() else {
+            eprintln!("skipping: gen_zirgen output not present at /tmp/zirgen-out8");
             return;
         };
         let module = pruned_module(&prelude, &types, &layout, &steps, "exec_TopAccumChunk0")
             .expect("pruned module emits");
         let bytes = module.len();
         eprintln!("exec_TopAccumChunk0 pruned module: {} bytes", bytes);
-        // Per iter-6b results doc: TopAccum chunks are still 2.4-2.5 MB
+        // TopAccum chunks measure 2.4-2.5 MB
         // module / 1.7 MB reachable -- this test pins the regression
-        // direction so we notice when iter-6d shrinks them under 2 MB.
+        // direction so we notice if they ever shrink under 2 MB.
         assert!(
             bytes >= 2 * 1024 * 1024,
-            "exec_TopAccumChunk0 module {} bytes -- if this passes, iter-6d landed; \
+            "exec_TopAccumChunk0 module {} bytes -- the chunks shrank below the pinned size; \
              update test thresholds and ungate TopAccum from CPU fallback",
             bytes
         );
     }
 
-    /// iter-6d-g step 6.2.3: validate the synth_arm_wrapper output
+    /// Validate the synth_arm_wrapper output
     /// concatenated with baseline + delta for MISC0 against naga. This
     /// is the offline equivalent of the Tint compile that happens in
     /// the browser; if naga accepts it, the wrapper is well-formed.
     /// (Tint may still reject for browser-specific reasons but naga
     /// catches type/lookup errors before any wasm rebuild.)
     #[test]
-    fn iter6d_g_step6_2_3_misc0_synth_wrapper_validates_with_naga() {
+    fn misc0_synth_wrapper_validates_with_naga() {
         let wrapper = "@group(0) @binding(5) var<storage, read> cycle_list: array<u32>;\n\
             @group(0) @binding(6) var<storage, read> preflight_meta: array<u32>;\n\
             \n@compute @workgroup_size(64)\n\
-            fn iter6d_g_misc0_chunk0_main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
+            fn witgen_arm_misc0_chunk0_main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
               let lane = gid.x;\n\
               if (lane >= arrayLength(&cycle_list)) { return; }\n\
               cycle = cycle_list[lane];\n\
@@ -1649,17 +1648,17 @@ fn gamma() -> u32 { return beta(2u); }
               let _result = exec_Misc0Chunk0(x20, inst_input, lookup_TopInstResultLayout_arm0(lookup_TopLayout_instResult(bound_top)));\n\
             }\n";
         let module = assemble_arm_kernel(EXEC_MISC0_CHUNK0_DELTA_WGSL, wrapper);
-        let out_path = std::path::PathBuf::from("/tmp/iter6d_g_step6_2_3_misc0_wrapper.wgsl");
+        let out_path = std::path::PathBuf::from("/tmp/witgen_arm_misc0_wrapper.wgsl");
         std::fs::write(&out_path, &module).expect("write probe module");
         let rc = std::process::Command::new("naga").arg(&out_path).output();
         match rc {
             Ok(r) if r.status.success() => {
-                eprintln!("iter6d-g 6.2.3: naga validated MISC0 synth wrapper");
+                eprintln!("naga validated the MISC0 synth wrapper");
             }
             Ok(r) => {
                 let stderr = String::from_utf8_lossy(&r.stderr);
                 panic!(
-                    "iter6d-g 6.2.3: naga validation FAILED:\n{}",
+                    "MISC0 synth wrapper naga validation FAILED:\n{}",
                     &stderr.chars().take(4000).collect::<String>()
                 );
             }
@@ -1671,16 +1670,18 @@ fn gamma() -> u32 { return beta(2u); }
 
     #[test]
     fn topaccum_arm_generator_reproduces_vendored_arm5() {
+        // Repo-relative dev fixture shared with the browser-prove example;
+        // exercised by in-repo tests only (not part of the packaged crate).
         let generated = topaccum_arm_probe_wgsl(
             include_str!(
-                "../../../../../examples/browser-prove/src/sp7_wgsl/steps_step_TopAccum.pruned.wgsl"
+                "../../../../../examples/browser-prove/src/witgen_wgsl/steps_step_TopAccum.pruned.wgsl"
             ),
             5,
         )
         .expect("TopAccum arm5 slice should generate");
-        let expected = TOPACCUM_ARM5_PROBE_WGSL
-            .strip_prefix("// Generated SP7 TopAccum arm 5 browser capacity probe.\n\n")
-            .unwrap_or(TOPACCUM_ARM5_PROBE_WGSL);
+        let expected = TOPACCUM_ARM5_WGSL
+            .strip_prefix("// Generated TopAccum arm-5 slice for browser capacity checks.\n\n")
+            .unwrap_or(TOPACCUM_ARM5_WGSL);
         assert_same_nonblank_wgsl(&generated, expected);
     }
 
@@ -1707,7 +1708,7 @@ fn gamma() -> u32 { return beta(2u); }
         for (arm, cycles) in xgboost_major_cycles.iter().copied().enumerate() {
             let generated = topaccum_arm_probe_wgsl(
                 include_str!(
-                    "../../../../../examples/browser-prove/src/sp7_wgsl/steps_step_TopAccum.pruned.wgsl"
+                    "../../../../../examples/browser-prove/src/witgen_wgsl/steps_step_TopAccum.pruned.wgsl"
                 ),
                 arm,
             )
@@ -1764,28 +1765,28 @@ fn gamma() -> u32 { return beta(2u); }
         );
     }
 
-    /// iter-6d-a (2026-05-15): the vendored exec_TopChunk0 module with the
+    /// The vendored exec_TopChunk0 module with the
     /// thin `@compute` entry wrapper appended must remain naga-valid. This
     /// pins the wrapper against the names declared in the vendored WGSL --
     /// any future MuxChunk regeneration that renames `kLayout_Top`,
     /// `BoundLayout_TopLayout`, `cycle`, or `params` will fail here.
     #[test]
-    fn iter6d_a_compute_entry_concat_validates_with_naga() {
+    fn compute_entry_concat_validates_with_naga() {
         let module = format!("{}{}", EXEC_TOP_CHUNK0_WGSL, EXEC_TOP_CHUNK0_COMPUTE_ENTRY,);
-        let out_path = std::path::PathBuf::from("/tmp/iter6d_a_exec_top_chunk0_with_entry.wgsl");
+        let out_path = std::path::PathBuf::from("/tmp/exec_top_chunk0_with_entry.wgsl");
         std::fs::write(&out_path, &module).expect("write probe module");
         let rc = std::process::Command::new("naga").arg(&out_path).output();
         match rc {
             Ok(r) if r.status.success() => {
                 eprintln!(
-                    "iter6d-a: naga validation successful for {} bytes module",
+                    "naga validation successful for {} bytes module",
                     module.len()
                 );
             }
             Ok(r) => {
                 let stderr = String::from_utf8_lossy(&r.stderr);
                 panic!(
-                    "iter6d-a: naga validation failed for compute-entry concat:\n{}",
+                    "naga validation failed for compute-entry concat:\n{}",
                     &stderr.chars().take(4000).collect::<String>()
                 );
             }

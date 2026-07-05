@@ -766,11 +766,11 @@ pub(crate) fn generate_witness_exec_plan(
     result.expect("recursion exec-plan witness generation did not run")
 }
 
-/// M7a: exec-plan witness pass over `Send + Sync` CPU shadow handles, for a
+/// Exec-plan witness pass over `Send + Sync` CPU shadow handles, for a
 /// pool worker. Mirrors [`generate_witness_exec_plan`] exactly — the caller
 /// holds the `begin/finish_cpu_shadow_offload` flag discipline on the owning
-/// `WebGpuBuffer`s around this call (see the rv32im M6d precedent,
-/// `generate_witness_on_shadows`).
+/// `WebGpuBuffer`s around this call (see rv32im's
+/// `generate_witness_on_shadows` for the same pattern).
 pub(crate) fn generate_witness_exec_plan_on_shadows(
     mode: StepMode,
     total_cycles: u32,

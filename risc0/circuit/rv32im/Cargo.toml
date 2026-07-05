@@ -53,7 +53,7 @@ risc0-sys = { workspace = true, optional = true }
 smallvec = { version = "1.13", optional = true }
 wide = { version = "0.7", optional = true }
 
-# SP7 iter-6d-d (2026-05-15): spawn_local lets WebGpuCircuitHal::new
+# spawn_local lets WebGpuCircuitHal::new
 # kick off the witgen Tint compile in the background via
 # `WebGpuHal::create_compute_kernel_async` so it overlaps with guest
 # execution instead of blocking the first segment's witgen.

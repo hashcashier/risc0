@@ -83,7 +83,7 @@ impl<H: Hal> PolyGroup<H> {
     }
 }
 
-/// M4b: WebGPU poly groups are cheaply cloneable — buffers are `Rc` views onto
+/// WebGPU poly groups are cheaply cloneable — buffers are `Rc` views onto
 /// shared GPU storage — enabling program-constant group caching (recursion
 /// code group) across proofs on the same device.
 #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]

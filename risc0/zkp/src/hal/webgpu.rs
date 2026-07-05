@@ -54,7 +54,7 @@ use crate::{
     INV_RATE,
 };
 
-// SP4 (R8): `BufferPool` + `TileLayout` for tiled multi-buffer source
+// `BufferPool` + `TileLayout` for tiled multi-buffer source
 // representations of recursion-sized data groups. Lives in a child
 // module so the pure addressing math has its own unit tests without
 // dragging in all of `webgpu.rs`. Public so the browser-prove harness
@@ -64,9 +64,9 @@ pub mod buffer_pool;
 /// Target chunk size for multi-stage staged WGSL emission. Chosen so the
 /// rv32im production DEF (~20k ops) emits ~4 stages, mirroring the CUDA
 /// `eval_check_{0,1,2,3}.cu` layout the runtime interpreter parallels.
-const SP3_STAGED_TARGET_CHUNK_OPS: usize = 7000;
+const STAGED_EVAL_CHECK_TARGET_CHUNK_OPS: usize = 7000;
 
-/// SP3 iter 7d: number of cycles processed per scratch-buffer tile. The
+/// Number of cycles processed per scratch-buffer tile. The
 /// scratch buffer is sized to `tile_size * stride * 4 B` regardless of
 /// the prove's full domain — the dispatch loop iterates
 /// `ceil(domain / tile_size)` tiles, bumping `tile_base` between passes.
@@ -74,9 +74,9 @@ const SP3_STAGED_TARGET_CHUNK_OPS: usize = 7000;
 /// stride is ~1620 u32, so fp_scratch = 4096 * 1620 * 4 ≈ 27 MiB; mix
 /// scratches are < 1 MiB each. Comfortably within the device limits we
 /// requested and independent of how many cycles the prove has overall.
-const SP3_STAGED_TILE_SIZE: u32 = 4096;
+const STAGED_EVAL_CHECK_TILE_SIZE: u32 = 4096;
 
-/// SP3 iter 7i (2026-05-12): minimum `def.block.len()` to attempt the
+/// Minimum `def.block.len()` to attempt the
 /// staged WGSL fast path. Below this, the runtime interpreter is used
 /// regardless of `staged_eval_check_enabled`. rv32im production DEFs
 /// have ~20k+ ops; recursion's lift DEF and ad-hoc small DEFs sit
@@ -84,7 +84,7 @@ const SP3_STAGED_TILE_SIZE: u32 = 4096;
 /// finalize_async flow when staged. Until that's root-caused, the gate
 /// keeps staged where it wins (rv32im) and out of where it doesn't
 /// (everything smaller).
-const SP3_STAGED_MIN_BLOCK_OPS: usize = 8000;
+const STAGED_EVAL_CHECK_MIN_BLOCK_OPS: usize = 8000;
 
 /// `GPUBufferUsage.MAP_READ`.
 pub const WEBGPU_BUFFER_USAGE_MAP_READ: u32 = 0x0001;
@@ -109,7 +109,7 @@ const WEBGPU_MAX_WORKGROUPS_PER_DIMENSION: u32 = 65_535;
 const WEBGPU_REQUESTED_MAX_BUFFER_BYTES: u64 = 4 * 1024 * 1024 * 1024 - 4; // 4 GiB - alignment slack; many adapters cap at this
 const WEBGPU_REQUESTED_MAX_STORAGE_BINDING_BYTES: u64 = 4 * 1024 * 1024 * 1024 - 4;
 const WEBGPU_REQUESTED_MAX_WORKGROUP_STORAGE_BYTES: u32 = 128 * 1024;
-/// SP3 iter 7c: staged eval_check uses 7 read-only storage buffers
+/// Staged eval_check uses 7 read-only storage buffers
 /// (group0..2, global0..1, mix_pows, plus mix_tot/mix_mul scratch) and
 /// 3 read-write storage buffers (check, fp_scratch, mix_tot/mix_mul
 /// scratch — overlap intentional, the binding type is `storage` not
@@ -117,7 +117,7 @@ const WEBGPU_REQUESTED_MAX_WORKGROUP_STORAGE_BYTES: u32 = 128 * 1024;
 /// is 8; we request more so the multi-stage pipeline's bind group fits.
 const WEBGPU_REQUESTED_MAX_STORAGE_BUFFERS_PER_STAGE: u32 = 16;
 
-/// SP3 iter 7x (2026-05-13): bump `maxUniformBufferBindingSize` so the
+/// Bump `maxUniformBufferBindingSize` so the
 /// staged eval_check's `mix_pows` can live in a uniform buffer instead
 /// of a storage buffer. CUDA's reference uses `__constant__` memory
 /// for `poly_mix` (broadcast-cached, low-latency); UBOs are the
@@ -126,12 +126,12 @@ const WEBGPU_REQUESTED_MAX_STORAGE_BUFFERS_PER_STAGE: u32 = 16;
 /// for larger DEFs.
 const WEBGPU_REQUESTED_MAX_UNIFORM_BUFFER_BINDING_BYTES: u64 = 256 * 1024;
 
-/// SP3 iter 7x: capacity of the staged `mix_pows` uniform buffer in
+/// Capacity of the staged `mix_pows` uniform buffer in
 /// `vec4<u32>` slots. The WGSL prelude declares
-/// `array<vec4<u32>, SP3_STAGED_MIX_POWS_UBO_VEC4_CAPACITY>`; only the
+/// `array<vec4<u32>, STAGED_EVAL_CHECK_MIX_POWS_UBO_VEC4_CAPACITY>`; only the
 /// first `mix_pow_words / 4` entries are populated per call. 16384
 /// vec4 = 262144 B = 256 KiB matches the bumped UBO limit above.
-const SP3_STAGED_MIX_POWS_UBO_VEC4_CAPACITY: usize = 16384;
+const STAGED_EVAL_CHECK_MIX_POWS_UBO_VEC4_CAPACITY: usize = 16384;
 const WEBGPU_SAFE_STORAGE_BINDING_BYTES: u64 = 1024 * 1024 * 1024;
 const WEBGPU_SAFE_QUEUE_WRITE_BYTES: usize = 16 * 1024 * 1024;
 const WEBGPU_STORAGE_BUFFER_OFFSET_ALIGNMENT: u64 = 256;
@@ -147,7 +147,7 @@ const WEBGPU_EVAL_CHECK_MAX_FP_ELEM_SLOTS: usize = 8192;
 const WEBGPU_EVAL_CHECK_MAX_EXT_BANK_SLOTS: usize = 256;
 const WEBGPU_EVAL_CHECK_BASE_PRIVATE_MAX_FP_SLOTS: usize = 1536;
 const WEBGPU_EVAL_CHECK_MAX_MIX_SLOTS: usize = 64;
-/// M2a (2026-07-02): emit fp ops lazily (on first demand by a mix op,
+/// Emit fp ops lazily (on first demand by a mix op,
 /// post-order over the operand DAG) instead of in zirgen's eager tape
 /// order. Same ops, same operands, a valid topological order — outputs
 /// are bit-identical; only the peak number of simultaneously-live fp
@@ -169,7 +169,7 @@ const WEBGPU_EVAL_OP_MUL: u32 = 6;
 const WEBGPU_EVAL_OP_TRUE: u32 = 7;
 const WEBGPU_EVAL_OP_AND_EQZ: u32 = 8;
 const WEBGPU_EVAL_OP_AND_COND: u32 = 9;
-// M2a hybrid base interpreter (2026-07-02): ops 10+ operate on a second,
+// Hybrid base interpreter: ops 10+ operate on a second,
 // small vec4 "ext bank" so tapes with a handful of `ConstExt` values
 // (rv32im: 6 constants tainting ~100 simultaneously-live values) can run
 // the cheap scalar base interpreter for everything untainted instead of
@@ -194,9 +194,9 @@ pub struct WebGpuStageTimer {
     label: String,
     start_ms: f64,
     gpu_active: bool,
-    // SP6d iter 4: if set, increment THIS HAL's counter on drop instead
+    // If set, increment THIS HAL's counter on drop instead
     // of the thread-local global. Each WebGpuHal owns its own counter via
-    // `Rc<Cell<f64>>`. Multi-HAL pools (SP6d) need this so per-slot
+    // `Rc<Cell<f64>>`. Multi-HAL pools need this so per-slot
     // gpu_active_ms doesn't over-count by other slots' activity.
     hal_active_counter: Option<Rc<Cell<f64>>>,
     stage_sink: Option<Rc<RefCell<Vec<WebGpuStageDiagnostics>>>>,
@@ -285,7 +285,7 @@ async fn ensure_wasm_thread_pool() {
         if hardware_concurrency == 0 {
             8
         } else {
-            // Probed 2026-07-03 on 32-thread hardware: 16 workers regressed
+            // Probed on 32-thread hardware: 16 workers regressed
             // every gate ~20-25% (xgboost 17052→21159 ms) — oversubscribed
             // rayon idle-spinning on shared memory taxes the busy workers.
             // 8 is the measured optimum tier.
@@ -369,7 +369,7 @@ impl WebGpuStageTimer {
         )
     }
 
-    /// SP6d iter 4: HAL-scoped active timer. The HAL's counter is
+    /// HAL-scoped active timer. The HAL's counter is
     /// incremented on drop instead of the thread-local global. Use this
     /// when running under a multi-HAL pool so each HAL's gpu_idle_ratio
     /// is accurate.
@@ -434,7 +434,7 @@ pub fn log_webgpu_metric(message: &str) {
     log_webgpu_stage(&format!("browser-prove:metric {message}"));
 }
 
-/// M4a lazy-shadow attribution: log CPU shadow materializations of at least
+/// Lazy-shadow attribution: log CPU shadow materializations of at least
 /// 1 MiB so the stage log shows which buffers still pin wasm heap.
 fn log_cpu_shadow_materialize(name: &'static str, bytes: usize) {
     if bytes >= (1 << 20) {
@@ -791,7 +791,7 @@ fn eval_check_ext_const(words: [u32; 4]) -> String {
 // eval_check_mix_slot moved to `risc0/zkp/src/hal/webgpu_codegen.rs` so
 // the staged-WGSL emitter (which is built on all targets when the
 // `webgpu` feature is on) can share the same slot-allocation discipline
-// as the runtime interpreter here. See iter 6 commit.
+// as the runtime interpreter here.
 
 /// Lazy (on-demand) reordering of a poly_ext tape. Mix ops keep their
 /// original relative order (so mix var ids and mix-pow indices are
@@ -2385,7 +2385,7 @@ fn build_eval_check_base_interpreter_wgsl(
     } else {
         String::new()
     };
-    // M2a: the ext bank is stored as scalar u32 words (ext value k at
+    // The ext bank is stored as scalar u32 words (ext value k at
     // fpe[4k..4k+3]) instead of a vec4 array. The probe matrix showed
     // executing vec4-typed accesses against a local-memory scratch array
     // in this kernel costs ~17x a scalar access (~430 ps vs ~25 ps per
@@ -2424,8 +2424,8 @@ fn build_eval_check_base_interpreter_wgsl(
              }}"
         )
     };
-    // M3b: the mix accumulators are stored as scalar u32 words (mix value
-    // k at words 4k..4k+3), exactly like the M2a ext bank. vec4-typed
+    // The mix accumulators are stored as scalar u32 words (mix value
+    // k at words 4k..4k+3), exactly like the interpreter's ext bank. vec4-typed
     // dynamically-indexed local arrays are the pathological case under
     // Chrome/Dawn (~17x a scalar access once past the register-select
     // size threshold); rv32im runs with mix_slots=29, right at that
@@ -4774,7 +4774,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-// Parallel-scan combos_divide (M1b, 2026-07-02). The legacy COMBOS_DIVIDE_WGSL
+// Parallel-scan combos_divide. The legacy COMBOS_DIVIDE_WGSL
 // runs synthetic division of each combo polynomial by (x - z) as a single
 // sequential `cycles`-iteration loop on ONE thread per chunk, which serializes
 // ~26 s of the xgboost proof on ~11 threads. The quotient coefficient
@@ -6819,17 +6819,17 @@ struct EvalCheckInterpreterPipeline {
     kernel: WebGpuKernel,
 }
 
-/// SP3 iter 7c: a compiled multi-stage staged-WGSL `eval_check` pipeline
+/// A compiled multi-stage staged-WGSL `eval_check` pipeline
 /// for a specific `(PolyExtStepDef, base_field_fp)` pair. The bind-group
 /// layout has 12 active bindings (skipping the interpreter's `instrs`
-/// at binding 6): 8 from iter 6 (check, group0..2, global0..1,
+/// at binding 6): the interpreter's 8 (check, group0..2, global0..1,
 /// mix_pows, params) plus 4 new for multi-stage scratch (binding 9 =
 /// `staged_scratch_params` UBO, 10/11/12 = `fp_scratch` /
 /// `mix_tot_scratch` / `mix_mul_scratch` rw storage). All stages of
 /// the same DEF share the same bind group; only the bound pipeline
 /// changes per stage.
 ///
-/// SP3 iter 7d: the four scratch buffers are cached on the pipeline so
+/// The four scratch buffers are cached on the pipeline so
 /// they're allocated once per DEF (sized to `tile_size * stride * 4 B`,
 /// independent of the prove's full domain) and reused across all
 /// `eval_check` calls. This bounds total GPU memory by O(unique DEFs ×
@@ -6839,7 +6839,7 @@ struct EvalCheckInterpreterPipeline {
 struct StagedEvalCheckPipeline {
     layout: web_sys::GpuBindGroupLayout,
     stages: Vec<WebGpuKernel>,
-    /// SP3 iter 7m: `@compute @workgroup_size(N)` baked into every
+    /// `@compute @workgroup_size(N)` baked into every
     /// stage's WGSL by `choose_workgroup_size`. Dispatch shape is
     /// `(tile_size / workgroup_size, num_tiles, 1)` so the total
     /// thread count remains `tile_size * num_tiles` (= domain rounded
@@ -6862,18 +6862,18 @@ struct StagedEvalCheckPipeline {
     /// Cached mix scratches (each `tile_size * mix_stride * 4 B`).
     mix_tot_scratch: web_sys::GpuBuffer,
     mix_mul_scratch: web_sys::GpuBuffer,
-    /// SP3 iter 7g: cached 16-byte UBO holding pipeline-constant
+    /// Cached 16-byte UBO holding pipeline-constant
     /// `{fp_stride, mix_stride, num_stages, tile_size}`. Written once at
     /// pipeline create; every `eval_check` call binds it as-is.
     scratch_params_buf: web_sys::GpuBuffer,
-    /// SP3 iter 7f: cached storage buffer for `mix_pows` (sized to the
+    /// Cached storage buffer for `mix_pows` (sized to the
     /// DEF's `mix_expected * 4 u32`). Each `eval_check` call rewrites
     /// it with the call-specific `poly_mix^exp` values.
     mix_pows_buf: web_sys::GpuBuffer,
-    /// SP3 iter 7f: cached 96-byte uniform buffer for the main Params
+    /// Cached 96-byte uniform buffer for the main Params
     /// UBO at binding 8. Each `eval_check` call rewrites it.
     params_buf: web_sys::GpuBuffer,
-    /// SP3 iter 7f: `mix_expected` for this DEF. Recorded here so the
+    /// `mix_expected` for this DEF. Recorded here so the
     /// dispatch knows how many `u32` words to write into `mix_pows_buf`
     /// without recomputing.
     mix_pow_words: usize,
@@ -6889,7 +6889,7 @@ pub struct WebGpuBindingLayout {
     /// Optional minimum binding size in bytes.
     pub min_binding_size: u64,
     /// When true, the bind group accepts a dynamic byte offset for this
-    /// binding via `setBindGroup`. SP3 iter 7e uses this to advance
+    /// binding via `setBindGroup`. The staged eval_check path uses this to advance
     /// `tile_base` through a single `scratch_params` UBO without
     /// rebinding or resubmitting between tiles.
     pub has_dynamic_offset: bool,
@@ -6926,8 +6926,8 @@ impl WebGpuBindingLayout {
         }
     }
 
-    /// Create a uniform buffer binding layout with dynamic offset support
-    /// (SP3 iter 7e). The bind group's `setBindGroup` call must then
+    /// Create a uniform buffer binding layout with dynamic offset support.
+    /// The bind group's `setBindGroup` call must then
     /// supply a `u32` byte offset for this binding.
     pub fn uniform_dynamic(binding: u32, min_binding_size: u64) -> Self {
         Self {
@@ -6939,7 +6939,7 @@ impl WebGpuBindingLayout {
     }
 }
 
-/// SP9 corrected (2026-05-15): hash a (label_ptr, entries-shape) tuple
+/// Hash a (label_ptr, entries-shape) tuple
 /// for the bind-group-layout cache. label is a `&'static str` so its
 /// pointer is a stable identity. Entry fields hash to a layout-shape
 /// fingerprint; identical fingerprints share a layout instance.
@@ -7025,7 +7025,7 @@ pub struct WebGpuIndexedReadbackGroup<'a> {
     pub indices: &'a [usize],
 }
 
-/// SP-CR D16 (2026-05-12): owning wrapper that calls `GpuBuffer.destroy()` when
+/// Owning wrapper that calls `GpuBuffer.destroy()` when
 /// the last Rc reference drops. Without explicit destruction, Chrome WebGPU's
 /// per-context VRAM budget is exhausted across multi-segment recursion lifts
 /// (D14 surfaced `VK_ERROR_OUT_OF_DEVICE_MEMORY` after 7-8 segments), because
@@ -7148,7 +7148,7 @@ impl<T> WebGpuBuffer<T> {
             self.cpu.name()
         );
 
-        // M4a lazy shadows: a never-materialized shadow is logically all
+        // Lazy shadows: a never-materialized shadow is logically all
         // `T::default()`. When that default is the zero bit pattern and the
         // browser-zero-initialized GPU allocation is still untouched, the
         // upload is a no-op — skip it without materializing the shadow.
@@ -7226,10 +7226,10 @@ impl<T> WebGpuBuffer<T> {
         Ok(())
     }
 
-    /// SP7 iter 6d-g step 6.2.10 (2026-05-16): bitwise GPU->CPU sync
+    /// Bitwise GPU->CPU sync
     /// that ALLOWS `Val::INVALID` (0xffffffff) values to flow back into
     /// the CPU shadow without failing the `CheckedBitPattern` validator.
-    /// Required for the iter-6d-g pre-witgen dispatch path: GPU partially
+    /// Required for the pre-witgen dispatch path: GPU partially
     /// populates `data_buf` (shadow_init + per-arm chunks), other cells
     /// remain `INVALID`. Standard `sync_gpu_to_cpu` would error on the
     /// INVALID bytes; this variant transmutes raw u32 bytes into the
@@ -7959,7 +7959,7 @@ impl<T> WebGpuBuffer<T> {
         );
     }
 
-    /// M6d: begin a pool-offloaded mutable pass over the CPU shadow. Same
+    /// Begin a pool-offloaded mutable pass over the CPU shadow. Same
     /// currency discipline as [`Buffer::view_mut`], but instead of running
     /// the closure inline (which blocks this wasm thread and starves other
     /// in-flight proofs' readback callbacks), it hands back the
@@ -7976,7 +7976,7 @@ impl<T> WebGpuBuffer<T> {
         self.cpu.clone()
     }
 
-    /// M6d: read-only counterpart of
+    /// Read-only counterpart of
     /// [`Self::begin_cpu_shadow_offload_mut`]; pairs with a worker-side
     /// `view` and needs no completion call (matching [`Buffer::view`]).
     pub fn begin_cpu_shadow_offload(&self) -> CpuBuffer<T>
@@ -7987,7 +7987,7 @@ impl<T> WebGpuBuffer<T> {
         self.cpu.clone()
     }
 
-    /// M6d: complete an offloaded mutable shadow pass — the flag half of
+    /// Complete an offloaded mutable shadow pass — the flag half of
     /// [`Buffer::view_mut`].
     pub fn finish_cpu_shadow_offload_mut(&self) {
         self.mark_cpu_dirty();
@@ -8132,13 +8132,13 @@ impl<T: Clone> super::Buffer<T> for WebGpuBuffer<T> {
 pub struct WebGpuHal {
     pub device: web_sys::GpuDevice,
     pub queue: web_sys::GpuQueue,
-    /// M4b: unique per-HAL id so caches keyed by device identity (e.g. the
+    /// Unique per-HAL id so caches keyed by device identity (e.g. the
     /// program-constant code-group cache) never cross `GPUDevice` boundaries.
     instance_id: u64,
     cpu: CpuHal<BabyBear>,
     poseidon2: Option<WebGpuPoseidon2Hash>,
     diagnostics: WebGpuDiagnosticsState,
-    // SP6d iter 4: per-HAL accumulator for GPU-active stage elapsed_ms.
+    // Per-HAL accumulator for GPU-active stage elapsed_ms.
     // Wrapped in Rc<Cell<_>> so WebGpuStageTimer instances can hold a
     // cheap clone without back-references. Replaces the thread-local
     // WEBGPU_GPU_ACTIVE_MS when running under a multi-HAL pool.
@@ -8157,14 +8157,13 @@ pub struct WebGpuHal {
     min_uniform_buffer_offset_alignment: u32,
     eval_check_interpreter_pipelines:
         RefCell<BTreeMap<EvalCheckInterpreterPipelineKey, EvalCheckInterpreterPipeline>>,
-    // SP3 iter 5 (2026-05-12): runtime flag that opts a HAL into the
+    // Runtime flag that opts a HAL into the
     // staged-WGSL eval_check path before the runtime interpreter. Default
-    // false — the interpreter remains the production path until iter 7's
-    // browser parity test proves the staged path produces byte-equivalent
-    // outputs and a multi-stage split (iter 6) handles the production
-    // rv32im DEF's ~20k-op shader size.
+    // false — the interpreter is the production path (it measured far
+    // faster than staged emission for rv32im); browser parity tests opt
+    // in per-fixture to keep the staged path validated.
     staged_eval_check_enabled: Cell<bool>,
-    // SP3 iter 5 (2026-05-12): per-DEF cache of compiled staged eval_check
+    // Per-DEF cache of compiled staged eval_check
     // pipelines. Keyed by `def as *const PolyExtStepDef as usize` because
     // DEFs are `&'static` and program identity is the natural cache key.
     // Each cached entry holds the bind-group layout + the compiled compute
@@ -8174,7 +8173,7 @@ pub struct WebGpuHal {
     // Cache per-po2 NTT twiddle tables so hot NTT shaders fetch `root^s`
     // instead of recomputing it independently in every butterfly lane.
     ntt_twiddle_cache: RefCell<BTreeMap<(bool, usize), WebGpuBuffer<BabyBearElem>>>,
-    // SP9 corrected (2026-05-15): cache `GpuBindGroupLayout` instances by
+    // Cache `GpuBindGroupLayout` instances by
     // (label.as_ptr(), entries-shape-hash). 31 `create_bind_group_layout`
     // sites in this file. Layouts are immutable shape descriptors;
     // identical shapes can safely share one instance. This is the
@@ -8182,12 +8181,12 @@ pub struct WebGpuHal {
     // the SAME layout INSTANCE as the bind groups dispatched against
     // them -- see 61d3163c9 failed-experiment ledger).
     bind_group_layout_cache: RefCell<BTreeMap<u64, web_sys::GpuBindGroupLayout>>,
-    // SP6f (2026-05-18): map HAL-created bind-group-layout JS objects
+    // Map HAL-created bind-group-layout JS objects
     // back to their structural cache keys. Compute pipeline caching is only
     // enabled when every supplied layout comes from this HAL, so cache hits
     // cannot accidentally reuse a pipeline with an unrelated layout instance.
     bind_group_layout_key_map: js_sys::WeakMap,
-    // SP6f (2026-05-18): cache compute pipelines after layout identity is
+    // Cache compute pipelines after layout identity is
     // stable. Pipelines depend only on WGSL, entry point, and bind-group
     // layouts; unlike bind groups they do not retain per-proof buffers.
     compute_kernel_cache: RefCell<BTreeMap<u64, WebGpuKernel>>,
@@ -8287,7 +8286,7 @@ impl WebGpuHal {
 
     /// Construct a HAL from a browser `GPUDevice` supplied by the crate consumer.
     pub fn from_device(device: web_sys::GpuDevice, hash_suite: HashSuite<BabyBear>) -> Self {
-        // M4a: attribute which lazy CPU shadows still materialize (>= 1 MiB)
+        // Attribute which lazy CPU shadows still materialize (>= 1 MiB)
         // so heap-pinning buffers stay visible in the stage log.
         crate::hal::cpu::set_buffer_materialize_observer(log_cpu_shadow_materialize);
         let use_poseidon2 = hash_suite.name == "poseidon2";
@@ -8302,7 +8301,7 @@ impl WebGpuHal {
             max_buffer_size, max_storage_buffer_binding_size, max_compute_workgroup_storage_size
         ));
 
-        // SP-CR D14 (2026-05-12): Surface Chrome WebGPU `uncapturederror` events
+        // Surface Chrome WebGPU `uncapturederror` events
         // so silent validation/OOM failures during cumulative-pressure paths
         // (recursion lift/join at multi-segment scale) become visible. Without
         // this listener Chrome swallows async device errors and dispatches that
@@ -8450,25 +8449,25 @@ impl WebGpuHal {
         self.gpu_authoritative.get()
     }
 
-    /// M4b: unique id for this HAL instance. Buffers are device-scoped, so
+    /// Unique id for this HAL instance. Buffers are device-scoped, so
     /// caches of GPU-resident artifacts must be keyed by this id.
     pub fn instance_id(&self) -> u64 {
         self.instance_id
     }
 
-    /// SP6d iter 4: current gpu_active_ms for this HAL. Sum of all
+    /// Current gpu_active_ms for this HAL. Sum of all
     /// `WebGpuStageTimer::new_active_for(_, self)` scopes' elapsed_ms
     /// since the last reset.
     pub fn gpu_active_ms(&self) -> f64 {
         self.gpu_active_ms.get()
     }
 
-    /// SP6d iter 4: reset this HAL's gpu_active_ms accumulator to 0.
+    /// Reset this HAL's gpu_active_ms accumulator to 0.
     pub fn reset_gpu_active_ms(&self) {
         self.gpu_active_ms.set(0.0);
     }
 
-    /// SP6d iter 4: clone the counter handle so a `WebGpuStageTimer`
+    /// Clone the counter handle so a `WebGpuStageTimer`
     /// can increment it on drop without holding a back-reference to
     /// the HAL. Cheap (Rc::clone).
     pub fn gpu_active_ms_handle(&self) -> Rc<Cell<f64>> {
@@ -8624,7 +8623,7 @@ impl WebGpuHal {
         Ok(pipeline)
     }
 
-    /// SP3 iter 5: cache lookup (or compile + insert) of a staged-WGSL
+    /// Cache lookup (or compile + insert) of a staged-WGSL
     /// `eval_check` pipeline for a specific DEF + field-mode pair. Cache
     /// is keyed by `def as *const _ as usize` because `PolyExtStepDef`s
     /// are `&'static` and program identity is the natural key. Compilation
@@ -8661,12 +8660,12 @@ impl WebGpuHal {
             def,
             &emitter_taps,
             field_mode,
-            SP3_STAGED_TARGET_CHUNK_OPS,
+            STAGED_EVAL_CHECK_TARGET_CHUNK_OPS,
         )
         .map_err(|err: CodegenError| anyhow!("staged eval_check codegen failed: {:?}", err))?;
-        // SP3 iter 7n+t: log per-stage fp_slots/mix_slots/workgroup_size
+        // Log per-stage fp_slots/mix_slots/workgroup_size
         // so we can see the per-chunk allocator's effect. Each stage
-        // now resets the slot allocator (iter 7t), so the high-water
+        // resets the slot allocator, so the high-water
         // varies per chunk and may be much smaller than the cross-chunk
         // global max.
         let per_stage_summary = multi
@@ -8699,20 +8698,20 @@ impl WebGpuHal {
                 WebGpuBindingLayout::read_only_storage(5, 0),
                 // binding 6 (instrs) intentionally omitted; staged kernel
                 // inlines the DEF rather than reading an instruction stream.
-                // SP3 iter 7x: binding 7 (mix_pows) is now a uniform
+                // Binding 7 (mix_pows) is now a uniform
                 // buffer (CUDA `__constant__` analog). The full 256 KiB
                 // is bound regardless of the DEF's actual mix_pow_words —
                 // the WGSL declares a fixed-size array and only reads
                 // the prefix the DEF needs.
                 WebGpuBindingLayout::uniform(
                     7,
-                    (SP3_STAGED_MIX_POWS_UBO_VEC4_CAPACITY * 16) as u64,
+                    (STAGED_EVAL_CHECK_MIX_POWS_UBO_VEC4_CAPACITY * 16) as u64,
                 ),
                 WebGpuBindingLayout::uniform(8, 96),
-                // SP3 iter 7c: new scratch bindings. Always present in the
+                // New scratch bindings. Always present in the
                 // layout — single-stage emissions bind a dummy 4-byte fp
                 // / mix scratch buffer to satisfy the validator.
-                // SP3 iter 7g: binding 9 is a 16-byte UBO with
+                // Binding 9 is a 16-byte UBO with
                 // pipeline-constant {fp_stride, mix_stride, num_stages,
                 // tile_size}, bound once and read by every stage.
                 WebGpuBindingLayout::uniform(9, 16),
@@ -8735,7 +8734,7 @@ impl WebGpuHal {
             } else {
                 "webgpu_staged_eval_check_stage"
             };
-            // SP3 iter 7q (2026-05-12): time each stage's WGSL compile
+            // Time each stage's WGSL compile
             // separately so we can attribute the staged-path slowness.
             // Iter 7p (workgroup_size=32) didn't move total prove time,
             // so the 40 s overhead is either WGSL compile (one-shot per
@@ -8749,19 +8748,19 @@ impl WebGpuHal {
                 self.create_compute_kernel(kernel_name, &wgsl, "main", &[layout.clone()])?;
             stages.push(kernel);
         }
-        // SP3 iter 7d: allocate scratch buffers once at pipeline create
+        // Allocate scratch buffers once at pipeline create
         // and cache them; they're reused across every eval_check call
-        // that hits this pipeline. Size is `SP3_STAGED_TILE_SIZE *
+        // that hits this pipeline. Size is `STAGED_EVAL_CHECK_TILE_SIZE *
         // stride * 4 B`, independent of any single call's domain.
         let fp_scratch_byte_len = if multi.fp_scratch_stride_u32 == 0 {
             4
         } else {
-            byte_len_for::<u32>(multi.fp_scratch_stride_u32 * SP3_STAGED_TILE_SIZE as usize)
+            byte_len_for::<u32>(multi.fp_scratch_stride_u32 * STAGED_EVAL_CHECK_TILE_SIZE as usize)
         };
         let mix_scratch_byte_len = if multi.mix_scratch_stride_u32 == 0 {
             4
         } else {
-            byte_len_for::<u32>(multi.mix_scratch_stride_u32 * SP3_STAGED_TILE_SIZE as usize)
+            byte_len_for::<u32>(multi.mix_scratch_stride_u32 * STAGED_EVAL_CHECK_TILE_SIZE as usize)
         };
         let fp_scratch =
             self.create_storage_buffer("webgpu_staged_eval_check_fp_scratch", fp_scratch_byte_len)?;
@@ -8773,12 +8772,12 @@ impl WebGpuHal {
             "webgpu_staged_eval_check_mix_mul_scratch",
             mix_scratch_byte_len,
         )?;
-        // SP3 iter 7g: scratch_params is a single 16-byte UBO with
+        // scratch_params is a single 16-byte UBO with
         // {fp_stride, mix_stride, num_stages, tile_size}. All fields
         // are pipeline-constant — written ONCE at pipeline create, then
         // every eval_check call reuses it. Threads compute their cycle
         // via `gid.y * tile_size + gid.x`, so no per-tile UBO offset is
-        // needed. Replaces iter 7e/7f's `MAX_TILES * 256 B` dynamic-
+        // needed. Replaces the earlier `MAX_TILES * 256 B` dynamic-
         // offset array with a single 16-byte entry.
         let scratch_params_buf = self.create_buffer(
             "webgpu_staged_eval_check_scratch_params",
@@ -8795,7 +8794,7 @@ impl WebGpuHal {
             fp_stride_u32,
             mix_stride_u32,
             num_stages_u32,
-            SP3_STAGED_TILE_SIZE,
+            STAGED_EVAL_CHECK_TILE_SIZE,
         ];
         self.write_buffer_named(
             &scratch_params_buf,
@@ -8803,19 +8802,19 @@ impl WebGpuHal {
             0,
             bytemuck::cast_slice(&scratch_params_words),
         )?;
-        // SP3 iter 7f: cache mix_pows and params buffers on the
+        // Cache mix_pows and params buffers on the
         // pipeline. Sizes depend only on the DEF (mix_pow_words for
         // mix_pows, fixed 96 bytes for params) so they're stable
         // across all eval_check calls hitting this pipeline.
         let mix_expected = def.ret + 1;
         let mix_pow_words = mix_expected * BabyBearExtElem::EXT_SIZE;
-        // SP3 iter 7x: mix_pows is a uniform buffer (CUDA `__constant__`
+        // mix_pows is a uniform buffer (CUDA `__constant__`
         // analog). Sized to the full UBO capacity so the WGSL's
-        // fixed-size array<vec4<u32>, SP3_STAGED_MIX_POWS_UBO_VEC4_CAPACITY>
+        // fixed-size array<vec4<u32>, STAGED_EVAL_CHECK_MIX_POWS_UBO_VEC4_CAPACITY>
         // declaration matches the buffer size exactly. Each `eval_check`
         // call writes only `mix_pow_words` u32s starting at offset 0;
         // the remaining slots are unused.
-        let mix_pows_capacity_bytes = (SP3_STAGED_MIX_POWS_UBO_VEC4_CAPACITY * 16) as u64;
+        let mix_pows_capacity_bytes = (STAGED_EVAL_CHECK_MIX_POWS_UBO_VEC4_CAPACITY * 16) as u64;
         if (mix_pow_words * 4) as u64 > mix_pows_capacity_bytes {
             return Err(anyhow!(
                 "staged eval_check: mix_pow_words ({}) exceeds UBO capacity ({} u32)",
@@ -8833,7 +8832,7 @@ impl WebGpuHal {
             96,
             WEBGPU_BUFFER_USAGE_UNIFORM | WEBGPU_BUFFER_USAGE_COPY_DST,
         )?;
-        // SP3 iter 7m: workgroup_size is shared across stages (codegen
+        // workgroup_size is shared across stages (codegen
         // picks the same value from `plan.fp_slots`/`plan.mix_slots`).
         // If multi.stages is empty (defensive — should never happen),
         // fall back to 1.
@@ -8859,7 +8858,7 @@ impl WebGpuHal {
         Ok(pipeline)
     }
 
-    /// SP3 iter 5: dispatch the staged-WGSL `eval_check` kernel for a DEF.
+    /// Dispatch the staged-WGSL `eval_check` kernel for a DEF.
     /// Mirrors `dispatch_eval_check_poly_ext_interpreted` but without the
     /// runtime opcode stream — the per-DEF body is baked into the cached
     /// pipeline at first call. Returns `Ok(false)` if any GPU buffer is
@@ -8908,7 +8907,7 @@ impl WebGpuHal {
             pipeline.mix_pow_words,
             "staged mix_pows word count must match pipeline reservation"
         );
-        // SP3 iter 7f: rewrite the cached `mix_pows` storage buffer
+        // Rewrite the cached `mix_pows` storage buffer
         // (owned by the pipeline) instead of creating a fresh one per
         // eval_check call.
         self.write_buffer_named(
@@ -8936,7 +8935,7 @@ impl WebGpuHal {
             0u32,       // _pad0
             params[8], params[9], params[10], params[11],
         ];
-        // SP3 iter 7f: rewrite the cached params UBO (owned by the
+        // Rewrite the cached params UBO (owned by the
         // pipeline) instead of allocating a fresh 96-byte uniform per
         // call.
         self.write_buffer_named(
@@ -8946,16 +8945,16 @@ impl WebGpuHal {
             bytemuck::cast_slice(&params_words),
         )?;
 
-        // SP3 iter 7g: CUDA-shape dispatch. Closest analog to CUDA's
+        // CUDA-shape dispatch. Closest analog to CUDA's
         // single `eval_check<<<grid, block>>>` launch covering the whole
         // domain — we issue ONE `dispatch_workgroups(tile_size,
-        // num_tiles, 1)` per stage instead of iter 7e/7f's
+        // num_tiles, 1)` per stage instead of a
         // `num_tiles * num_stages` setBindGroup+dispatch loop. Threads
         // compute `cycle = gid.y * tile_size + gid.x` inline, so no
         // per-tile UBO offset is needed. scratch_params is a single
         // 16-byte pipeline-constant UBO; pipeline/bind_group are bound
         // once and reused across all stages.
-        let tile_size = SP3_STAGED_TILE_SIZE.min(domain_u32);
+        let tile_size = STAGED_EVAL_CHECK_TILE_SIZE.min(domain_u32);
         let num_tiles = (domain_u32 + tile_size - 1) / tile_size;
 
         let bind_group = self.create_bind_group(
@@ -8988,7 +8987,7 @@ impl WebGpuHal {
             ],
         )?;
 
-        // SP3 iter 7h: each stage gets its OWN compute pass within one
+        // Each stage gets its OWN compute pass within one
         // encoder. WebGPU does not guarantee that storage writes from
         // dispatch N are visible to dispatch N+1 inside the same compute
         // pass — only across pass boundaries does the implementation
@@ -8999,8 +8998,8 @@ impl WebGpuHal {
         // during finalize_async. CUDA's sequential kernel launches each
         // implicitly synchronize — this is the closest WebGPU analog.
         // Single submit is preserved (one encoder.finish()), so queue
-        // pressure stays at iter 7e's level.
-        // SP3 iter 7m: dispatch `(tile_size / workgroup_size, num_tiles,
+        // pressure stays flat.
+        // Dispatch `(tile_size / workgroup_size, num_tiles,
         // 1)` workgroups per stage. Each workgroup runs `workgroup_size`
         // threads. Total threads = `tile_size * num_tiles` >= domain.
         // `tile_size` is 4096 and `workgroup_size` is a power of 2 in
@@ -9021,7 +9020,7 @@ impl WebGpuHal {
         }
         self.submit(encoder.finish());
 
-        // SP3 iter 7l (2026-05-12): pipeline cache is re-enabled.
+        // Pipeline cache is re-enabled.
         // Iter 7j evicted per-call as a diagnostic — proved persistent
         // cached state isn't the SIGKILL cause, but added significant
         // recompile cost (each call recompiled 2-4 staged shaders).
@@ -10044,24 +10043,24 @@ impl WebGpuHal {
             invs[3],
         ];
 
-        // SP3 iter 5 (2026-05-12): try the staged-WGSL fast path first when
+        // Try the staged-WGSL fast path first when
         // the runtime flag is set and all groups bind in a single dispatch.
         // Default `staged_eval_check_enabled = false`, so this branch is
-        // dead code on the production path until browser parity tests
-        // (iter 7) opt in per-fixture. Any failure (codegen, compile,
+        // dead code on the production path unless browser parity tests
+        // opt in per-fixture. Any failure (codegen, compile,
         // dispatch) falls through to the interpreter below.
         //
-        // SP3 iter 7i (2026-05-12): only attempt staged for DEFs with
+        // Only attempt staged for DEFs with
         // enough ops to make staging worthwhile (rv32im production has
         // ~20k+ ops; recursion's DEF is much smaller and currently
         // SIGKILLs Chrome somewhere in the lift's finalize_async flow
-        // when staged. Limit the staged path to the heavy DEFs where
-        // it's the perf win, and let the recursion lift use the proven
-        // interpreter path until iter 7i+1 root-causes the recursion
-        // breakage. Threshold of 8000 keeps rv32im above and recursion
-        // / smaller DEFs below.
+        // when staged. Limit the staged path to the heavy DEFs it was
+        // validated on; the recursion lift stays on the proven interpreter
+        // path (staged emission for the recursion DEF misbehaved and was
+        // never root-caused). Threshold of 8000 keeps rv32im above and
+        // recursion / smaller DEFs below.
         if self.staged_eval_check_enabled.get()
-            && def.block.len() >= SP3_STAGED_MIN_BLOCK_OPS
+            && def.block.len() >= STAGED_EVAL_CHECK_MIN_BLOCK_OPS
             && group_can_bind.iter().all(|can_bind| *can_bind)
         {
             // Base-field DEFs (rv32im) take the optimized `FieldMode::Base`
@@ -10415,7 +10414,7 @@ impl WebGpuHal {
         if output_size == 0 {
             return true;
         }
-        // SP-CR fix 2026-05-12: mirror `dispatch_poseidon2_hash_fold`'s
+        // Mirror `dispatch_poseidon2_hash_fold`'s
         // `round_constants` / `m_int_diag` checks (this file, near line 9339).
         let Some(hash) = self.poseidon2.as_ref() else {
             return false;
@@ -10438,7 +10437,7 @@ impl WebGpuHal {
         if row_size == 0 {
             return true;
         }
-        // SP-CR fix 2026-05-12: `dispatch_poseidon2_hash_rows` (this file, near
+        // `dispatch_poseidon2_hash_rows` (this file, near
         // line 9397) requires both `round_constants` and `m_int_diag` GPU
         // buffers to be materialized. If `can_dispatch_*` is more permissive
         // than the actual dispatch, the `_async` wrapper skips the input sync
@@ -10559,8 +10558,8 @@ impl WebGpuHal {
         xs: &WebGpuBuffer<BabyBearExtElem>,
         out: &WebGpuBuffer<BabyBearExtElem>,
     ) -> Result<()> {
-        // SP6b iter 4: prefer chunked when eval_count is VERY small
-        // AND deg is large. SP7r collapses the normal chunked path to
+        // Prefer chunked when eval_count is VERY small
+        // AND deg is large. The normal chunked path collapses to
         // one 2D partial dispatch when buffers fit full storage
         // bindings, but the oversized-buffer fallback is still
         // per-eval-sequential. The win comes from parallelizing the
@@ -11121,7 +11120,7 @@ impl WebGpuHal {
         Ok(())
     }
 
-    /// SP-submission iter 2: batch a chain of `hash_fold_async` calls
+    /// Batch a chain of `hash_fold_async` calls
     /// (the merkle build loop) into a single submit. Saves
     /// ~`output_sizes.len() - 1` GPU-process IPC round-trips. Falls
     /// through to per-call hash_fold_async when GPU dispatch is
@@ -11265,12 +11264,11 @@ impl WebGpuHal {
         Ok(())
     }
 
-    /// SP4 iter 3 test hook: exercise `dispatch_gather_sample_tiled`
+    /// Test hook: exercise `dispatch_gather_sample_tiled`
     /// over a `BufferPool` source. The pool's `layout` must match the
     /// caller's `stride` and `size`. Production callers will fall into
-    /// this path automatically once SP5 wires the recursion data group
-    /// to be `BufferPool`-backed; for now the test exercises it
-    /// directly.
+    /// this path automatically when the recursion data group is
+    /// `BufferPool`-backed; the test exercises it directly.
     #[doc(hidden)]
     pub fn debug_dispatch_gather_sample_tiled(
         &self,
@@ -11536,7 +11534,7 @@ impl WebGpuHal {
         label: &'static str,
         entries: &[WebGpuBindingLayout],
     ) -> Result<web_sys::GpuBindGroupLayout> {
-        // SP9 corrected (2026-05-15): cache layouts by (label_ptr,
+        // Cache layouts by (label_ptr,
         // entries-shape) so callers that ask for the same layout get
         // the same JS instance. WebGPU pipelines bind specifically to
         // the layout INSTANCE they were created with -- a later
@@ -11642,12 +11640,12 @@ impl WebGpuHal {
         Ok(kernel)
     }
 
-    /// SP7 iter 6d-d (2026-05-15): async-compile the same kernel via
+    /// Async-compile the same kernel via
     /// `device.createComputePipelineAsync()`. The Tint compile runs in
     /// the browser GPU process while the wasm thread does other work
     /// (guest execution, session setup); when the returned Future
     /// resolves, the kernel is ready to dispatch. Useful for the
-    /// iter-6d-c probe so the ~60 s exec_TopChunk0 compile overlaps with
+    /// witgen probe so the ~60 s exec_TopChunk0 compile overlaps with
     /// xgboost's segment-level prover work instead of blocking the
     /// first witgen call.
     pub async fn create_compute_kernel_async(
@@ -12531,7 +12529,7 @@ impl WebGpuHal {
         }
 
         let byte_len = byte_len_for::<BabyBearElem>(elems.size());
-        // SP9 phase 2 take 3 (2026-05-15): min_binding_size=0 to keep the
+        // min_binding_size=0 keeps the
         // layout shape stable across byte_len-variant calls; the runtime
         // bind-validation still uses the actual buffer size at dispatch.
         let layout = self.create_bind_group_layout(
@@ -12722,7 +12720,7 @@ impl WebGpuHal {
         input2.sync_cpu_to_gpu(self)?;
 
         let byte_len = byte_len_for::<BabyBearElem>(output.size());
-        // SP9 phase 2 take 3: stable layout shape via min_binding_size=0.
+        // Stable layout shape via min_binding_size=0.
         let layout = self.create_bind_group_layout(
             "webgpu_eltwise_add_elem_layout",
             &[
@@ -12810,7 +12808,7 @@ impl WebGpuHal {
 
         let output_byte_len = byte_len_for::<BabyBearElem>(output.size());
         let input_byte_len = byte_len_for::<BabyBearExtElem>(input.size());
-        // SP9 phase 2 take 3: stable layout shape via min_binding_size=0.
+        // Stable layout shape via min_binding_size=0.
         let layout = self.create_bind_group_layout(
             "webgpu_eltwise_sum_extelem_layout",
             &[
@@ -12994,7 +12992,7 @@ impl WebGpuHal {
         let into_byte_len = byte_len_for::<BabyBearElem>(into.size());
         let offsets_byte_len = byte_len_for::<u32>(offsets.size());
         let values_byte_len = byte_len_for::<BabyBearElem>(values.size());
-        // SP9 phase 2 take 3: stable layout shape via min_binding_size=0.
+        // Stable layout shape via min_binding_size=0.
         let layout = self.create_bind_group_layout(
             "webgpu_scatter_layout",
             &[
@@ -13233,7 +13231,7 @@ impl WebGpuHal {
         Ok(())
     }
 
-    /// SP4 iter 2 (R8): tiled gather variant operating over a
+    /// Tiled gather variant operating over a
     /// `BufferPool`. Each tile holds a contiguous column-slab of the
     /// logical 2D source; the kernel runs per-tile with the same
     /// `GATHER_SAMPLE_ELEM_WGSL` shader as `dispatch_gather_sample`,
@@ -13366,7 +13364,7 @@ impl WebGpuHal {
         io.sync_cpu_to_gpu(self)?;
 
         let byte_len = byte_len_for::<BabyBearExtElem>(io.size());
-        // SP9 phase 2 take 3: stable layout shape via min_binding_size=0.
+        // Stable layout shape via min_binding_size=0.
         let layout = self.create_bind_group_layout(
             "webgpu_prefix_products_extelem_layout",
             &[WebGpuBindingLayout::storage(0, 0)],
@@ -14405,7 +14403,7 @@ impl WebGpuHal {
         let workgroups = u32::try_from(total_pairs)
             .expect("WebGPU NTT total pairs exceeds u32")
             .div_ceil(256);
-        // SP-submission iter 1 (2026-05-15): batch all NTT step
+        // Batch all NTT step
         // dispatches into ONE command encoder + submit instead of
         // per-step submit. Each NTT level reads its predecessor's
         // output; within a single compute pass, dispatches execute
@@ -15203,7 +15201,7 @@ impl WebGpuHal {
         Ok(true)
     }
 
-    /// SP-submission iter 2 (2026-05-15): batch a chain of hash_folds
+    /// Batch a chain of hash_folds
     /// (the merkle tree-build loop) into a single command encoder. Each
     /// individual fold writes to a different slice of the same `nodes`
     /// buffer; within a compute pass dispatches execute serially on the
@@ -15241,7 +15239,7 @@ impl WebGpuHal {
         };
         io.sync_cpu_to_gpu(self)?;
 
-        // SP6g (2026-05-18): pack all per-layer params into one dynamic
+        // Pack all per-layer params into one dynamic
         // uniform buffer and bind it once. This keeps the existing single-pass
         // dispatch batching while avoiding one bind group per Merkle layer.
         let params_len = mem::size_of::<[u32; 8]>();
@@ -15703,7 +15701,7 @@ async fn request_device() -> Result<web_sys::GpuDevice> {
         "maxComputeWorkgroupStorageSize",
         max_compute_workgroup_storage_size as u64,
     )?;
-    // SP3 iter 7c: bump storage-buffers-per-stage so the staged multi-stage
+    // Bump storage-buffers-per-stage so the staged multi-stage
     // bind group (10 storage bindings) fits. Default WebGPU is 8.
     let max_storage_buffers_per_stage = adapter_limits
         .max_storage_buffers_per_shader_stage()
@@ -15713,7 +15711,7 @@ async fn request_device() -> Result<web_sys::GpuDevice> {
         "maxStorageBuffersPerShaderStage",
         max_storage_buffers_per_stage as u64,
     )?;
-    // SP3 iter 7x: bump `maxUniformBufferBindingSize` so `mix_pows`
+    // Bump `maxUniformBufferBindingSize` so `mix_pows`
     // can live in a UBO (CUDA `__constant__` analog).
     let max_uniform_buffer_binding_size = (adapter_limits.max_uniform_buffer_binding_size() as u64)
         .min(WEBGPU_REQUESTED_MAX_UNIFORM_BUFFER_BINDING_BYTES);

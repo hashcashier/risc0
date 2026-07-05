@@ -12,23 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! SP6d iter 1 — multi-HAL prover pool scaffold.
+//! Multi-HAL prover pool scaffold.
 //!
 //! Holds N independent `WebGpuHal` instances, each backed by its own
 //! `web_sys::GpuDevice` acquired via `request_device()`. Provides a simple
 //! round-robin lease so callers can issue concurrent prove jobs across
 //! devices.
 //!
-//! Per measurement on 2026-05-13 the 5090 sat at 12.6% mean utilization on
+//! Measured on an RTX 5090: 12.6% mean utilization on
 //! single-device WebGPU proving; the GPU has ~7× headroom that can only be
 //! exploited via independent submission queues. Each `web_sys::GpuDevice`
 //! has its own `GpuQueue`; multi-device proving on a single JS thread
 //! parallelizes at the driver level because devices have independent
 //! command queues per the WebGPU spec.
-//!
-//! NOTE: in iter 1 this is the type structure plus a smoke test only — the
-//! `prove_session_async` work-distribution layer that issues different
-//! segments / lifts / joins to different HALs is deferred to iter 2+.
 
 use std::{
     cell::Cell,
@@ -173,7 +169,7 @@ impl WebGpuProverPool {
         self.prove_with_ctx_async(env, &ctx, elf, opts).await
     }
 
-    /// SP6d iter 5: distribute lifts + tree-joins across pool slots to
+    /// Distribute lifts + tree-joins across pool slots to
     /// compress a composite receipt. The composite's segments may have
     /// been proved by any (single) prover; this method only handles the
     /// lift+join phase.
@@ -261,7 +257,7 @@ impl WebGpuProverPool {
             .ok_or_else(|| anyhow!("lift_and_join produced no receipt"))
     }
 
-    /// SP6d iter 6: distribute keccak proof requests across pool slots.
+    /// Distribute keccak proof requests across pool slots.
     /// Each `ProveKeccakRequest` runs `prove_keccak_webgpu` on a
     /// different slot's `WebGpuHal` in parallel via
     /// `futures::future::try_join_all`. Returns receipts in input order.
@@ -299,7 +295,7 @@ impl WebGpuProverPool {
         Ok(receipts)
     }
 
-    /// SP6d iter 8: end-to-end pool prove. Drives the same flow as
+    /// End-to-end pool prove. Drives the same flow as
     /// `WebGpuProver::prove_with_ctx_async` but distributes the GPU-heavy
     /// phases across pool slots:
     ///
@@ -332,10 +328,10 @@ impl WebGpuProverPool {
             .await
     }
 
-    /// SP6d iter 8 legacy phased pool prove. This is retained for A/B
+    /// Legacy phased pool prove, retained for A/B
     /// comparisons and recovery, but the public pool entrypoint routes
     /// through [`Self::prove_with_ctx_scheduled_async`] because the
-    /// dependency-graph scheduler is the measured positive SP6d path.
+    /// dependency-graph scheduler measured faster.
     pub async fn prove_with_ctx_sequential_async(
         &self,
         env: ExecutorEnv<'_>,
@@ -557,7 +553,7 @@ impl WebGpuProverPool {
         })
     }
 
-    /// SP6d iter 8: pool composite-to-succinct.
+    /// Pool composite-to-succinct.
     ///
     /// Runs the **serial interleaved** lift→join→lift→join chain on slot
     /// 0 (`ProverImpl::composite_to_succinct_async`), which also handles
@@ -582,7 +578,7 @@ impl WebGpuProverPool {
     /// win lives (many genuinely-independent proofs → 47.5% mean util).
     ///
     /// `lift_and_join_async` is retained as a validated building block
-    /// (iter 5/7 smokes) but is no longer the orchestrator default.
+    /// but is no longer the orchestrator default.
     pub async fn composite_to_succinct_async(
         &self,
         composite: &CompositeReceipt,
@@ -597,7 +593,7 @@ impl WebGpuProverPool {
             .context("pool composite_to_succinct (serial slot 0)")
     }
 
-    /// SP6d iter 9: end-to-end pool prove driven by a **dependency-graph
+    /// End-to-end pool prove driven by a **dependency-graph
     /// scheduler** instead of fixed sequential phases.
     ///
     /// `prove_with_ctx_async` runs phases strictly in order (all segments
@@ -612,7 +608,7 @@ impl WebGpuProverPool {
     /// one case where concurrency *could* win on wall time — segment
     /// proves are CPU-witgen-heavy, keccak proves spend more of their
     /// time on GPU commit, so overlapping them stresses different
-    /// resources. The homogeneous SP6d A/B tests (keccak-only,
+    /// resources. The homogeneous A/B tests (keccak-only,
     /// lift+join-only) showed flat wall time; this scheduler tests
     /// whether a *heterogeneous* job mix changes that.
     ///
@@ -631,7 +627,7 @@ impl WebGpuProverPool {
     /// proving with anything — the wasm32 address space, not the GPU or
     /// the submission mechanism, forbids it. The heterogeneous overlap
     /// the scheduler was built to exploit is unreachable until the
-    /// per-segment buffer peak shrinks (SP7's GPU-resident witness).
+    /// per-segment buffer peak shrinks (a GPU-resident witness).
     ///
     /// A 1-slot pool runs this scheduler strictly serially (one task at a
     /// time, dependency-ordered) — that is the honest serial baseline for
@@ -696,7 +692,7 @@ impl WebGpuProverPool {
         // hooks after the whole scheduler. With concurrent scheduling the
         // strict per-segment pre→prove→post ordering cannot be preserved;
         // test hooks use Rc<RefCell> flags and are race-free on a single
-        // JS thread (validated by the iter-8 multi-segment smoke).
+        // JS thread (validated by the multi-segment smoke).
         for seg in &resolved_segments {
             for hook in &session.hooks {
                 hook.on_pre_prove_segment(seg);
@@ -744,9 +740,9 @@ impl WebGpuProverPool {
         loop {
             // Admission: hand ready tasks to free slots.
             //
-            // Hard memory constraint (iter 9, measured): a po2_18 rv32im
+            // Hard memory constraint (measured): a po2_18 rv32im
             // segment prove cannot share wasm32's ~2 GiB address space
-            // with ANY other prove. Iter 9's first scheduler attempt ran
+            // with ANY other prove. The first scheduler attempt ran
             // 1 segment + 1 keccak concurrently and crashed with
             // `RuntimeError: unreachable` when the segment hit its accum
             // poly-group allocation while a keccak's finalize buffers
@@ -1214,7 +1210,7 @@ fn merge_webgpu_device_copy_diagnostics(
     }
 }
 
-/// SP6d iter 9 — dependency-graph scheduler task kinds for
+/// Dependency-graph scheduler task kinds for
 /// [`WebGpuProverPool::prove_with_ctx_scheduled_async`].
 enum SchedTask {
     /// Prove rv32im segment `index` (preflight + prove_core).
@@ -1229,7 +1225,7 @@ enum SchedTask {
     Join(usize, usize),
 }
 
-/// SP6d iter 9 — completed-task payloads carried back from the scheduler
+/// Completed-task payloads carried back from the scheduler
 /// futures, tagged so the scheduler can record them into its state.
 enum SchedDone {
     Segment(usize, SegmentReceipt),

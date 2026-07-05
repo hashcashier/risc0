@@ -1620,10 +1620,10 @@ struct WebGpuRecursionProver {
     circuit_hal: Rc<WebGpuCircuitHal>,
 }
 
-/// M7a: run the recursion preflight replay on a pool worker. The replay is
+/// Run the recursion preflight replay on a pool worker. The replay is
 /// pure CPU over owned data (`program` + `input`); keeping it off this wasm
 /// thread lets in-flight readback callbacks of OTHER proofs complete while
-/// it grinds (the M6d starvation physics — a commit phase is a chain of
+/// it grinds (a commit phase is a chain of
 /// short readbacks whose completions require this thread's event loop).
 /// `program` travels through the worker and back untouched.
 async fn preflight_offloaded_async(
@@ -1651,12 +1651,12 @@ async fn preflight_offloaded_async(
     Ok((program, result?))
 }
 
-/// M7a: [`crate::prove::witgen::WitnessGenerator::new`] with the CPU witness
+/// [`crate::prove::witgen::WitnessGenerator::new`] with the CPU witness
 /// pass on a pool worker. Buffer allocation, noise, zeroize, and the
 /// deferred GPU dispatches stay on this thread (JS objects and GPU
 /// submission cannot leave it); the exec-plan build — the dominant CPU
 /// chunk — runs on the pool over `Send` CPU shadow handles, exactly the
-/// M6d `generate_witness_offloaded_async` pattern from rv32im. `preflight`
+/// `generate_witness_offloaded_async` pattern from rv32im. `preflight`
 /// travels through the worker and back (the caller still needs its output).
 ///
 /// When the GPU verify_mem candidate is disabled (diagnostics), this falls
@@ -1773,10 +1773,10 @@ impl RecursionProver for WebGpuRecursionProver {
         Box::pin(async move {
             risc0_core::scope!("prove");
 
-            // M7a: both CPU-heavy prologue passes run on pool workers so
+            // Both CPU-heavy prologue passes run on pool workers so
             // this thread keeps servicing other in-flight proofs' readback
             // callbacks (concurrent lifts/joins in composite_to_succinct,
-            // and — under M7-style cross-phase overlap — a segment commit).
+            // and — when cross-phase overlap is active — a segment commit).
             let (program, preflight) = preflight_offloaded_async(program, input).await?;
 
             let (witgen, preflight) = witgen_new_offloaded_async(
@@ -1823,7 +1823,7 @@ impl RecursionProver for WebGpuRecursionProver {
                         "commit_group_async recursion_ctrl",
                         self.hal.as_ref(),
                     );
-                    // M4b: the ctrl (code) group is a pure function of
+                    // The ctrl (code) group is a pure function of
                     // (program, po2) and the control ID is its canonical
                     // identity — reuse the committed PolyGroup across proofs
                     // on this device when the caller supplies one.
