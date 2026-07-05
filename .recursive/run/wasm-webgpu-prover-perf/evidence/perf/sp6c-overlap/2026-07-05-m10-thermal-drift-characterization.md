@@ -175,3 +175,42 @@ The churn-3 xgboost outlier (15174) was immediately followed by a
 
 Scripts: thermal-sampler.sh, run-thermal-ladder.sh, run-heater-probe.sh,
 run-churn-probe.sh + all CSVs/logs in the 07-05 session scratchpad.
+
+## APPENDIX (same day, 15:00-16:40): the slow state arrived on schedule — caught live
+
+During the M11 gate blocks the slow state arrived in real time, on the
+same schedule as 07-04 (onset window 15:00-16:10):
+
+- 15:00 canary KeccakUnion 36954 (transitioning), 15:25 canary 36873
+  (warm mid-block run — NOT first-run noise);
+- 16:10, on BASE bytes after the M11 revert-rebuild: **38229** — exactly
+  the 07-04 evening band (38239-38329); 16:40 closing canary 37069.
+- xgboost shifted only mildly (medians 14939 → 14966 across the hour),
+  and the heavy 25-keccak pipeline measured FLAT vs last night (106746
+  vs 106321-106415) — the state taxes serial readback-exposed proofs
+  (KeccakUnion(1) +8-10%), barely touches saturated pipelines and
+  CPU-bound fixtures. Same workload-ordering as the M8/M10 evidence.
+
+Live diagnostics at 15:30 (per the playbook, before touching anything):
+ZERO clock-event reasons active, zero thermal-slowdown counter history,
+GPU idle P8 48 °C, buddyinfo healthy — but the **DIMM/case-ambient proxy
+read 43.5 °C vs 37.25 °C all morning** (CPU idle 54 vs 50). The case
+ambient is ~6 °C warmer on the July afternoon, tracking room temperature.
+
+**Leading mechanism hypothesis (fits every observation): GDDR
+temperature-compensated refresh.** GDDR6/7 doubles its refresh rate
+above a junction-temperature threshold, silently eating memory
+bandwidth: no throttle flag, no core-clock change, taxes bandwidth-bound
+work (GPU-merkle check readback drains) hardest, tracks ambient with
+hours-scale room warming, recovers overnight, and the memory junction
+sensor is not exposed on GeForce so it is invisible to every telemetry
+field we have. Not directly provable without a junction sensor, but the
+DIMM-temp correlation (37.25 fast / 43.5 slow onset) plus the mechanism's
+signature match make it the working model.
+
+Practical consequences (in addition to the standing policy):
+- Wall numbers on this box are STATE-RELATIVE; publishable comparisons
+  must be same-state (canary-verified) as well as same-session.
+- Cooling the room/box in the afternoon is worth ~8-10% on
+  readback-heavy workloads — an ops recommendation, not a code change.
+- The morning fast state is the honest benchmark condition.
