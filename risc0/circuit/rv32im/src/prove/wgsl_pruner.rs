@@ -666,7 +666,7 @@ fn exec_sha0_chunk0_only_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// sequentially and OR-merges the returns (assumes Tint zero-inits
 /// the unreachable-arm return vars). 2.35 MB -- on the boundary of
 /// Chrome's whole-module ceiling (1.99-3.27 MB band per iter-5b).
-/// Generated via `.recursive/.../sp9/gen_all_chunks.py`.
+/// Generated via `scripts/gen_all_chunks.py` (vendored in this crate).
 pub const EXEC_TOP_CHUNK0_ALL_WGSL: &str = include_str!("../zirgen/exec_top_chunk0_all.wgsl");
 
 /// SP7 iter 6d-f `@compute` wrapper for [`EXEC_TOP_CHUNK0_ALL_WGSL`].
@@ -776,7 +776,10 @@ fn callees_in<'a>(body: &str, valid: &BTreeSet<&'a str>) -> BTreeSet<&'a str> {
 }
 
 /// Replace every `<base>(` callsite in `body` (where `<base>` is in
-/// `chunked_bases`) with `<base>Chunk0(`.
+/// `chunked_bases`) with `<base>Chunk0(`. Superseded in production by
+/// the per-chunk-mux flow; kept under cfg(test) for its unit test and
+/// future chunk-regeneration work.
+#[cfg(test)]
 fn rewrite_chunk0(body: &str, chunked_bases: &BTreeSet<&str>) -> String {
     rewrite_to_chunk(body, &chunked_bases.iter().map(|&b| (b, 0u32)).collect(), 0)
 }
@@ -1382,13 +1385,16 @@ mod tests {
 
     /// Path to the gen_zirgen iter-6a output -- not vendored into the
     /// crate (9 MB), but expected to be regeneratable via the gen_zirgen
-    /// invocation documented in the SP7 evidence. Tests skip cleanly if
-    /// the artifact is absent.
+    /// invocation documented in the SP7 evidence. Set `ZIRGEN_WGSL_OUT`
+    /// to the gen_zirgen output directory (default `/tmp/zirgen-out8`)
+    /// and `ZIRGEN_SRC` to a zirgen checkout; tests skip cleanly if
+    /// either artifact is absent.
     fn try_load_iter6a() -> Option<(String, String, String, String)> {
-        let dir = std::path::PathBuf::from("/tmp/zirgen-out8");
-        let prelude = std::path::PathBuf::from(
-            "/home/rami/repos/zirgen/zirgen/compiler/codegen/gpu/witgen_prelude.wgsl",
+        let dir = std::path::PathBuf::from(
+            std::env::var("ZIRGEN_WGSL_OUT").unwrap_or_else(|_| "/tmp/zirgen-out8".into()),
         );
+        let prelude = std::path::PathBuf::from(std::env::var("ZIRGEN_SRC").ok()?)
+            .join("zirgen/compiler/codegen/gpu/witgen_prelude.wgsl");
         if !dir.join("steps.wgsl").exists() || !prelude.exists() {
             return None;
         }

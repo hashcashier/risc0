@@ -62,6 +62,9 @@ pub(crate) trait CircuitWitnessGenerator<H: Hal> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CircuitAccumulationMode {
     Default,
+    // Only the WebGPU HAL produces (and consumes) GPU-authoritative
+    // accumulation; the variant exists exactly where that HAL compiles.
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
     GpuAuthoritative,
 }
 

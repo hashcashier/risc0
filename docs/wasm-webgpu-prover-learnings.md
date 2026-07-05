@@ -1,5 +1,7 @@
 # WASM/WebGPU Prover Learnings, Methods, And Results
 
+> **Note:** `.recursive/...` evidence paths referenced in this document are preserved on the `wasm` archive branch; the presentation branch omits that process tree.
+
 Status: paused 2026-05-11; performance follow-up run `wasm-webgpu-prover-perf` resumed 2026-05-12. R1 smoke matrix refreshed (ratios 7-9× small, 15.7× KeccakUnion(1)) — see `docs/wasm-webgpu-cuda-comparison.md` and `.recursive/run/wasm-webgpu-prover-perf/evidence/perf/r1-baselines/`. SP2 generator seed landed. xgboost SP-CR resolved via D14+D15+D16 GPU-only fix (explicit `GPUBuffer.destroy()` via Rc-owned wrapper releases cumulative VRAM between lifts; xgboost verifies in 117.92 s on full GPU path / ~21× native CUDA). Governed by the Correctness-First Discipline below.
 
 This document records what we built, how we validated it, what we learned, and
@@ -167,7 +169,7 @@ The native baseline command should explicitly enable local proving, telemetry,
 and CUDA when CUDA is part of the comparison:
 
 ```bash
-RECURSION_SRC_PATH=/home/rami/repos/risc0/examples/target/release/build/risc0-circuit-recursion-4e96382f0d1db440/out/recursion_zkr.zip \
+RECURSION_SRC_PATH=examples/target/release/build/risc0-circuit-recursion-4e96382f0d1db440/out/recursion_zkr.zip \
 RISC0_PROVER=local RISC0_EXECUTOR=local RISC0_INFO=1 RUST_LOG=info RISC0_PRINT_SEGMENTS=1 \
 cargo test --manifest-path examples/browser-prove/Cargo.toml --release --features cuda \
   <native_stats_test> -- --ignored --nocapture
@@ -192,10 +194,10 @@ Typical command:
 
 ```bash
 WASM_BINDGEN_TEST_TIMEOUT=1200 \
-CHROMEDRIVER=/home/rami/.cache/.wasm-pack/chromedriver-75649e7ca5ae435b/chromedriver \
-/home/rami/.cache/.wasm-pack/wasm-bindgen-c59d5019a2b42393/wasm-bindgen-test-runner \
+CHROMEDRIVER=~/.cache/.wasm-pack/chromedriver-75649e7ca5ae435b/chromedriver \
+~/.cache/.wasm-pack/wasm-bindgen-c59d5019a2b42393/wasm-bindgen-test-runner \
   --nocapture \
-  /home/rami/repos/risc0/examples/target/wasm32-unknown-unknown/release/deps/browser_prove-0d71f73dbf7c3024.wasm \
+  examples/target/wasm32-unknown-unknown/release/deps/browser_prove-0d71f73dbf7c3024.wasm \
   <browser_test_filter>
 ```
 
@@ -763,7 +765,7 @@ The next verification commands should start small:
 
 ```bash
 # Native CUDA baseline
-RECURSION_SRC_PATH=/home/rami/repos/risc0/examples/target/release/build/risc0-circuit-recursion-4e96382f0d1db440/out/recursion_zkr.zip \
+RECURSION_SRC_PATH=examples/target/release/build/risc0-circuit-recursion-4e96382f0d1db440/out/recursion_zkr.zip \
 RISC0_PROVER=local RISC0_EXECUTOR=local RISC0_INFO=1 RUST_LOG=info RISC0_PRINT_SEGMENTS=1 \
 cargo test --manifest-path examples/browser-prove/Cargo.toml --release --features cuda \
   native_stats_tests::native_cfg_prove_stats -- --ignored --nocapture
@@ -771,10 +773,10 @@ cargo test --manifest-path examples/browser-prove/Cargo.toml --release --feature
 # Browser async proof
 cd examples/browser-prove
 WASM_BINDGEN_TEST_TIMEOUT=1200 \
-CHROMEDRIVER=/home/rami/.cache/.wasm-pack/chromedriver-75649e7ca5ae435b/chromedriver \
-/home/rami/.cache/.wasm-pack/wasm-bindgen-c59d5019a2b42393/wasm-bindgen-test-runner \
+CHROMEDRIVER=~/.cache/.wasm-pack/chromedriver-75649e7ca5ae435b/chromedriver \
+~/.cache/.wasm-pack/wasm-bindgen-c59d5019a2b42393/wasm-bindgen-test-runner \
   --nocapture \
-  /home/rami/repos/risc0/examples/target/wasm32-unknown-unknown/release/deps/browser_prove-0d71f73dbf7c3024.wasm \
+  examples/target/wasm32-unknown-unknown/release/deps/browser_prove-0d71f73dbf7c3024.wasm \
   internal_cfg_succinct_receipt_verifies
 ```
 

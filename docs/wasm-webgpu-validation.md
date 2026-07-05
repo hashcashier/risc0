@@ -1,5 +1,7 @@
 # WASM/WebGPU Prover Validation
 
+> **Note:** `.recursive/...` evidence paths referenced in this document are preserved on the `wasm` archive branch; the presentation branch omits that process tree.
+
 Status: R1 smoke matrix refreshed 2026-05-12 (RTX 5090 + Chrome 148). xgboost SP-CR resolved 2026-05-12 via D14+D15+D16 GPU-only fix in `risc0/zkp/src/hal/webgpu.rs` (`onuncapturederror` listener, cached NTT roots, `Rc<WebGpuBufferOwner>` with Drop-destroy for explicit GPU memory release); xgboost verifies in 117.92 s on the full GPU path (~21× native CUDA). Run governed by the **Correctness-First Discipline** in `.recursive/run/wasm-webgpu-prover-perf/addenda/02-to-be-plan.addendum-01.md`; performance follow-up SP10+ unblocked.
 
 This file records the current correctness matrix for the browser WebGPU prover.
@@ -34,7 +36,7 @@ xgboost succinct receipt now verifies in 117.92 s on the full GPU path
 Native CUDA baseline helpers:
 
 ```bash
-RECURSION_SRC_PATH=/home/rami/repos/risc0/examples/target/release/build/risc0-circuit-recursion-4e96382f0d1db440/out/recursion_zkr.zip \
+RECURSION_SRC_PATH=examples/target/release/build/risc0-circuit-recursion-4e96382f0d1db440/out/recursion_zkr.zip \
 RISC0_PROVER=local RISC0_EXECUTOR=local RISC0_INFO=1 RUST_LOG=info RISC0_PRINT_SEGMENTS=1 \
   cargo test --manifest-path examples/browser-prove/Cargo.toml --release --features cuda \
   <native_stats_test> -- --ignored --nocapture
@@ -45,10 +47,10 @@ checked-in `webdriver.json` is discovered:
 
 ```bash
 WASM_BINDGEN_TEST_TIMEOUT=7200 \
-CHROMEDRIVER=/home/rami/.cache/.wasm-pack/chromedriver-75649e7ca5ae435b/chromedriver \
-/home/rami/.cache/.wasm-pack/wasm-bindgen-c59d5019a2b42393/wasm-bindgen-test-runner \
+CHROMEDRIVER=~/.cache/.wasm-pack/chromedriver-75649e7ca5ae435b/chromedriver \
+~/.cache/.wasm-pack/wasm-bindgen-c59d5019a2b42393/wasm-bindgen-test-runner \
   --nocapture \
-  /home/rami/repos/risc0/examples/target/wasm32-unknown-unknown/release/deps/browser_prove-0d71f73dbf7c3024.wasm \
+  examples/target/wasm32-unknown-unknown/release/deps/browser_prove-0d71f73dbf7c3024.wasm \
   <browser_test_filter>
 ```
 
@@ -68,7 +70,7 @@ release test-artifact rebuild after converting the parity harness to async
 proving helpers and removing unused sync helpers took 1m57s and produces:
 
 ```text
-/home/rami/repos/risc0/examples/target/wasm32-unknown-unknown/release/deps/browser_prove-0d71f73dbf7c3024.wasm
+examples/target/wasm32-unknown-unknown/release/deps/browser_prove-0d71f73dbf7c3024.wasm
 ```
 
 The broader examples workspace wasm build is not treated as the browser prover

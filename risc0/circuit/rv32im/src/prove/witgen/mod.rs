@@ -138,6 +138,7 @@ where
     /// the sync `generate_witness`. Splitting these phases is the
     /// architectural fix for the CPU/GPU shadow desync that blocked
     /// iter-6d-g step 6.2.7.
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
     #[allow(clippy::type_complexity)]
     pub fn allocate_buffers(
         hal: &H,
@@ -162,31 +163,10 @@ where
         (global, code, data)
     }
 
-    /// SP7 iter 6d-g step 6.2.8: complete the witgen pipeline from pre-
-    /// allocated buffers. Runs `generate_witness`, zeroizes, allocates
-    /// accum. Caller is responsible for any pre-witgen async work (e.g.
-    /// `WebGpuCircuitHal::pre_witgen_dispatch_async` + `sync_gpu_to_cpu`).
-    pub fn populate_from_parts<C: CircuitWitnessGenerator<H>>(
-        hal: &H,
-        circuit_hal: &C,
-        mode: StepMode,
-        trace: PreflightTrace,
-        cycles: usize,
-        global: MetaBuffer<H>,
-        code: MetaBuffer<H>,
-        data: MetaBuffer<H>,
-    ) -> Result<Self> {
-        circuit_hal
-            .generate_witness(mode, &trace, &global, &data)
-            .context("witness generation failure")?;
-        Ok(Self::assemble_after_witgen(
-            hal, trace, cycles, global, code, data,
-        ))
-    }
-
-    /// M6d: the post-witgen half of [`Self::populate_from_parts`] —
-    /// zeroize + accum allocation + struct assembly — for async callers
-    /// that ran the witness pass out of line (pool-offloaded witgen).
+    /// M6d: post-witgen assembly — zeroize + accum allocation + struct
+    /// assembly — for async callers that ran the witness pass out of
+    /// line (pool-offloaded witgen).
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
     pub fn assemble_after_witgen(
         hal: &H,
         trace: PreflightTrace,
@@ -210,6 +190,7 @@ where
 
     /// SP7 iter 6d-g step 6.2.8: accessors so async callers can pull
     /// `PreflightResults` fields without consuming the struct.
+    #[cfg(all(feature = "webgpu", target_arch = "wasm32", target_os = "unknown"))]
     pub fn preflight_components(
         preflight: PreflightResults,
     ) -> (Vec<Val>, Injector, usize, PreflightTrace, u32) {

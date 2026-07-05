@@ -1,5 +1,7 @@
 # Browser WebGPU vs Native CUDA Proving
 
+> **Note:** `.recursive/...` evidence paths referenced in this document are preserved on the `wasm` archive branch; the presentation branch omits that process tree.
+
 Status: **SP11 closeout 2026-05-15, with follow-on evidence through
 2026-05-18.** Cumulative phase work
 (SP3–SP9) brings xgboost wall to 102.7 s (18.0× CUDA). SP6 closed
@@ -161,7 +163,7 @@ runtime gap.
 All native baselines should be measured before browser runs with:
 
 ```bash
-RECURSION_SRC_PATH=/home/rami/repos/risc0/examples/target/release/build/risc0-circuit-recursion-4e96382f0d1db440/out/recursion_zkr.zip \
+RECURSION_SRC_PATH=examples/target/release/build/risc0-circuit-recursion-4e96382f0d1db440/out/recursion_zkr.zip \
 RISC0_PROVER=local RISC0_EXECUTOR=local RISC0_INFO=1 RUST_LOG=info RISC0_PRINT_SEGMENTS=1
 ```
 

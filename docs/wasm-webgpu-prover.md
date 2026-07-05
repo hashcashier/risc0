@@ -1,5 +1,7 @@
 # WASM/WebGPU Prover
 
+> **Note:** `.recursive/...` evidence paths referenced in this document are preserved on the `wasm` archive branch; the presentation branch omits that process tree.
+
 Status: performance follow-up run `wasm-webgpu-prover-perf` underway (Phase 0–8 LOCKED 2026-05-12). SP1 baselines captured, SP2 seed landed, SP10 partial hit a multi-segment correctness regression — see Plan Addendum 01.
 
 See `docs/wasm-webgpu-prover-learnings.md` for the pause handoff, current
