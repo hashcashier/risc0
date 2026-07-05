@@ -33,7 +33,7 @@ use std::mem;
 
 use anyhow::{anyhow, ensure, Result};
 
-use super::{byte_len_for, WebGpuHal};
+use super::{dispatch::byte_len_for, WebGpuHal};
 // `size` and `view` are on the `super::super::Buffer` trait, not
 // inherent methods on `WebGpuBuffer`. Bring the trait into scope.
 use super::super::Buffer as _;

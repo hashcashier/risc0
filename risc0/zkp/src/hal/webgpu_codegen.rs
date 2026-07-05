@@ -16,7 +16,7 @@
 //!
 //! Walks a `PolyExtStepDef` and emits straight-line WGSL whose semantics
 //! match `risc0_zkp::adapter::PolyExtExecutor` and the runtime interpreter
-//! shader in `webgpu.rs` (`EVAL_CHECK_BASE_INTERPRETER_WGSL` /
+//! shader in `hal::webgpu` (`EVAL_CHECK_BASE_INTERPRETER_WGSL` /
 //! `EVAL_CHECK_EXT_INTERPRETER_WGSL`). Two modes mirror the interpreter's
 //! base-field vs extension-field split:
 //!
@@ -51,8 +51,8 @@ use crate::adapter::{PolyExtStep, PolyExtStepDef};
 
 // ============================================================================
 // Slot allocation primitives shared with the runtime interpreter in
-// `risc0/zkp/src/hal/webgpu.rs`. Kept in this module (not in `webgpu.rs`)
-// because `webgpu.rs` is wasm32-only while this module is feature-gated
+// `risc0/zkp/src/hal/webgpu/`. Kept in this module (not in `hal::webgpu`)
+// because `hal::webgpu` is wasm32-only while this module is feature-gated
 // only by `webgpu` — the slot-allocation logic itself is pure Rust and is
 // reused by the staged-WGSL emitter below to keep `fp_slots` / `mix_slots`
 // bounded by the live set rather than `block.len()`.
@@ -224,14 +224,14 @@ pub struct StagedKernel {
     pub workgroup_size: u32,
     /// The WGSL source code for this kernel's *body*. The runtime prelude
     /// (bindings, params, arithmetic helpers, `read_tap` / `read_global` /
-    /// `load_mix_pow` / `write_check`) is provided by `webgpu.rs` and
+    /// `load_mix_pow` / `write_check`) is provided by `hal::webgpu` and
     /// concatenated by the dispatch wiring.
     pub wgsl_source: String,
 }
 
 /// Default `workgroup_size` for the staged eval_check
 /// kernel. Mirrors the runtime interpreter's Ext-mode dispatch
-/// (`WEBGPU_EVAL_CHECK_INTERPRETER_WORKGROUP_SIZE` in `webgpu.rs`).
+/// (`WEBGPU_EVAL_CHECK_INTERPRETER_WORKGROUP_SIZE` in `hal::webgpu`).
 /// Function-scope `var` arrays are per-thread private memory —
 /// drivers spill to per-thread local memory automatically — so we
 /// don't bound the per-thread footprint here. The size of 32 covers
@@ -848,7 +848,7 @@ pub fn staged_kernel_from_def(
 /// (`write_check`).
 ///
 /// The prelude binding layout intentionally matches the runtime
-/// interpreter's at `webgpu.rs:EVAL_CHECK_BASE_INTERPRETER_WGSL`, MINUS
+/// interpreter's `EVAL_CHECK_BASE_INTERPRETER_WGSL`, MINUS
 /// the `instrs` binding and `instr_*` params (the staged kernel embeds
 /// the DEF inline, so there's no instruction stream to read). The dispatch
 /// wiring reuses the same `Params` UBO — staged dispatches simply leave

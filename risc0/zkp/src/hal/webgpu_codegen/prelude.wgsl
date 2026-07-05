@@ -10,7 +10,7 @@
 // `read_tap_scalar`/`read_tap_ext`, `read_global_scalar`/`read_global_ext`,
 // `load_mix_pow`, and `write_check` — all defined here.
 //
-// The dispatch path (`dispatch_eval_check_poly_ext_staged` in `webgpu.rs`)
+// The dispatch path (`dispatch_eval_check_poly_ext_staged` in `hal::webgpu`)
 // concatenates this prelude with the generated body, creates a pipeline
 // via the existing `create_compute_kernel`, binds the same buffers as the
 // interpreter (sans `instrs`), and dispatches.

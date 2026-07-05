@@ -1991,7 +1991,7 @@ const WITGEN_GPU_MEM1_REPLACE_MINOR_MASK_ALL: u16 = 0x0007;
 static WITGEN_GPU_MEM1_REPLACE_MINOR_MASK: AtomicU16 =
     AtomicU16::new(WITGEN_GPU_MEM1_REPLACE_MINOR_MASK_ALL);
 // Legacy process-wide gate kept for the public setter so callers can
-// flip the feature on/off; webgpu.rs reads this to decide whether to
+// flip the feature on/off; the webgpu HAL reads this to decide whether to
 // populate WITGEN_GPU_REPLACE_ARM_MASK each segment.
 static WITGEN_GPU_REPLACE_ENABLED: AtomicBool = AtomicBool::new(false);
 static WITGEN_GPU_SHORT_CIRCUIT_CYCLES: AtomicUsize = AtomicUsize::new(0);

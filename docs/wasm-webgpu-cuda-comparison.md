@@ -412,7 +412,7 @@ implementation replaces the single-buffer assumption.
 - Browser prover orchestration and stage telemetry:
   `risc0/zkvm/src/host/server/prove/prover_impl.rs`
 - WebGPU ZKP HAL and buffer diagnostics:
-  `risc0/zkp/src/hal/webgpu.rs`
+  `risc0/zkp/src/hal/webgpu/`
 - Browser circuit HALs:
   `risc0/circuit/rv32im/src/prove/hal/webgpu.rs`,
   `risc0/circuit/keccak/src/prove/hal/webgpu.rs`,

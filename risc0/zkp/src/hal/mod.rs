@@ -26,7 +26,7 @@ pub mod webgpu;
 // `webgpu_codegen` produces WGSL source strings; the codegen itself has no
 // WebGPU runtime dependency so it builds (and its unit tests run) on native
 // targets too. The actual WebGPU integration that consumes its output lives
-// in `webgpu.rs` and stays wasm32-gated.
+// in `hal::webgpu` and stays wasm32-gated.
 #[cfg(feature = "webgpu")]
 pub mod webgpu_codegen;
 
