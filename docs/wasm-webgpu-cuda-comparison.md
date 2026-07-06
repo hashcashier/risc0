@@ -2,7 +2,18 @@
 
 > **Note:** `.recursive/...` evidence paths referenced in this document are preserved on the `wasm` archive branch; the presentation branch omits that process tree.
 
-Status: **SP11 closeout 2026-05-15, with follow-on evidence through
+Status (2026-07, M-era close): browser xgboost proving lands at
+**14.7 s** vs **5.7 s** native CUDA on the same RTX 5090 — **≈2.6×**
+(browser median 2026-07-05, fast environment state; CUDA baseline
+2026-05-15). KeccakUnion(3) (11 segments + 25 keccak proofs) lands at
+106.4 s vs 20.7 s — ≈5.1×. The M-era summary in
+`docs/wasm-webgpu-prover-learnings.md` covers how the wall came down
+from the ledger below (eval_check interpreter arc to ~60 s, then the
+M-phases to 14.7 s).
+
+## SP-era optimization ledger (2026-05)
+
+**SP11 closeout 2026-05-15, with follow-on evidence through
 2026-05-18.** Cumulative phase work
 (SP3–SP9) brings xgboost wall to 102.7 s (18.0× CUDA). SP6 closed
 2026-05-15: KeccakUnion(3) eval_check fully on GPU
@@ -55,7 +66,7 @@ SP7c profiled recursion accumulation and found no cheap prefix-scan analogue:
 prefix products are only 59 ms across xgboost, while generated
 `compute_accum`/`verify_accum` total 5.66 s.
 
-## Final per-fixture matrix (2026-05-15)
+## Per-fixture matrix (2026-05-15 snapshot)
 
 Hardware: RTX 5090 (32 GB, SM120/Blackwell, CUDA 13.0), Chrome 148.
 
@@ -67,7 +78,7 @@ Hardware: RTX 5090 (32 GB, SM120/Blackwell, CUDA 13.0), Chrome 148.
 | keccak_union succinct (KeccakUnion(3), 11 seg + 25 keccak) | 20.7 s | 303.2 s | 14.7× | 0.37 | SP6 closed (was SIGKILL > 3600 s) |
 | **xgboost succinct (multi-segment)** | **5.7 s** | **102.7 s** | **18.0×** | **0.44** | refreshed 2026-05-15; 2-slot default scheduled pool smoke 102.82 s; SP6f pipeline cache 103.35 s; SP6g fold-chain dynamic bind group 102.86 s; SP6h NTT dynamic bind groups 102.25 s; SP6i hash_rows output upload removal 101.93 s; SP6j empty scatter fallback cleanup 103.22 s; SP6k device-copy attribution 101.80 s; SP6l in-place dead commit groups 101.97 s; SP6m fused copy-preserving interpolate 102.26 s |
 
-The xgboost ratio 18.0× is the closest current proxy for real-world
+The xgboost ratio 18.0× was the closest real-world proxy at that snapshot
 workloads. R1 single-segment fixtures sit at 6.2-7.2× because their
 per-prove fixed costs dominate.
 
@@ -86,7 +97,7 @@ Smoke `webgpu_pool_two_concurrent_succinct_proves_smoke` runs two independent su
 
 This confirms that two `web_sys::GpuDevice` instances can feed independent command queues and raise utilization. Follow-on SP6d evidence narrows the performance claim: homogeneous same-GPU work and lift/join-heavy xgboost stay flat, while heterogeneous KeccakUnion-style dependency graphs can see a modest scheduler win (~8% in iter 9).
 
-## Structural residuals (still > 1.0× CUDA)
+## Structural residuals (2026-05 analysis)
 
 Every measured fixture remains above 1.0× CUDA. Reasons:
 
@@ -267,7 +278,12 @@ buffers=2032 buffer_bytes=1736647420
 | Transcript and verification | Existing receipt assembly and verifier logic are reused. Internal `verify_segment`, `verify_lift`, and `verify_composite` timings are milliseconds and are not the blocker. | Existing receipt assembly and verifier logic are reused. Verification work is also not the dominant cost. |
 | Receipt compatibility | Produces standard succinct receipts that verify with the existing verifier for the passing browser cases. | Produces the native reference receipts used as the parity baseline. |
 
-## Why The Browser Path Is CPU-Bound Today
+## Why The Browser Path Was CPU-Bound (2026-05 analysis)
+
+*(Snapshot analysis. Later phases removed or offloaded most of the
+CPU-side work described here; the closing bottlenecks were
+submission/idle overheads — see the M-era summary in
+`docs/wasm-webgpu-prover-learnings.md`.)*
 
 The public async browser proof path is now GPU-authoritative for STARK
 commit/finalize in the focused segment and recursion paths. The remaining gap
@@ -341,7 +357,7 @@ path for oversized input bindings. The focused `poseidon2_basic` proof now
 records `mix_poly_coeffs` as 8 GPU dispatches and 0 CPU fallbacks while still
 producing a verified succinct receipt.
 
-## GPU-Authoritative Refactor Status
+## GPU-Authoritative Refactor Status (2026-05)
 
 The async/GPU-authoritative slice is implemented in the HAL, ZKP proof layers,
 and focused public browser proving path:
@@ -384,7 +400,7 @@ GPU allocation with `GPUSupportedLimits.maxBufferSize`, and the proof path
 keeps the CPU fallback for oversized gather sources until a tiled multi-buffer
 implementation replaces the single-buffer assumption.
 
-## Optimization Priorities
+## Optimization Priorities (2026-05 roadmap — since executed or closed)
 
 1. Replace temporary recursion `group2` chunk uploads with a tiled/staged
    GPU-resident representation so recursion `eval_check`, gather, and related

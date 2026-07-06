@@ -3827,7 +3827,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let mut compile_ok = true;
             for (si, src) in sources.iter().enumerate() {
                 total_bytes += src.len();
-                match hal.create_compute_kernel("codegen_chunk_stage", src, "main", &[layout.clone()]) {
+                match hal.create_compute_kernel(
+                    "codegen_chunk_stage",
+                    src,
+                    "main",
+                    &[layout.clone()],
+                ) {
                     Ok(k) => kernels.push(k),
                     Err(e) => {
                         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
@@ -4178,14 +4183,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 ],
             )
             .expect("layout");
-        let kernel =
-            match hal.create_compute_kernel("compile_probe_kernel", module, entry, &[layout.clone()]) {
-                Ok(k) => k,
-                Err(e) => {
-                    log(&format!("compile_FAILED err={e:?}"));
-                    return false;
-                }
-            };
+        let kernel = match hal.create_compute_kernel(
+            "compile_probe_kernel",
+            module,
+            entry,
+            &[layout.clone()],
+        ) {
+            Ok(k) => k,
+            Err(e) => {
+                log(&format!("compile_FAILED err={e:?}"));
+                return false;
+            }
+        };
         let data_buf = hal
             .create_storage_buffer("compile_probe_data", STORAGE_BYTES)
             .expect("data buf");
@@ -6258,8 +6267,9 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         const LAYOUT: &str = include_str!("witgen_wgsl/layout.wgsl.inc");
         const STEPS_TOP: &str = include_str!("witgen_wgsl/steps_step_Top.pruned.wgsl");
 
-        let module =
-            format!("{PRELUDE}\n{TYPES}\n{LAYOUT}\n{STEPS_TOP}\n{WITGEN_NOP_ENTRY}\n{WITGEN_TOP_ENTRY}");
+        let module = format!(
+            "{PRELUDE}\n{TYPES}\n{LAYOUT}\n{STEPS_TOP}\n{WITGEN_NOP_ENTRY}\n{WITGEN_TOP_ENTRY}"
+        );
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
             "codegen_top pruned module assembled: {} bytes",
             module.len()
@@ -6346,8 +6356,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         const ARM5: &str =
             include_str!("../../../risc0/circuit/rv32im/src/zirgen/topaccum_arm5.wgsl");
 
-        let arm5 =
-            format!("{PRELUDE}\n{TYPES}\n{LAYOUT}\n{ARM5}\n{TOPACCUM_ARM5_GUARDED_ENTRY}");
+        let arm5 = format!("{PRELUDE}\n{TYPES}\n{LAYOUT}\n{ARM5}\n{TOPACCUM_ARM5_GUARDED_ENTRY}");
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
             "codegen_topaccum_arm5 split module assembled: {} bytes",
             arm5.len()
@@ -6358,17 +6367,17 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         );
     }
 
-    /// End-to-end check: the probe-mode GPU witgen
-    /// path runs alongside rust_steps on xgboost, with the
-    /// async Tint prewarm overlapping guest execution. Measures the
-    /// `witgen_prewarm_async` and `witgen_probe`
-    /// stage timers so future sessions can reason about when the
-    /// kernel becomes ready vs. when each segment dispatches.
+    /// End-to-end prewarm measurement: probe mode compiles the
+    /// per-arm witgen kernels in the background while rust_steps
+    /// stays authoritative, with the async Tint prewarm overlapping
+    /// guest execution. Measures the `witgen_prewarm_async` and
+    /// `witgen_arm_prewarm` stage timers so future sessions can
+    /// reason about when each kernel becomes ready.
     ///
-    /// Uses xgboost (multi-segment) so by segment N the prewarm has
-    /// had time to finish; the probe then dispatches on segments
-    /// N..=11. If the kernel isn't ready by segment N, the probe logs
-    /// `SKIP kernel_not_ready` for that segment.
+    /// Uses xgboost (multi-segment) so the prewarm has segments to
+    /// overlap with. (`init_prover` enables the full acceleration
+    /// set by default; the explicit flag set here keeps the fixture
+    /// meaningful if that default changes.)
     #[wasm_bindgen_test(async)]
     async fn witgen_gpu_probe_xgboost() {
         use forust_ml::GradientBooster;
@@ -6420,7 +6429,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         console_error_panic_hook::set_once();
         risc0_zkp::hal::webgpu::log_webgpu_metric(
-            "iter6d_g replace=on fixture=busy_loop+keccak_union",
+            "witgen_gpu replace=on fixture=busy_loop+keccak_union",
         );
         set_witgen_gpu_probe_enabled(true);
         set_witgen_gpu_replace_enabled(true);
@@ -6693,7 +6702,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         console_error_panic_hook::set_once();
         risc0_zkp::hal::webgpu::log_webgpu_metric(
-            "iter6d_g preflight_meta_reuse fixture=busy_loop",
+            "witgen_gpu preflight_meta_reuse fixture=busy_loop",
         );
         set_witgen_gpu_probe_enabled(true);
         set_witgen_gpu_replace_enabled(true);
@@ -6769,7 +6778,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         console_error_panic_hook::set_once();
         risc0_zkp::hal::webgpu::log_webgpu_metric(
-            "iter6d_g replace=mem0_direct_accum_candidate fixture=busy_loop+keccak_union",
+            "witgen_gpu replace=mem0_direct_accum_candidate fixture=busy_loop+keccak_union",
         );
         set_witgen_gpu_probe_enabled(true);
         set_witgen_gpu_replace_enabled(true);
@@ -6855,7 +6864,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         console_error_panic_hook::set_once();
         risc0_zkp::hal::webgpu::log_webgpu_metric(
-            "iter6d_g replace=mem0_direct_accum_candidate fixture=xgboost",
+            "witgen_gpu replace=mem0_direct_accum_candidate fixture=xgboost",
         );
         set_witgen_gpu_probe_enabled(true);
         set_witgen_gpu_replace_enabled(true);
@@ -6925,7 +6934,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         console_error_panic_hook::set_once();
         risc0_zkp::hal::webgpu::log_webgpu_metric(
-            "iter6d_g replace=mem0_lw_direct_accum_candidate fixture=busy_loop+keccak_union",
+            "witgen_gpu replace=mem0_lw_direct_accum_candidate fixture=busy_loop+keccak_union",
         );
         set_witgen_gpu_probe_enabled(true);
         set_witgen_gpu_replace_enabled(true);
@@ -7041,7 +7050,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         console_error_panic_hook::set_once();
         risc0_zkp::hal::webgpu::log_webgpu_metric(
-            "iter6d_g replace=mem0_lw_direct_accum_candidate fixture=xgboost",
+            "witgen_gpu replace=mem0_lw_direct_accum_candidate fixture=xgboost",
         );
         set_witgen_gpu_probe_enabled(true);
         set_witgen_gpu_replace_enabled(true);
@@ -7126,7 +7135,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         console_error_panic_hook::set_once();
         risc0_zkp::hal::webgpu::log_webgpu_metric(
-            "iter6d_g replace=mem1_direct_accum_candidate fixture=busy_loop+keccak_union",
+            "witgen_gpu replace=mem1_direct_accum_candidate fixture=busy_loop+keccak_union",
         );
         set_accum_gpu_mem1_direct_enabled(true);
 
@@ -7218,7 +7227,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         console_error_panic_hook::set_once();
         risc0_zkp::hal::webgpu::log_webgpu_metric(
-            "iter6d_g replace=mem1_direct_accum_candidate fixture=xgboost",
+            "witgen_gpu replace=mem1_direct_accum_candidate fixture=xgboost",
         );
         set_accum_gpu_mem1_direct_enabled(true);
 
@@ -7287,7 +7296,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         console_error_panic_hook::set_once();
         risc0_zkp::hal::webgpu::log_webgpu_metric(
-            "iter6d_g replace=control0_direct_accum_candidate fixture=busy_loop+keccak_union",
+            "witgen_gpu replace=control0_direct_accum_candidate fixture=busy_loop+keccak_union",
         );
         set_accum_gpu_control0_direct_enabled(true);
 
@@ -7379,7 +7388,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         console_error_panic_hook::set_once();
         risc0_zkp::hal::webgpu::log_webgpu_metric(
-            "iter6d_g replace=control0_direct_accum_candidate fixture=xgboost",
+            "witgen_gpu replace=control0_direct_accum_candidate fixture=xgboost",
         );
         set_accum_gpu_control0_direct_enabled(true);
 
@@ -7449,7 +7458,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         console_error_panic_hook::set_once();
         risc0_zkp::hal::webgpu::log_webgpu_metric(
-            "iter6d_g replace=mem1_witgen_candidate fixture=busy_loop+keccak_union",
+            "witgen_gpu replace=mem1_witgen_candidate fixture=busy_loop+keccak_union",
         );
         set_witgen_gpu_probe_enabled(true);
         set_witgen_gpu_replace_enabled(true);
@@ -7573,7 +7582,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         console_error_panic_hook::set_once();
         risc0_zkp::hal::webgpu::log_webgpu_metric(
-            "iter6d_g replace=mem1_witgen_candidate fixture=xgboost",
+            "witgen_gpu replace=mem1_witgen_candidate fixture=xgboost",
         );
         set_witgen_gpu_probe_enabled(true);
         set_witgen_gpu_replace_enabled(true);
@@ -7667,7 +7676,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         console_error_panic_hook::set_once();
         risc0_zkp::hal::webgpu::log_webgpu_metric(
-            "iter6d_g replace=mem1_witgen_nonblocking_candidate fixture=busy_loop+keccak_union",
+            "witgen_gpu replace=mem1_witgen_nonblocking_candidate fixture=busy_loop+keccak_union",
         );
         set_witgen_gpu_probe_enabled(true);
         set_witgen_gpu_replace_enabled(true);
@@ -7792,7 +7801,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         console_error_panic_hook::set_once();
         risc0_zkp::hal::webgpu::log_webgpu_metric(
-            "iter6d_g replace=mem1_witgen_nonblocking_candidate fixture=xgboost",
+            "witgen_gpu replace=mem1_witgen_nonblocking_candidate fixture=xgboost",
         );
         set_witgen_gpu_probe_enabled(true);
         set_witgen_gpu_replace_enabled(true);
@@ -7887,7 +7896,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         console_error_panic_hook::set_once();
         risc0_zkp::hal::webgpu::log_webgpu_metric(
-            "iter6d_g replace=nonblocking_prewarm_candidate fixture=xgboost",
+            "witgen_gpu replace=nonblocking_prewarm_candidate fixture=xgboost",
         );
         set_witgen_gpu_replace_nonblocking_pending_enabled(true);
 
@@ -7951,7 +7960,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         console_error_panic_hook::set_once();
         risc0_zkp::hal::webgpu::log_webgpu_metric(
-            "iter6d_g replace=nonblocking_prewarm_candidate fixture=busy_loop+keccak_union",
+            "witgen_gpu replace=nonblocking_prewarm_candidate fixture=busy_loop+keccak_union",
         );
         set_witgen_gpu_replace_nonblocking_pending_enabled(true);
 
@@ -8045,7 +8054,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         use xgboost_methods::{XGBOOST_ELF, XGBOOST_ID};
 
         console_error_panic_hook::set_once();
-        risc0_zkp::hal::webgpu::log_webgpu_metric("iter6d_g replace=on fixture=xgboost");
+        risc0_zkp::hal::webgpu::log_webgpu_metric("witgen_gpu replace=on fixture=xgboost");
         set_witgen_gpu_probe_enabled(true);
         set_witgen_gpu_replace_enabled(true);
         set_accum_gpu_misc0_direct_enabled(true);
@@ -8173,7 +8182,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         use xgboost_methods::{XGBOOST_ELF, XGBOOST_ID};
 
         console_error_panic_hook::set_once();
-        risc0_zkp::hal::webgpu::log_webgpu_metric("iter6d_g diff=on fixture=xgboost");
+        risc0_zkp::hal::webgpu::log_webgpu_metric("witgen_gpu diff=on fixture=xgboost");
         set_witgen_gpu_diff_enabled(true);
 
         let prover = init_prover().await;
@@ -8199,7 +8208,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
 
         console_error_panic_hook::set_once();
-        risc0_zkp::hal::webgpu::log_webgpu_metric("iter6d_g diff=on fixture=busy_loop");
+        risc0_zkp::hal::webgpu::log_webgpu_metric("witgen_gpu diff=on fixture=busy_loop");
         set_witgen_gpu_diff_enabled(true);
 
         let prover = init_prover().await;
@@ -8229,7 +8238,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         console_error_panic_hook::set_once();
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "iter6d_g diff=on fixture=busy_loop candidate_major={major}",
+            "witgen_gpu diff=on fixture=busy_loop candidate_major={major}",
         ));
         set_witgen_gpu_diff_major(Some(major));
         set_witgen_gpu_diff_enabled(true);
@@ -8291,7 +8300,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         use risc0_zkvm_methods::{multi_test::MultiTestSpec, MULTI_TEST_ELF, MULTI_TEST_ID};
 
         console_error_panic_hook::set_once();
-        risc0_zkp::hal::webgpu::log_webgpu_metric("iter6d_g replace-diff=on fixture=busy_loop");
+        risc0_zkp::hal::webgpu::log_webgpu_metric("witgen_gpu replace-diff=on fixture=busy_loop");
         set_witgen_gpu_probe_enabled(true);
         set_witgen_gpu_replace_enabled(true);
         set_witgen_gpu_diff_enabled(true);
@@ -8326,7 +8335,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         use xgboost_methods::{XGBOOST_ELF, XGBOOST_ID};
 
         console_error_panic_hook::set_once();
-        risc0_zkp::hal::webgpu::log_webgpu_metric("iter6d_g replace-diff=on fixture=xgboost");
+        risc0_zkp::hal::webgpu::log_webgpu_metric("witgen_gpu replace-diff=on fixture=xgboost");
         set_witgen_gpu_probe_enabled(true);
         set_witgen_gpu_replace_enabled(true);
         set_witgen_gpu_diff_enabled(true);
@@ -8432,17 +8441,22 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             EXEC_SHA0_CHUNK0_ONLY_COMPUTE_ENTRY,
         );
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "iter6d_g assembled module_bytes={}",
+            "assembled_arm_kernel sha0 module_bytes={}",
             module.len()
         ));
-        let ok = compile_probe("iter6d_g", &module, "exec_sha0_chunk0_only_main").await;
+        let ok = compile_probe(
+            "assembled_arm_kernel",
+            &module,
+            "exec_sha0_chunk0_only_main",
+        )
+        .await;
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "iter6d_g assembled tint_compile_ok={}",
+            "assembled_arm_kernel sha0 tint_compile_ok={}",
             ok
         ));
         assert!(
             ok,
-            "iter6d_g assembled kernel must Tint-compile -- otherwise \
+            "assembled sha0 arm kernel must Tint-compile -- otherwise \
              the runtime-assemble path is broken"
         );
     }
@@ -8497,26 +8511,24 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         console_error_panic_hook::set_once();
         let module = format!("{EXEC_TOP_CHUNK0_ALL_WGSL}{EXEC_TOP_CHUNK0_ALL_COMPUTE_ENTRY}");
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "iter6d_f all-chunks module_bytes={}",
+            "all_chunks module_bytes={}",
             module.len()
         ));
-        let ok = compile_probe("iter6d_f", &module, "exec_top_chunk0_all_main").await;
-        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-            "iter6d_f all-chunks tint_compile_ok={}",
-            ok
-        ));
+        let ok = compile_probe("all_chunks", &module, "exec_top_chunk0_all_main").await;
+        risc0_zkp::hal::webgpu::log_webgpu_metric(&format!("all_chunks tint_compile_ok={}", ok));
         // Soft assertion: log the result either way so we have data
         // even if Tint rejects. The witness-replacement path needs
         // this to compile, but failure is data, not test failure.
         if !ok {
             risc0_zkp::hal::webgpu::log_webgpu_metric(
-                "iter6d_f VERDICT: 2.35 MB exceeds Chrome whole-module cliff; \
+                "all_chunks VERDICT: 2.35 MB exceeds Chrome whole-module cliff; \
                  per-major-opcode dispatch needed instead of single fat module",
             );
         } else {
             risc0_zkp::hal::webgpu::log_webgpu_metric(
-                "iter6d_f VERDICT: all-chunks module compiles + dispatches; \
-                 next step is wiring as rust_steps replacement",
+                "all_chunks VERDICT: whole-module compile unexpectedly succeeded; \
+                 the Chrome module-size cliff may be gone -- the per-arm \
+                 dispatch path could be collapsed into one module",
             );
         }
     }
@@ -8538,7 +8550,7 @@ fn topaccum_arm5_guarded_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         };
         console_error_panic_hook::set_once();
         let module = format!("{EXEC_TOP_CHUNK0_WGSL}{EXEC_TOP_CHUNK0_COMPUTE_ENTRY}");
-        let ok = compile_probe("iter6d_a", &module, "exec_top_chunk0_main").await;
+        let ok = compile_probe("exec_top_chunk0", &module, "exec_top_chunk0_main").await;
         assert!(
             ok,
             "exec_TopChunk0 + @compute wrapper must compile on Chrome Tint"
@@ -8690,10 +8702,10 @@ fn witgen_top_full(@builtin(global_invocation_id) gid: vec3<u32>) {
         risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
             "codegen_full verdict: nop_ok={nop_ok} witgen_top_full_ok={full_ok} -- {}",
             if full_ok {
-                "UNEXPECTED: full step_Top closure dispatched -- contradicts iter-5c"
+                "UNEXPECTED: full step_Top closure dispatched -- contradicts the earlier whole-closure device-loss finding"
             } else if nop_ok {
-                "expected: full step_Top closure (1.68 MB) device-loses, same as \
-                 iter-5c -- chunked module behaves normally"
+                "expected: full step_Top closure (1.68 MB) device-loses at the \
+                 whole-closure cliff -- chunked module behaves normally"
             } else {
                 "nop failed on the 2.12 MB chunked module -- whole-module ceiling \
                  issue, re-check"

@@ -2,7 +2,7 @@
 
 > **Note:** `.recursive/...` evidence paths referenced in this document are preserved on the `wasm` archive branch; the presentation branch omits that process tree.
 
-Status: optimization campaign complete through M11 (2026-07) — browser xgboost proving lands within ~2.5× of native CUDA on the same GPU. Labels like `SP<N>`/`M<N>` in these docs name campaign phases; see `docs/wasm-webgpu-prover-learnings.md` for the full narrative.
+Status: optimization campaign complete through M11 (2026-07) — browser xgboost proving lands at ≈2.6× native CUDA on the same GPU (14.7 s vs 5.7 s). Labels like `SP<N>`/`M<N>` in these docs name campaign phases; `docs/wasm-webgpu-prover-learnings.md` records the SP-era in depth and summarizes the M-era in its closing section.
 
 See `docs/wasm-webgpu-prover-learnings.md` for the pause handoff, current
 implementation summary, validation evidence, performance findings, and resume
@@ -218,16 +218,15 @@ Validated so far:
   dispatches and 0 CPU fallbacks. The rv32im and recursion checks use the
   interpreted WebGPU path.
 
-Still required before completion:
-
-- browser runs for the largest public examples: `groth16-verifier`, `xgboost`,
-  and `bn254`
-- large internal fixtures such as BLST and in-guest receipt verification
-- remaining native method, assumption, continuation, PoVW, and bigint2 parity
-  groups
-- accelerator/precompile completion for `multi_test/rsa_compat` and
-  `multi_test/keccak_union`
-- documentation of any native-only exclusions discovered during validation
+Every group this section once listed as outstanding has since landed as
+passing Chrome succinct-proof tests in `examples/browser-prove`: the
+largest public examples (`groth16-verifier`, `xgboost`, `bn254`), BLST
+and in-guest receipt verification, the assumption / continuation /
+PoVW / guest-error and bigint2 parity groups, and the accelerator
+completions (`multi_test/rsa_compat`, `multi_test/keccak_union`). The
+known native-only exclusion (`RunUnconstrained`) is documented below.
+The per-commit correctness gate and the close-out fixture set are
+described in `docs/wasm-webgpu-validation.md`.
 
 Native baselines must be measured before browser attempts using local CUDA
 proving and segment/cycle telemetry:
@@ -243,19 +242,20 @@ segment/cycle counts.
 
 ## Performance Debt
 
-Correctness is the v1 gate, but the current browser proof path is not the final
-performance shape. Proof-critical work should move toward batched WebGPU
-kernels with minimal GPU-to-WASM readback and explicit async boundaries.
+Correctness is the unconditional gate; the performance shape landed
+through the SP- and M-era campaigns (see
+`docs/wasm-webgpu-cuda-comparison.md`). Circuit `eval_check` runs on
+the GPU for all four circuits through the scalar-bank hybrid
+interpreter (PolyExt tape -> instruction stream; dynamically indexed
+vec4 local arrays pay a large Tint tax, so the interpreter uses scalar
+banks). A fully code-generated staged WGSL path also exists behind an
+opt-in flag; it validates bit-exactly but measured ~33x slower than
+the interpreter in Chrome, so it stays scaffolding.
 
-The async browser proof path can now keep STARK commit/finalize buffers
-GPU-authoritative for focused rv32im and recursion proving. The current
-remaining bottlenecks are production-capable WebGPU circuit `eval_check`,
-explicit transcript/Merkle readbacks, and CPU fallbacks for oversized WebGPU
-storage bindings. The `eval_check` hook now exists and a tiny generated WGSL
-`poly_ext` regression passes in Chrome. The generated WGSL path now reuses
-scratch slots instead of emitting one local per `poly_ext` variable, but the
-real generated circuit definitions still exceed the conservative shader-size
-gate and fall back to portable WASM.
+Remaining known performance threads, in measured-impact order:
+recursion transcript/FRI readback elimination (unscoped), the ~590 ms
+fill bubble between segment proofs, and box cooling (the environment
+is bimodal fast/slow — an operational lever, not a code one).
 
 A production `gather_sample` chunking experiment showed that chunked binding
 ranges alone are not enough for recursion-sized matrices: a 512 MiB single
@@ -268,29 +268,25 @@ represent those matrices with tiled or staged WebGPU buffers.
 fixture in this checkout because the native syscall table does not register
 `SYS_FORK` and the corresponding native proving test is ignored.
 
-The accelerator/precompile CUDA baseline passes end-to-end after fixing the
-Poseidon2 syscall address ABI to use byte addresses at the guest/ecall boundary.
-Chrome/WebGPU proves and verifies the smaller accelerator/precompile fixtures,
-but the group is not complete: `multi_test/rsa_compat` and the full
-`multi_test/keccak_union` fixture still time out under the current browser
-proof path before producing succinct receipts. A smaller `KeccakUnion(1)`
-diagnostic now passes as a standalone Chrome/WebGPU succinct proof after the
-async Keccak receipt union fix and async WebGPU Keccak subproof path:
-native CUDA completed the latest focused run in 7.748s with 4 segments
-(refreshed 2026-05-12 RTX 5090), while Chrome/WebGPU completed the same
-4-segment proof in 121.99s — a 15.7× ratio, dramatically improved from the
-prior 441.14s figure. The run had `cpu_only_ops=0`. All ZKP bulk ops except
-`scatter` had 0 CPU fallbacks; the remaining blocker is Keccak circuit
-`eval_check`, which still falls back 3 times in the refreshed run because the
-generic interpreter needs 6741 FP slots > the 1536 cap. The full
-`KeccakUnion(3)` fixture remains a focused performance blocker; native CUDA
-baseline refreshed at 20.676s for SP6 target.
+The accelerator/precompile group is complete end-to-end after fixing
+the Poseidon2 syscall address ABI to use byte addresses at the
+guest/ecall boundary. `multi_test/rsa_compat` and the full
+`multi_test/keccak_union` fixtures — early-era timeouts — now produce
+verified succinct receipts in Chrome: `KeccakUnion(1)` runs at ~34 s
+(it doubles as the environment canary) and `KeccakUnion(3)` (11
+segments + 25 keccak proofs) at 106.4 s vs the 20.7 s native CUDA
+baseline. Keccak circuit `eval_check` runs on the GPU through the
+interpreter (`cpu_fallbacks=0`); the early 1536-FP-slot cap that
+forced its portable-WASM fallback was removed by the scalar-bank
+interpreter banks.
 
-## GPU-Authoritative Work
+## GPU-Authoritative Design
 
-The current `Hal` trait exposes synchronous CPU reads through `Buffer::view`,
-`Buffer::get_at`, and `Buffer::to_vec`. The generic prover uses those reads at
-transcript boundaries:
+The `Hal` trait exposes synchronous CPU reads through `Buffer::view`,
+`Buffer::get_at`, and `Buffer::to_vec`, while browser readback is
+asynchronous. The async browser proof path bridges this with explicit
+async readback points at the transcript boundaries where the generic
+prover consumes GPU results:
 
 - Merkle roots and top layers: `nodes.get_at(1)` and `nodes.slice(...).view(...)`
 - Merkle query openings: gathered samples and sibling digests
@@ -300,9 +296,13 @@ transcript boundaries:
 - Portable circuit HAL bridges that call `to_vec`/`view_mut` for witness and
   check-polynomial work
 
-Making buffers GPU-authoritative therefore requires more than deleting the CPU
-mirror. The browser proof path needs explicit async readback points at the
-transcript boundaries, plus WebGPU or generated browser kernels for the current
-default CPU combo and circuit-HAL paths.
+Between those boundaries, successful WebGPU kernels own their
+outputs; the CPU shadow remains as the correctness bridge for the
+synchronous `Hal` contract and for fallback paths, not as a mirror of
+every intermediate. Readback scheduling matters as much as kernel
+speed here: `mapAsync` completion waits on the whole device queue, and
+all awaiting tasks share one wasm thread, so the prover keeps every
+pending readback inside a single `FuturesUnordered` and pool-offloads
+CPU work that would otherwise starve completion callbacks.
 
 See `docs/requirements/wasm-webgpu-prover.md` for the full acceptance matrix.

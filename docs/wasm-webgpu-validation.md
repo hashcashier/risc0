@@ -2,7 +2,7 @@
 
 > **Note:** `.recursive/...` evidence paths referenced in this document are preserved on the `wasm` archive branch; the presentation branch omits that process tree.
 
-Status: R1 smoke matrix refreshed 2026-05-12 (RTX 5090 + Chrome 148). xgboost SP-CR resolved 2026-05-12 via D14+D15+D16 GPU-only fix in `risc0/zkp/src/hal/webgpu.rs` (`onuncapturederror` listener, cached NTT roots, `Rc<WebGpuBufferOwner>` with Drop-destroy for explicit GPU memory release); xgboost verifies in 117.92 s on the full GPU path (~21× native CUDA). Run governed by the **Correctness-First Discipline** in `.recursive/run/wasm-webgpu-prover-perf/addenda/02-to-be-plan.addendum-01.md`; performance follow-up SP10+ unblocked.
+Status: gates green through the M11 close (2026-07). The per-commit gate is eval_check PolyExt parity (4/4 circuits), the rv32im representative e2e, and xgboost succinct receipt verification in Chrome; close-outs add KeccakUnion(3) (25-keccak union, 106.4 s) and the KeccakUnion(1) environment canary. Current walls: xgboost 14.7 s median, BusyLoop 2.17 s (2026-07-05, fast state). The matrix below is the 2026-05-12 R1 snapshot with its as-measured numbers; the fix narrative in this file (D14/D15/D16 and SP-CR) is preserved as history.
 
 This file records the current correctness matrix for the browser WebGPU prover.
 Native baselines are measured first with the local CUDA prover and the same
@@ -208,7 +208,11 @@ performance-blocked. In the latest focused run it progressed through all 11
 RV32IM segments and into the async Keccak/union proof tree before the 3600s
 browser runner limit killed the process.
 
-## Current Performance Blocker
+## Performance Blocker (2026-05-12 snapshot — since resolved)
+
+*(Resolution: keccak `eval_check` moved onto the GPU via the
+scalar-bank interpreter and `KeccakUnion(3)` completes in 106.4 s;
+see the Status line above.)*
 
 The public async proof path now uses GPU-authoritative ZKP commit/finalize for
 rv32im segment proving and recursion lift. The focused Chrome test
@@ -294,13 +298,12 @@ Additional hidden CPU work remains in the generic prover shape:
 
 ## Remaining Coverage
 
-The following browser groups still need CUDA baselines and/or WebGPU execution
-after the CPU-shadow bottleneck is removed:
-
-- `native_zkvm_method_guests_succinct_receipts_verify`
-- `native_assumption_continuation_povw_and_guest_error_receipts_verify`
-- `bigint2_precompile_guest_succinct_receipts_verify`
-- the deferred public examples and large internal fixtures listed above
+Every group this section once listed as deferred has since landed as a
+passing Chrome succinct-proof test
+(`native_zkvm_method_guests_succinct_receipts_verify`,
+`native_assumption_continuation_povw_and_guest_error_receipts_verify`,
+`bigint2_precompile_guest_succinct_receipts_verify`, the large public
+examples, and the large internal fixtures).
 
 `RunUnconstrained { unconstrained: true }` is excluded from active browser
 proving parity in this checkout because the native syscall table has `SYS_FORK`
@@ -309,16 +312,17 @@ registration disabled and the corresponding native proving test is ignored.
 The accelerator/precompile native CUDA baseline now passes end-to-end. The
 previous `multi_test/poseidon2_basic` CUDA failure was a byte-address versus
 word-address ABI mismatch in the Poseidon2 syscall path. Browser execution has
-proved and verified every accelerator/precompile fixture except
-`multi_test/rsa_compat` and `multi_test/keccak_union`, which remain
-performance-blocked under the current browser proof path.
+proved and verified every accelerator/precompile fixture, including
+`multi_test/rsa_compat` and `multi_test/keccak_union`, which were
+performance-blocked at this snapshot and completed after the SP6-era
+keccak work (see the Status line above).
 
 The latest focused `multi_test/poseidon2_basic` async browser run shows the
 immediate blocker more precisely: browser witness generation and accumulation
 are sub-second for both `rv32im` and recursion, and rv32im `eval_check` now
 uses the interpreted WebGPU path. Recursion `eval_check` also runs on WebGPU;
 with 1 GiB Chrome WebGPU buffer and storage-binding limits, the focused proof
-is down to 4.03 seconds. The next optimization targets are reducing initial
-witness/group uploads, expanding this path to larger examples and
+is down to 4.03 seconds. At that snapshot the next targets were reducing initial
+witness/group uploads, expanding the path to larger examples and
 Keccak-heavy fixtures, and replacing the Keccak circuit `eval_check` CPU
-fallback with circuit-specific WGSL or smaller semantic stages.
+fallback; the SP- and M-era campaigns subsequently executed that arc.

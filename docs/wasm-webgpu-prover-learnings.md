@@ -2,7 +2,7 @@
 
 > **Note:** `.recursive/...` evidence paths referenced in this document are preserved on the `wasm` archive branch; the presentation branch omits that process tree.
 
-Status: paused 2026-05-11; performance follow-up run `wasm-webgpu-prover-perf` resumed 2026-05-12. R1 smoke matrix refreshed (ratios 7-9× small, 15.7× KeccakUnion(1)) — see `docs/wasm-webgpu-cuda-comparison.md` and `.recursive/run/wasm-webgpu-prover-perf/evidence/perf/r1-baselines/`. SP2 generator seed landed. xgboost SP-CR resolved via D14+D15+D16 GPU-only fix (explicit `GPUBuffer.destroy()` via Rc-owned wrapper releases cumulative VRAM between lifts; xgboost verifies in 117.92 s on full GPU path / ~21× native CUDA). Governed by the Correctness-First Discipline below.
+Status: optimization campaign complete through M11 (2026-07) — browser xgboost proving at 14.7 s ≈ 2.6× native CUDA (see `docs/wasm-webgpu-cuda-comparison.md`). This document accumulates the run history in chronological order; dated status lines inside sections reflect their point in time. The SP-era (2026-05) is recorded in depth below; the M-era (2026-06/07) is summarized in the closing section.
 
 This document records what we built, how we validated it, what we learned, and
 where the implementation still differs from native CUDA/Metal proving. It is
@@ -811,19 +811,52 @@ Relevant documentation:
 - `docs/wasm-webgpu-cuda-comparison.md`
 - `docs/wasm-webgpu-prover-learnings.md`
 
-## Pause State
+## M-era summary and completion state (2026-06/07)
 
-The long-running goal is paused by user request. It should not be marked
-complete without a fresh completion audit against
-`docs/requirements/wasm-webgpu-prover.md`.
+After the SP-era ledger closed at ~102 s xgboost, the eval_check
+interpreter arc (late SP-era, from 2026-05-19) brought the wall to
+~60 s. The M-phases (2026-06/07) then attacked scheduling and
+submission overhead rather than per-kernel arithmetic, closing at
+14.7 s. One-line ledger (per-phase commits are in the `wasm` branch
+history):
 
-The strongest current statement is:
+- M0 — made Chrome/Dawn robustness settings the default and
+  re-validated the gate set on the 2026-06 toolchain.
+- M1 — parallelized `combos_divide` with a block-scan decomposition.
+- M2 — moved the eval_check interpreter to scalar banks (dynamically
+  indexed vec4 local arrays pay a large Tint tax at any size;
+  scalarizing the base/ext/mix banks took rv32im eval_check from
+  607 ms to 130 ms) and split the commit drain.
+- M3 — two-device scheduler: a dependency-graph pool over
+  heterogeneous work replaced homogeneous concurrency, which had
+  measured wall-flat.
+- M4/M5 — queue-physics fixes for the single-threaded wasm runtime
+  (`mapAsync` completion waits on the whole device queue; every
+  awaiting task must live in one `FuturesUnordered`) and the
+  atomics+bulk-memory shared-memory build with real rayon threads on
+  web workers.
+- M6 — pool-offloaded CPU work that runs concurrent with in-flight
+  readbacks (blocking rayon joins on the single wasm thread starve
+  `mapAsync` completion callbacks).
+- M7 — cross-phase overlap (recursion witgen offload, early lifts):
+  xgboost −5.6%, KeccakUnion −7.5%.
+- M8 — eliminated a mid-transcript CPU stage instead of relocating it
+  (elimination beat relocation; pool-offload there regressed).
+- M9 — keccak phase-head offload: −2.8%/−3.0% on the keccak fixtures.
+- M10 — characterized environment drift: the box is bimodal
+  (fast/slow, ~10% on KeccakUnion), so the measurement policy is
+  same-state A/B with a KeccakUnion(1) canary.
+- M11 — GPU witgen stepper arms 8/9 measured wall-neutral; the
+  stepper arc closed as a wall lever (the per-arm replace path stays
+  as landed).
 
-- The backend architecture is in place.
-- The async browser proof path can produce verifier-compatible succinct STARK
-  receipts.
-- Focused public, internal, accelerator, and Keccak-heavy proofs have passed.
-- The latest harness changes make async GPU-authoritative proving the default
-  for parity tests.
-- Exhaustive final parity validation and performance work remain for a future
-  resume.
+Close-out walls (2026-07-05, quiet machine, fast state): xgboost
+succinct 14.68 s median of 5, KeccakUnion(3) succinct 106.4 s,
+BusyLoop 2.17 s, KeccakUnion(1) canary 33.9 s.
+
+The browser proof path produces verifier-compatible succinct STARK
+receipts for every exercised shape; eval_check PolyExt parity holds on
+all four circuits; correctness gates run per commit (see
+`docs/wasm-webgpu-validation.md`). Remaining open performance threads
+are listed in the Performance Debt section of
+`docs/wasm-webgpu-prover.md`.
