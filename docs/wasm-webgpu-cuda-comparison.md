@@ -430,7 +430,7 @@ implementation replaces the single-buffer assumption.
 - WebGPU ZKP HAL and buffer diagnostics:
   `risc0/zkp/src/hal/webgpu/`
 - Browser circuit HALs:
-  `risc0/circuit/rv32im/src/prove/hal/webgpu.rs`,
+  `risc0/circuit/rv32im/src/prove/hal/webgpu/`,
   `risc0/circuit/keccak/src/prove/hal/webgpu.rs`,
   `risc0/circuit/recursion/src/prove/hal/webgpu.rs`
 - Native CUDA circuit HALs:
