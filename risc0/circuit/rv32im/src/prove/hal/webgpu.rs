@@ -51,24 +51,18 @@ use crate::{
     RV32IM_SEAL_VERSION,
 };
 
-// Hold the HAL handle so generate_witness
-// can dispatch the GPU exec_TopChunk0 kernel alongside the CPU
-// rust_steps reference. Probe-mode for now: GPU output is timed and
-// dropped; rust_steps remains the authority.
-//
-// `witgen_gpu_probe_enabled` is opt-in (default off) since the first
-// dispatch triggers a ~60 s Tint compile of the 1.08 MB pruned WGSL
-// module -- enabling it on a baseline xgboost run would add ~60 s wall
-// for a measured ~6 s savings ceiling. Tests set the flag explicitly;
-// the probe is the measurement infrastructure behind the pre-warm +
-// dispatch design.
-//
-// The first dispatch lazily fills `witgen_top_chunk0_kernel`; subsequent
-// segments reuse the cached pipeline + layout for free.
-/// Process-global flag that turns on the probe-mode GPU
-/// witgen dispatch. Tests flip this before `webgpu_prover()` is
-/// constructed; production runs leave it off. Atomic so it can be read
-/// from sync paths without RefCell borrow churn.
+// GPU witness generation sits behind two opt-in process-global
+// flags. Probe mode starts the background per-arm kernel prewarm and
+// logs compile/readiness metrics while rust_steps stays
+// authoritative. Replace mode additionally dispatches the ready arms
+// and short-circuits rust_steps for the covered cycles. The browser
+// prover's acceleration init enables both by default; kernel
+// compiles are multi-second Tint operations, so a run that never
+// dispatches them should leave the flags off.
+/// Process-global flag that turns on the background GPU witgen
+/// kernel prewarm (probe mode). The browser prover's acceleration
+/// init enables it together with replace mode. Atomic so it can be
+/// read from sync paths without RefCell borrow churn.
 pub static WITGEN_GPU_PROBE_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Public setter for the witgen GPU probe flag.
@@ -510,22 +504,13 @@ struct TopAccumArm5ProbeCompare {
 }
 
 thread_local! {
-    /// Session-local cache for the witgen kernel. Lives
-    /// across WebGpuCircuitHal constructions so the spawn_local'd
-    /// async prewarm task's result is reachable from every segment's
-    /// `dispatch_witgen_top_chunk0_probe` call. (ProverImpl's
-    /// segment_prover constructs a fresh WebGpuCircuitHal per
-    /// segment, so a struct field would defeat the cache.)
-    static WITGEN_TOP_CHUNK0_KERNEL: RefCell<Option<WebGpuKernel>> =
-        const { RefCell::new(None) };
-    /// chunk1 sibling kernel cache.
-    static WITGEN_TOP_CHUNK1_KERNEL: RefCell<Option<WebGpuKernel>> =
-        const { RefCell::new(None) };
     /// Per-arm kernel cache for TOP_CHUNK0_ARM_DELTAS.
     /// Keyed by arm label (the first element of each tuple in
     /// TOP_CHUNK0_ARM_DELTAS), one entry per major opcode arm.
-    /// Populated by the spawn_local prewarm task; consumed by
-    /// `dispatch_witgen_arms_probe`.
+    /// Populated by the spawn_local prewarm task; consumed by the
+    /// per-arm replace dispatch path. Thread-local (not a struct
+    /// field) because ProverImpl's segment_prover constructs a fresh
+    /// WebGpuCircuitHal per segment, which would defeat the cache.
     static WITGEN_ARM_KERNELS: RefCell<std::collections::BTreeMap<&'static str, WebGpuKernel>> =
         RefCell::new(std::collections::BTreeMap::new());
     /// Replacement-arm chunk0 compiles that have been started via
@@ -576,10 +561,6 @@ thread_local! {
     /// Cached shadow_init pipeline.
     /// Compiled once per session and reused across all segments.
     static SHADOW_INIT_KERNEL: RefCell<Option<WebGpuKernel>> =
-        const { RefCell::new(None) };
-    /// TopAccum arm-5 real-buffer probe pipeline. Compiled lazily
-    /// on first opt-in proof and reused for later segments.
-    static TOPACCUM_ARM5_PROBE_KERNEL: RefCell<Option<WebGpuKernel>> =
         const { RefCell::new(None) };
     /// TopAccum arm-5 split-inverse scratch probe pipelines. The large
     /// arm5 module stays free of the real ext_inv body; it captures inverse
@@ -3252,42 +3233,6 @@ pub(crate) struct WebGpuCircuitHal {
     witgen_replace_arm_mask: Cell<u16>,
 }
 
-/// Concatenation of the vendored exec_TopChunk0 pruned module and the thin
-/// `@compute @workgroup_size(64) fn exec_top_chunk0_main` entry wrapper.
-/// naga-validated by `compute_entry_concat_validates_with_naga`
-/// (cargo-test side) and Tint-validated by
-/// `exec_top_chunk0_compiles_on_chrome` (wasm-bindgen side).
-const WITGEN_TOP_CHUNK0_WGSL: &str = concat!(
-    include_str!("../../zirgen/exec_top_chunk0.wgsl"),
-    "\n",
-    "@compute @workgroup_size(64)\n",
-    "fn exec_top_chunk0_main(@builtin(global_invocation_id) gid: vec3<u32>) {\n",
-    "  cycle = gid.x;\n",
-    "  if (cycle >= params.data_rows) {\n",
-    "    return;\n",
-    "  }\n",
-    "  let bound = BoundLayout_TopLayout(kLayout_Top, buf_data);\n",
-    "  let _result = exec_TopChunk0(bound, buf_global);\n",
-    "}\n",
-);
-
-/// chunk1 sibling of [`WITGEN_TOP_CHUNK0_WGSL`]. Same
-/// shape but uses the chunk1-everywhere pruned module + an
-/// `exec_top_chunk1_main` entry.
-const WITGEN_TOP_CHUNK1_WGSL: &str = concat!(
-    include_str!("../../zirgen/exec_top_chunk1.wgsl"),
-    "\n",
-    "@compute @workgroup_size(64)\n",
-    "fn exec_top_chunk1_main(@builtin(global_invocation_id) gid: vec3<u32>) {\n",
-    "  cycle = gid.x;\n",
-    "  if (cycle >= params.data_rows) {\n",
-    "    return;\n",
-    "  }\n",
-    "  let bound = BoundLayout_TopLayout(kLayout_Top, buf_data);\n",
-    "  let _result = exec_TopChunk1(bound, buf_global);\n",
-    "}\n",
-);
-
 const ACCUM_MACHINE_COLUMN_CARRY_WGSL: &str = r#"
 const P: u32 = 2013265921u;
 
@@ -3967,7 +3912,6 @@ impl WebGpuCircuitHal {
         }) {
             return; // already spawned this session
         }
-        let replace_prewarm_requested = WITGEN_GPU_REPLACE_ENABLED.load(Ordering::SeqCst);
         let replacement_prewarm = match self.start_witgen_replacement_prewarm() {
             Ok(prewarm) => prewarm,
             Err(err) => {
@@ -3979,84 +3923,13 @@ impl WebGpuCircuitHal {
         };
         let hal = self.hal.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            // Compile both top-mux chunks. Chrome
-            // pipelines createComputePipelineAsync internally so the
-            // two compiles can overlap with each other and with
-            // session execution. Measured wall on xgboost: chunk0
-            // compile ~2.65 s, chunk1 ~similar.
+            // Compile the per-arm replacement kernels in the
+            // background. Chrome pipelines createComputePipelineAsync
+            // internally, so the compiles overlap with each other and
+            // with session execution.
             let _t = WebGpuStageTimer::new("witgen_prewarm_async");
             Self::finish_witgen_replacement_prewarm(hal.clone(), replacement_prewarm).await;
-            if replace_prewarm_requested {
-                return;
-            }
-            let layout = match hal.create_bind_group_layout(
-                "witgen_probe_layout",
-                &[
-                    WebGpuBindingLayout::storage(0, 0),
-                    WebGpuBindingLayout::storage(1, 0),
-                    WebGpuBindingLayout::storage(2, 0),
-                    WebGpuBindingLayout::storage(3, 0),
-                    WebGpuBindingLayout::uniform(4, 32),
-                ],
-            ) {
-                Ok(layout) => layout,
-                Err(err) => {
-                    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "witgen_prewarm_async layout_FAILED err={err:?}"
-                    ));
-                    return;
-                }
-            };
-            // Kick off both compiles before awaiting either; the
-            // browser-side promises run in parallel.
-            let layouts0 = [layout.clone()];
-            let layouts1 = [layout.clone()];
-            let chunk0_fut = hal.create_compute_kernel_async(
-                "witgen_probe_kernel_chunk0",
-                WITGEN_TOP_CHUNK0_WGSL,
-                "exec_top_chunk0_main",
-                &layouts0,
-            );
-            let chunk1_fut = hal.create_compute_kernel_async(
-                "witgen_probe_kernel_chunk1",
-                WITGEN_TOP_CHUNK1_WGSL,
-                "exec_top_chunk1_main",
-                &layouts1,
-            );
-            match chunk0_fut.await {
-                Ok(kernel) => {
-                    WITGEN_TOP_CHUNK0_KERNEL.with(|cell| *cell.borrow_mut() = Some(kernel));
-                    risc0_zkp::hal::webgpu::log_webgpu_metric("witgen_prewarm_async chunk0 DONE");
-                }
-                Err(err) => {
-                    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "witgen_prewarm_async chunk0_FAILED err={err:?}"
-                    ));
-                }
-            }
-            match chunk1_fut.await {
-                Ok(kernel) => {
-                    WITGEN_TOP_CHUNK1_KERNEL.with(|cell| *cell.borrow_mut() = Some(kernel));
-                    risc0_zkp::hal::webgpu::log_webgpu_metric("witgen_prewarm_async chunk1 DONE");
-                }
-                Err(err) => {
-                    risc0_zkp::hal::webgpu::log_webgpu_metric(&format!(
-                        "witgen_prewarm_async chunk1_FAILED err={err:?}"
-                    ));
-                }
-            }
         });
-    }
-
-    /// Returns the witgen kernel if the async prewarm task
-    /// finished. None means "not ready yet" -- caller skips the GPU
-    /// dispatch and relies on rust_steps.
-    fn lookup_witgen_top_chunk0_kernel(&self) -> Option<WebGpuKernel> {
-        WITGEN_TOP_CHUNK0_KERNEL.with(|cell| cell.borrow().clone())
-    }
-
-    fn lookup_witgen_top_chunk1_kernel(&self) -> Option<WebGpuKernel> {
-        WITGEN_TOP_CHUNK1_KERNEL.with(|cell| cell.borrow().clone())
     }
 
     fn ready_witgen_replace_mask(&self, preflight: &PreflightTrace) -> u16 {
@@ -5215,134 +5088,6 @@ impl WebGpuCircuitHal {
         drop(txn_start_buf);
         drop(txns_buf);
         Ok(dispatched_arms)
-    }
-
-    /// Returns the number of TopChunk{0,1} kernels actually dispatched
-    /// (0 = neither ready, 1 = only one ready, 2 = both ready). step_witgen
-    /// gates the replace short-circuit on this returning 2 -- only then do
-    /// we trust that GPU has written cells for both first-cycle (chunk0)
-    /// and non-first-cycle (chunk1) arm dispatches.
-    fn dispatch_witgen_top_chunk0_probe(
-        &self,
-        data: &MetaBuffer<WebGpuHal>,
-        global: &MetaBuffer<WebGpuHal>,
-        total_cycles: u32,
-    ) -> Result<usize> {
-        // Dispatch chunk0 and chunk1 (if available). Each
-        // kernel internally filters by major opcode arm via its mux
-        // dispatch; cycles whose opcode is outside the kernel's arms
-        // execute the trailing `unreachable` branch (effectively a
-        // no-op since the kernel writes nothing in that case).
-        // rust_steps still runs after and overwrites all cells so
-        // output remains authoritative.
-        let chunk0 = self.lookup_witgen_top_chunk0_kernel();
-        let chunk1 = self.lookup_witgen_top_chunk1_kernel();
-        let kernels: Vec<WebGpuKernel> = [chunk0, chunk1].into_iter().flatten().collect();
-        if kernels.is_empty() {
-            risc0_zkp::hal::webgpu::log_webgpu_metric("witgen_probe_probe SKIP kernels_not_ready");
-            return Ok(0);
-        }
-        let chunks_ready = kernels.len();
-        let _t = WebGpuStageTimer::new(format!(
-            "witgen_probe_probe cycles={} chunks={}",
-            total_cycles,
-            kernels.len(),
-        ));
-        let layout = self.hal.create_bind_group_layout(
-            "witgen_probe_layout",
-            &[
-                WebGpuBindingLayout::storage(0, 0),
-                WebGpuBindingLayout::storage(1, 0),
-                WebGpuBindingLayout::storage(2, 0),
-                WebGpuBindingLayout::storage(3, 0),
-                WebGpuBindingLayout::uniform(4, 32),
-            ],
-        )?;
-
-        // The kernel's WGSL declares accum/mix/params bindings but the
-        // witgen path only reads data + global; allocate small placeholders.
-        let placeholder_bytes: u64 = 256;
-        let accum_buf = self
-            .hal
-            .create_storage_buffer("witgen_probe_accum_placeholder", placeholder_bytes)?;
-        let mix_buf = self
-            .hal
-            .create_storage_buffer("witgen_probe_mix_placeholder", placeholder_bytes)?;
-        let params: [u32; 8] = [total_cycles, 1, total_cycles, 1, 0, 0, 0, 0];
-        let params_bytes: &[u8] = bytemuck::cast_slice(&params);
-        let params_buf = self
-            .hal
-            .create_uniform_buffer("witgen_probe_params_placeholder", params_bytes)?;
-
-        let data_gpu = data
-            .buf
-            .raw_buffer()
-            .ok_or_else(|| anyhow::anyhow!("witgen probe: data buffer missing GPU storage"))?;
-        let global_gpu = global
-            .buf
-            .raw_buffer()
-            .ok_or_else(|| anyhow::anyhow!("witgen probe: global buffer missing GPU storage"))?;
-        let bind_group = self.hal.create_bind_group(
-            "witgen_probe_bg",
-            &layout,
-            &[
-                WebGpuBufferBinding::new(0, data_gpu),
-                WebGpuBufferBinding::new(1, global_gpu),
-                WebGpuBufferBinding::new(2, &accum_buf),
-                WebGpuBufferBinding::new(3, &mix_buf),
-                WebGpuBufferBinding::new(4, &params_buf),
-            ],
-        )?;
-
-        let workgroups = total_cycles.div_ceil(64);
-        for kernel in &kernels {
-            self.hal
-                .dispatch_compute_1d(kernel, &bind_group, workgroups);
-        }
-        Ok(chunks_ready)
-    }
-
-    fn lookup_topaccum_arm5_probe_kernel(&self) -> Result<WebGpuKernel> {
-        if let Some(kernel) = TOPACCUM_ARM5_PROBE_KERNEL.with(|cell| cell.borrow().clone()) {
-            return Ok(kernel);
-        }
-        use crate::prove::wgsl_pruner::{
-            TOPACCUM_ARM5_CYCLE_LIST_ENTRY, TOPACCUM_ARM5_WGSL, WITGEN_BASELINE_WGSL,
-        };
-        let layout = self.hal.create_bind_group_layout(
-            "rv32im_accum_topaccum_arm5_probe_layout",
-            &[
-                WebGpuBindingLayout::storage(0, 0),
-                WebGpuBindingLayout::storage(1, 0),
-                WebGpuBindingLayout::storage(2, 0),
-                WebGpuBindingLayout::storage(3, 0),
-                WebGpuBindingLayout::uniform(4, 32),
-                WebGpuBindingLayout::read_only_storage(5, 0),
-            ],
-        )?;
-        let mut module = String::with_capacity(
-            WITGEN_BASELINE_WGSL.len()
-                + TOPACCUM_ARM5_WGSL.len()
-                + TOPACCUM_ARM5_CYCLE_LIST_ENTRY.len()
-                + 2,
-        );
-        module.push_str(WITGEN_BASELINE_WGSL);
-        if !module.ends_with('\n') {
-            module.push('\n');
-        }
-        module.push_str(TOPACCUM_ARM5_WGSL);
-        if !module.ends_with('\n') {
-            module.push('\n');
-        }
-        module.push_str(TOPACCUM_ARM5_CYCLE_LIST_ENTRY);
-        let kernel = self.hal.create_compute_kernel(
-            "rv32im_accum_topaccum_arm5_probe",
-            &module,
-            "topaccum_arm5_cycle_list_main",
-            &[layout],
-        )?;
-        TOPACCUM_ARM5_PROBE_KERNEL.with(|cell| *cell.borrow_mut() = Some(kernel.clone()));
-        Ok(kernel)
     }
 
     fn lookup_topaccum_arm5_split_inv_probe_kernels(
